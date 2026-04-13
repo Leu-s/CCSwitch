@@ -11,9 +11,8 @@ from ..schemas import AccountUpdate, AccountOut, AccountWithUsage, SwitchLogOut,
 from ..schemas import LoginSessionOut, LoginVerifyResult
 from ..config import settings
 from ..services import account_service as ac
-from ..services.account_service import build_usage
 from ..services import switcher as sw
-from ..background import usage_cache, token_info_cache, _cache_lock, cache, forget_account
+from ..background import usage_cache, token_info_cache, cache
 from ..ws import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -27,7 +26,7 @@ router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 @router.get("", response_model=list[AccountWithUsage])
 async def list_accounts(db: AsyncSession = Depends(get_db)):
     accounts = await ac.get_all_accounts(db)
-    active_email = ac.get_active_email()
+    active_email = await asyncio.to_thread(ac.get_active_email)
 
     out = []
     for acc in accounts:
@@ -38,7 +37,7 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
         # just added and /api/accounts is called before the next poll cycle).
         token_info = token_info_cache.get(acc.email)
         if token_info is None:
-            token_info = ac.get_token_info(acc.config_dir)
+            token_info = await asyncio.to_thread(ac.get_token_info, acc.config_dir)
         usage = UsageData.from_raw(usage_raw, token_info)
 
         out.append(AccountWithUsage(
@@ -66,7 +65,7 @@ async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
     """
     Verify that a login session completed and save the account to the database.
     """
-    result = ac.verify_login_session(session_id)
+    result = await asyncio.to_thread(ac.verify_login_session, session_id)
     if not result["success"]:
         return LoginVerifyResult(success=False, error=result["error"])
 
@@ -75,7 +74,7 @@ async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
 
     saved = await ac.save_verified_account(email, config_dir, settings.default_account_threshold_pct, db)
     if saved is None:
-        ac.cleanup_login_session(session_id)
+        await asyncio.to_thread(ac.cleanup_login_session, session_id)
         return LoginVerifyResult(success=True, email=email, already_exists=True)
 
     return LoginVerifyResult(success=True, email=email)
@@ -84,7 +83,7 @@ async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
 @router.delete("/cancel-login")
 async def cancel_login(session_id: str):
     """Clean up a login session that was abandoned."""
-    ac.cleanup_login_session(session_id)
+    await asyncio.to_thread(ac.cleanup_login_session, session_id)
     return {"ok": True}
 
 
@@ -139,7 +138,7 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     # If this is the currently active account, switch to another one first.
     # If there is no replacement, clear the active pointer so new shells do
     # not export CLAUDE_CONFIG_DIR to a directory that no longer exists.
-    if account.email == ac.get_active_email():
+    if account.email == await asyncio.to_thread(ac.get_active_email):
         next_result = await db.execute(
             select(Account)
             .where((Account.id != account_id) & (Account.enabled == True))
@@ -149,7 +148,7 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
         if next_acc:
             await sw.perform_switch(next_acc, "manual", db, ws_manager)
         else:
-            ac.clear_active_config_dir()
+            await asyncio.to_thread(ac.clear_active_config_dir)
 
     # Clear the default_account_id setting if this was the default
     setting_result = await db.execute(

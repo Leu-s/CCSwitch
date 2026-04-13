@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import background as bg
 from .auth import TokenAuthMiddleware
@@ -108,6 +109,11 @@ app.include_router(service.router)
 
 # Serve frontend
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
+
+# Mount static assets (CSS, JS) under /src so index.html can reference them.
+_src_path = os.path.join(frontend_path, "src")
+if os.path.isdir(_src_path):
+    app.mount("/src", StaticFiles(directory=_src_path), name="frontend_src")
 
 
 @app.get("/")

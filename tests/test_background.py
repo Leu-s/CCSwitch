@@ -397,10 +397,12 @@ async def test_refresh_token_401_marks_permanently_expired():
     # Verify refresh was attempted with the stored refresh token
     mock_refresh.assert_called_once_with("old-refresh-token")
 
-    # Verify token was marked as permanently expired (expires_at=1)
+    # Verify token was marked as permanently expired (expires_at=1).
+    # Accept either positional (arg[2]) or keyword form — background.py wraps
+    # the call in asyncio.to_thread which passes args positionally.
     mock_save.assert_called_once()
-    call_args = mock_save.call_args
-    # Called as: ac.save_refreshed_token(config_dir, token, expires_at=1)
-    assert call_args[1].get("expires_at") == 1, (
-        f"save_refreshed_token should be called with expires_at=1, got: {call_args}"
+    args, kwargs = mock_save.call_args
+    expires_at = kwargs.get("expires_at", args[2] if len(args) >= 3 else None)
+    assert expires_at == 1, (
+        f"save_refreshed_token should be called with expires_at=1, got: {mock_save.call_args}"
     )

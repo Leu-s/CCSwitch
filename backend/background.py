@@ -64,6 +64,27 @@ class _UsageCache:
             self._usage.pop(email, None)
             self._token_info.pop(email, None)
 
+    async def invalidate_token_info(self, email: str) -> None:
+        """Remove only the token-info entry, preserving the last known usage."""
+        async with self._lock:
+            self._token_info.pop(email, None)
+
+    async def set_usage_error(
+        self, email: str, err_str: str, is_rate_limited: bool
+    ) -> tuple[dict, str]:
+        """Atomically update the cache for a failed probe.
+        Returns (new_entry, final_err_str) — err_str may become 'Rate limited'."""
+        async with self._lock:
+            prev = self._usage.get(email, {})
+            if is_rate_limited and prev and "error" not in prev:
+                new_entry = {**prev, "rate_limited": True}
+                final_err = "Rate limited"
+            else:
+                new_entry = {"error": err_str}
+                final_err = err_str
+            self._usage[email] = new_entry
+        return new_entry, final_err
+
 
 cache = _UsageCache()
 
@@ -135,7 +156,7 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
                 )
                 new_stale_reason = "Refresh token revoked — re-login required"
                 # Mark token as permanently expired so we don't retry on every poll.
-                await asyncio.to_thread(lambda: ac.save_refreshed_token(account.config_dir, token, expires_at=1))
+                await asyncio.to_thread(ac.save_refreshed_token, account.config_dir, token, expires_at=1)
             else:
                 logger.warning("Token refresh HTTP error for %s: %s", account.email, refresh_http_err)
         except Exception as refresh_err:
@@ -176,17 +197,8 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
                 pass
         logger.warning("Usage fetch failed for %s: %s", account.email, err_str)
 
-        # Determine new cache entry and err_str inside a single lock
-        # to avoid stale-read races between check and write.
         is_rate_limited = "429" in str(e) or "rate_limit" in str(e).lower()
-        async with cache._lock:
-            prev = cache._usage.get(account.email, {})
-            if is_rate_limited and prev and "error" not in prev:
-                new_entry = {**prev, "rate_limited": True}
-                err_str = "Rate limited"
-            else:
-                new_entry = {"error": err_str}
-            cache._usage[account.email] = new_entry
+        new_entry, err_str = await cache.set_usage_error(account.email, err_str, is_rate_limited)
 
         token_info = token_info_cache.get(account.email, {})
         try:
@@ -211,7 +223,7 @@ async def _maybe_auto_switch(db, ws: WebSocketManager) -> None:
     if not auto_enabled:
         return
 
-    current_email = ac.get_active_email()
+    current_email = await asyncio.to_thread(ac.get_active_email)
     if not current_email:
         return
 
@@ -220,8 +232,7 @@ async def _maybe_auto_switch(db, ws: WebSocketManager) -> None:
     if not current_account:
         return
 
-    async with cache._lock:
-        current_usage = cache._usage.get(current_email, {})
+    current_usage = cache.get_usage(current_email)
     five_hour_pct = (current_usage.get("five_hour") or {}).get("utilization", 0)
     threshold = current_account.threshold_pct
 
@@ -272,8 +283,7 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
             # staleness — we only set stale for 401-class auth failures.
             if new_stale_reason != account.stale_reason:
                 account.stale_reason = new_stale_reason
-                async with _cache_lock:
-                    token_info_cache.pop(account.email, None)
+                await cache.invalidate_token_info(account.email)
                 stale_changed = True
                 if new_stale_reason:
                     logger.warning("Marking %s stale: %s", account.email, new_stale_reason)
