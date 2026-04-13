@@ -284,10 +284,10 @@
   }
   .account-card.dragging { opacity: 0.45; transform: rotate(1.5deg); }
   .account-card.drop-above {
-    box-shadow: -4px 0 0 0 var(--accent);
+    box-shadow: 0 -4px 0 0 var(--accent);
   }
   .account-card.drop-below {
-    box-shadow: 4px 0 0 0 var(--accent);
+    box-shadow: 0 4px 0 0 var(--accent);
   }
 
   .account-card.active {
@@ -1381,7 +1381,7 @@ function attachDragHandlers(card) {
     if (!dragSrc || dragSrc === card) return;
     e.preventDefault();
     const rect = card.getBoundingClientRect();
-    const isAbove = e.clientX < rect.left + rect.width / 2;
+    const isAbove = e.clientY < rect.top + rect.height / 2;
     qsa(".account-card").forEach(c => c.classList.remove("drop-above", "drop-below"));
     card.classList.add(isAbove ? "drop-above" : "drop-below");
   });
@@ -1394,7 +1394,7 @@ function attachDragHandlers(card) {
     e.preventDefault();
     if (!dragSrc || dragSrc === card) return;
     const rect = card.getBoundingClientRect();
-    const dropBefore = e.clientX < rect.left + rect.width / 2;
+    const dropBefore = e.clientY < rect.top + rect.height / 2;
     const grid = qs("#accounts-grid");
     if (dropBefore) grid.insertBefore(dragSrc, card);
     else grid.insertBefore(dragSrc, card.nextSibling);

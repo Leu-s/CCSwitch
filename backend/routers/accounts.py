@@ -52,6 +52,27 @@ async def create_account(payload: AccountCreate, db: AsyncSession = Depends(get_
     await db.refresh(account)
     return account
 
+@router.post("/scan", response_model=list[ScanResult])
+async def scan_accounts(db: AsyncSession = Depends(get_db)):
+    suffixes = kc.scan_keychain()
+    existing_result = await db.execute(select(Account.keychain_suffix))
+    existing_suffixes = {row[0] for row in existing_result.all()}
+    results = []
+    for suffix in suffixes:
+        results.append(ScanResult(
+            suffix=suffix,
+            email=None,
+            already_imported=suffix in existing_suffixes
+        ))
+    return results
+
+@router.get("/log", response_model=list[SwitchLogOut])
+async def switch_log(limit: int = 20, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(SwitchLog).order_by(SwitchLog.triggered_at.desc()).limit(limit)
+    )
+    return result.scalars().all()
+
 @router.patch("/{account_id}", response_model=AccountOut)
 async def update_account(account_id: int, payload: AccountUpdate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Account).where(Account.id == account_id))
@@ -81,24 +102,3 @@ async def manual_switch(account_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Account not found")
     await sw.perform_switch(account, "manual", db, ws_manager)
     return {"ok": True}
-
-@router.post("/scan", response_model=list[ScanResult])
-async def scan_accounts(db: AsyncSession = Depends(get_db)):
-    suffixes = kc.scan_keychain()
-    existing_result = await db.execute(select(Account.keychain_suffix))
-    existing_suffixes = {row[0] for row in existing_result.all()}
-    results = []
-    for suffix in suffixes:
-        results.append(ScanResult(
-            suffix=suffix,
-            email=None,
-            already_imported=suffix in existing_suffixes
-        ))
-    return results
-
-@router.get("/log", response_model=list[SwitchLogOut])
-async def switch_log(limit: int = 20, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(SwitchLog).order_by(SwitchLog.triggered_at.desc()).limit(limit)
-    )
-    return result.scalars().all()

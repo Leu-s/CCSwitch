@@ -41,7 +41,8 @@ async def evaluate_with_haiku(capture: str, model: str) -> dict:
         f"Terminal output:\n{capture}"
     )
     result = subprocess.run(
-        ["claude", "-p", "--model", model, prompt],
+        ["claude", "-p", "--model", model],
+        input=prompt,
         capture_output=True, text=True, timeout=30
     )
     output = result.stdout.strip()

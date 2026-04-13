@@ -15,7 +15,8 @@ def read_credentials(suffix: str) -> dict:
 
 def read_active_credentials() -> dict:
     result = subprocess.run(
-        ["security", "find-generic-password", "-s", ACTIVE_SERVICE, "-w"],
+        ["security", "find-generic-password", "-s", ACTIVE_SERVICE,
+         "-a", os.environ.get("USER", "user"), "-w"],
         capture_output=True, text=True, check=True
     )
     return json.loads(result.stdout.strip())

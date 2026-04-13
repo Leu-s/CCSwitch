@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 class AccountCreate(BaseModel):
     email: str
@@ -59,14 +59,15 @@ class SettingUpdate(BaseModel):
 
 class UsageData(BaseModel):
     five_hour_pct: Optional[float] = None
-    five_hour_resets_at: Optional[int] = None
+    five_hour_resets_at: Optional[Any] = None
     seven_day_pct: Optional[float] = None
-    seven_day_resets_at: Optional[int] = None
+    seven_day_resets_at: Optional[Any] = None
     error: Optional[str] = None
 
 class AccountWithUsage(AccountOut):
     usage: Optional[UsageData] = None
     is_active: bool = False
+    model_config = {"from_attributes": True}
 
 class ScanResult(BaseModel):
     suffix: str

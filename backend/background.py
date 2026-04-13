@@ -1,5 +1,8 @@
 import json
 import logging
+import time
+import re
+import asyncio
 from sqlalchemy import select
 from .database import AsyncSessionLocal
 from .models import Account, Setting, TmuxMonitor
@@ -18,11 +21,17 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
         # Load settings
         auto_row = await db.execute(select(Setting).where(Setting.key == "auto_switch_enabled"))
         auto_setting = auto_row.scalars().first()
-        auto_enabled = json.loads(auto_setting.value) if auto_setting else True
+        try:
+            auto_enabled = json.loads(auto_setting.value) if auto_setting else True
+        except (json.JSONDecodeError, TypeError):
+            auto_enabled = True
 
         threshold_row = await db.execute(select(Setting).where(Setting.key == "switch_threshold_percent"))
         threshold_setting = threshold_row.scalars().first()
-        threshold = json.loads(threshold_setting.value) if threshold_setting else 90
+        try:
+            threshold = json.loads(threshold_setting.value) if threshold_setting else 90
+        except (json.JSONDecodeError, TypeError):
+            threshold = 90
 
         # Fetch all accounts
         accounts_result = await db.execute(select(Account))
@@ -36,8 +45,7 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                 token = oauth.get("accessToken", "")
 
                 # Try token refresh if expired
-                import time
-                expires_at = oauth.get("expiresAt", 0)
+                expires_at = oauth.get("expiresAt") or 0
                 if expires_at and expires_at < time.time() * 1000:
                     try:
                         refreshed = await anthropic_api.refresh_access_token(oauth.get("refreshToken", ""))
@@ -89,8 +97,6 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                 await ws.broadcast({"type": "error", "message": "Rate limit reached — no eligible accounts to switch to"})
 
 async def notify_tmux_monitors(monitors, ws: WebSocketManager, model: str) -> None:
-    import re
-    import asyncio
     all_panes = tmux_service.list_panes()
     for monitor in monitors:
         if monitor.pattern_type == "manual":

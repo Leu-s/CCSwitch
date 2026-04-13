@@ -1,6 +1,6 @@
 from sqlalchemy import Integer, String, Boolean, DateTime, ForeignKey, Enum, Text
 from sqlalchemy.orm import mapped_column, Mapped, relationship
-from datetime import datetime
+from datetime import datetime, timezone
 from .database import Base
 import enum
 
@@ -23,8 +23,8 @@ class Account(Base):
     display_name: Mapped[str] = mapped_column(String(100), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     priority: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    switch_logs_to = relationship("SwitchLog", foreign_keys="SwitchLog.to_account_id", back_populates="to_account")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    switch_logs_to = relationship("SwitchLog", foreign_keys="[SwitchLog.to_account_id]", back_populates="to_account")
 
 class TmuxMonitor(Base):
     __tablename__ = "tmux_monitors"
@@ -40,7 +40,7 @@ class SwitchLog(Base):
     from_account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id"), nullable=True)
     to_account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id"), nullable=False)
     reason: Mapped[SwitchReason] = mapped_column(Enum(SwitchReason), nullable=False)
-    triggered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    triggered_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     to_account = relationship("Account", foreign_keys=[to_account_id], back_populates="switch_logs_to")
 
 class Setting(Base):

@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from datetime import datetime
-from ..models import Account, SwitchLog
+from datetime import datetime, timezone
+from ..models import Account, SwitchLog, SwitchReason
 from ..ws import WebSocketManager
 from ..config import settings
 from . import keychain as kc
@@ -49,8 +49,8 @@ async def perform_switch(
     log = SwitchLog(
         from_account_id=from_acc.id if from_acc else None,
         to_account_id=target.id,
-        reason=reason,
-        triggered_at=datetime.utcnow()
+        reason=SwitchReason(reason),
+        triggered_at=datetime.now(timezone.utc)
     )
     db.add(log)
     await db.commit()
