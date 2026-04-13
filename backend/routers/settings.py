@@ -9,7 +9,7 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 DEFAULTS = {
     "auto_switch_enabled": "true",
-    "usage_poll_interval_seconds": "60",
+    "usage_poll_interval_seconds": "300",
     # service_enabled / default_account_id / original_credentials_backup
     # are managed by the /api/service router — not initialised here.
 }

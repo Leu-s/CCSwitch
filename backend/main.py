@@ -6,7 +6,10 @@ from datetime import datetime
 import logging
 import os
 
-from .database import init_db
+from sqlalchemy import select
+
+from .database import init_db, AsyncSessionLocal
+from .models import Setting
 from .ws import ws_manager
 from .background import poll_usage_and_switch
 from .routers import accounts, settings, tmux, service
@@ -15,17 +18,45 @@ from .config import settings as cfg
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+_MIN_POLL_INTERVAL = 120   # never faster than 2 min — Anthropic API rate-limits
+_DEFAULT_POLL_INTERVAL = 300  # 5 minutes default
+
 scheduler = AsyncIOScheduler()
+
+
+async def _get_poll_interval() -> int:
+    """Read usage_poll_interval_seconds from DB, clamped to a safe minimum."""
+    try:
+        async with AsyncSessionLocal() as db:
+            row = await db.execute(
+                select(Setting).where(Setting.key == "usage_poll_interval_seconds")
+            )
+            s = row.scalars().first()
+            if s:
+                val = int(s.value)
+                if val < _MIN_POLL_INTERVAL:
+                    logger.warning(
+                        "usage_poll_interval_seconds=%d is below minimum %d; using %d",
+                        val, _MIN_POLL_INTERVAL, _MIN_POLL_INTERVAL,
+                    )
+                    return _MIN_POLL_INTERVAL
+                return val
+    except Exception as e:
+        logger.warning("Could not read poll interval from DB: %s", e)
+    return _DEFAULT_POLL_INTERVAL
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
 
+    poll_interval = await _get_poll_interval()
+    logger.info("Usage poll interval: %d seconds", poll_interval)
+
     scheduler.add_job(
         poll_usage_and_switch,
         "interval",
-        seconds=60,
+        seconds=poll_interval,
         args=[ws_manager],
         id="usage_poll",
         replace_existing=True,

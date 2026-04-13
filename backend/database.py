@@ -42,3 +42,12 @@ async def init_db() -> None:
         from .models import Base as ModelBase  # noqa: F401
         await conn.run_sync(ModelBase.metadata.create_all)
         logger.info("Database tables ready")
+
+        # Migrate: bump usage_poll_interval_seconds from the old 60-second default
+        # to 300, because the Anthropic usage API rate-limits at that frequency.
+        await conn.execute(
+            text(
+                "UPDATE settings SET value = '300' "
+                "WHERE key = 'usage_poll_interval_seconds' AND CAST(value AS INTEGER) < 120"
+            )
+        )
