@@ -40,8 +40,11 @@ A local dashboard that monitors usage across multiple Claude.ai subscription acc
 
 - **Live usage monitoring** — polls `/v1/messages` rate-limit headers every 15 s while the dashboard is open, every 5 min otherwise
 - **Auto-switch** — when the active account's five-hour utilization reaches a configurable threshold (default 95 %), the next enabled account is activated automatically
-- **Keychain-safe credential switching** — copies credential files into `~/.claude/`, rewrites both the hashed per-config-dir and legacy Keychain entries, and updates `~/.claude-multi/active`
-- **Shell integration** — a one-liner in `.zshrc`/`.bashrc` exports `CLAUDE_CONFIG_DIR` for every new terminal; no restart needed
+- **Opt-in credential targets** — the dashboard auto-discovers every `.claude.json` location on the machine and lets you tick which ones the switcher should mirror into. Nothing outside the isolated account dirs is touched unless you explicitly opt in.
+- **Two switch modes per target**:
+  - *Identity-only mirror* — the default for any user-enabled target: only `oauthAccount` and `userID` are mirrored, no credentials leave the account dir
+  - *System default* (`~/.claude.json` or `~/.claude/.claude.json`) — additionally writes the legacy `Claude Code-credentials` Keychain entry and copies `.credentials.json` into `~/.claude/`, so a fresh `claude` invocation immediately uses the new account
+- **Shell integration** — a one-liner in `.zshrc`/`.bashrc` exports `CLAUDE_CONFIG_DIR` from `~/.claude-multi/active`, so every new terminal picks up the active account without a restart
 - **Real-time dashboard** — vanilla-JS single-page app; account cards, drag-to-reorder priority, per-account threshold slider, switch log; no build step required
 - **tmux monitors** — watch specific panes, auto-continue paused `claude` sessions after a switch
 - **CLI** (`cc-acc`) — list/switch/enable/disable accounts, tail logs, manage the LaunchAgent, set up shell integration
@@ -71,10 +74,10 @@ cd claude-code-multi-account
 uv sync
 
 # 3. Start the dev server
-uv run uvicorn backend.main:app --host 127.0.0.1 --port 8765 --reload
+uv run uvicorn backend.main:app --host 127.0.0.1 --port 41924 --reload
 
 # 4. Open the dashboard
-open http://localhost:8765
+open http://localhost:41924
 ```
 
 The SQLite database and schema are created automatically on first start — no manual setup required.
@@ -123,7 +126,8 @@ All settings use the `CLAUDE_MULTI_` environment variable prefix. Copy `.env.exa
 
 | Variable | Default | Description |
 |---|---|---|
-| `CLAUDE_MULTI_SERVER_PORT` | `8765` | HTTP server port |
+| `CLAUDE_MULTI_SERVER_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` to listen on all interfaces) |
+| `CLAUDE_MULTI_SERVER_PORT` | `41924` | HTTP server port |
 | `CLAUDE_MULTI_DATABASE_URL` | `sqlite+aiosqlite:///./claude_multi_account.db` | SQLite connection string (relative to working dir) |
 | `CLAUDE_MULTI_ACTIVE_CLAUDE_DIR` | `~/.claude` | System-wide Claude Code config dir |
 | `CLAUDE_MULTI_ACCOUNTS_BASE_DIR` | `~/.claude-multi-accounts` | Base dir for isolated per-account config dirs |
@@ -144,7 +148,7 @@ No variable is mandatory — all have sensible defaults. Set `CLAUDE_MULTI_API_T
 ### Development (hot reload)
 
 ```bash
-uv run uvicorn backend.main:app --host 127.0.0.1 --port 8765 --reload
+uv run uvicorn backend.main:app --host 127.0.0.1 --port 41924 --reload
 ```
 
 ### Production (via launch script)
@@ -190,7 +194,7 @@ After a switch, existing terminals can re-source their rc file (`source ~/.zshrc
 
 ```
 ┌──────────────────┐   WebSocket /ws      ┌──────────────────────┐
-│  Browser         │◄────────────────────►│  FastAPI  :8765      │
+│  Browser         │◄────────────────────►│  FastAPI :41924      │
 │  (Vanilla JS     │   HTTP /api/*        │                      │
 │   ES6 modules)   │──────────────────►   │  background poll     │
 └──────────────────┘                      └──────────┬───────────┘
@@ -206,20 +210,27 @@ After a switch, existing terminals can re-source their rc file (`source ~/.zshrc
                 └─────────────────┘
 ```
 
+### How credentials are stored
+
+Each account lives in its own isolated config dir under `~/.claude-multi-accounts/account-<uuid>/`. Inside that dir Claude Code keeps `.claude.json` (config + identity), and on macOS it also writes a Keychain entry whose service name is `Claude Code-credentials-<sha256(config_dir)[:8]>` (the *hashed per-dir entry*). Those two files plus the per-dir Keychain entry are the source of truth for an account — the dashboard never overwrites them on a switch.
+
+What a switch *does* touch is determined by the **credential targets** the user has enabled in the dashboard. A target is a canonical path to a `.claude.json` file (e.g. `~/.claude.json`, `~/.claude/.claude.json`, or any other location where Claude Code looks). The dashboard auto-discovers them and shows a checkbox per target.
+
 ### Data flow
 
 1. **Startup** — `init_db()` runs Alembic migrations (creates the DB on first run), syncs `~/.claude-multi/active`, then spawns two background tasks: the poll loop and a login-session cleanup loop.
 
 2. **Poll cycle** — Every 15 s with active clients, every 5 min when idle. Per account: reads the access token from the isolated config dir, refreshes it if expiring within 5 min, POSTs a near-empty request to `/v1/messages` purely to read the `anthropic-ratelimit-unified-*` response headers (five-hour and seven-day utilization + reset times). Results are cached in memory and broadcast over WebSocket.
 
-3. **Auto-switch** — If the active account's five-hour utilization ≥ `threshold_pct`, `perform_switch()` atomically:
-   - Copies credential files into `~/.claude/`
-   - Rewrites the hashed per-config-dir Keychain entry and the legacy `Claude Code-credentials` entry
-   - Writes `~/.claude-multi/active`
-   - Logs the event in `switch_log`
-   - Broadcasts `account_switched` over WebSocket
+3. **Auto-switch** — If the active account's five-hour utilization ≥ `threshold_pct`, `perform_switch()` runs `activate_account_config()` under a credential lock (so a concurrent token refresh cannot interleave). For the chosen account it:
+   - **Mirrors `oauthAccount` + `userID`** from the account's `.claude.json` into every user-enabled credential target — identity only, no tokens
+   - **If a system-default target is enabled** (`~/.claude.json` or `~/.claude/.claude.json`), additionally writes the legacy `Claude Code-credentials` Keychain entry, cleans stale legacy Keychain entries left by older Claude Code versions, and copies `.credentials.json` into `~/.claude/` as a plaintext fallback
+   - **Updates `~/.claude-multi/active`** *after* all credential operations succeed (so the pointer is never advanced to a half-installed state)
+   - Logs the event in `switch_log` and broadcasts `account_switched` over WebSocket
 
 4. **Shell pickup** — New terminals sourcing the rc snippet read `~/.claude-multi/active` and export `CLAUDE_CONFIG_DIR`; existing `claude` processes are unaffected until restarted.
+
+> **Note on the hashed per-dir Keychain entry:** the switcher does **not** rewrite it. It is owned by the account and updated only by `save_refreshed_token` when that account's own access token is refreshed. This is intentional — each account keeps its own credentials in its own slot, and a switch only touches the *system-default* entry that fresh `claude` invocations look for.
 
 ---
 
@@ -240,12 +251,14 @@ After a switch, existing terminals can re-source their rc file (`source ~/.zshrc
 │   │   ├── accounts.py                # /api/accounts CRUD + login flow
 │   │   ├── service.py                 # /api/service enable/disable/default-account
 │   │   ├── settings.py                # /api/settings + shell snippet
-│   │   └── tmux.py                    # /api/tmux sessions, monitors, capture, send-keys
+│   │   ├── credential_targets.py      # /api/credential-targets list/rescan/toggle/sync
+│   │   └── tmux.py                    # /api/tmux sessions, monitors, capture, send
 │   └── services/
 │       ├── account_service.py         # Account lifecycle, activation, backup/restore
 │       ├── account_queries.py         # DB query helpers
 │       ├── login_session_service.py   # tmux-based login session start/verify/cleanup
 │       ├── credential_provider.py     # Keychain read/write + credential file I/O
+│       ├── credential_targets.py      # Auto-discover .claude.json targets + enable state
 │       ├── anthropic_api.py           # probe_usage() + refresh_access_token()
 │       ├── switcher.py                # get_next_account() + perform_switch()
 │       ├── settings_service.py        # Typed get/set for Setting DB rows
@@ -299,7 +312,7 @@ cc-acc service install                 # Install macOS LaunchAgent (auto-start o
 cc-acc service remove [--purge-logs]   # Uninstall LaunchAgent (optionally delete logs)
 ```
 
-The CLI connects to `http://localhost:8765` by default. Override with the `CLAUDE_MULTI_URL` env var.
+The CLI connects to `http://127.0.0.1:41924` by default. Override with `CLAUDE_MULTI_SERVER_HOST`/`CLAUDE_MULTI_SERVER_PORT` env vars, or `CLAUDE_MULTI_URL` for a full URL.
 
 ---
 
@@ -326,6 +339,10 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CLAUDE_MULTI_A
 | `PATCH` | `/api/settings/{key}` | Update a setting (`auto_switch_enabled`, `usage_poll_interval_seconds`) |
 | `GET` | `/api/settings/shell-status` | Check shell integration and active pointer status |
 | `POST` | `/api/settings/setup-shell` | Append shell snippet to `.zshrc` / `.bashrc` |
+| `GET` | `/api/credential-targets` | List auto-discovered `.claude.json` targets with enabled state |
+| `POST` | `/api/credential-targets/rescan` | Re-run target discovery |
+| `PATCH` | `/api/credential-targets` | Toggle the `enabled` flag for one canonical target |
+| `POST` | `/api/credential-targets/sync` | Re-mirror active account into all enabled targets |
 | `GET` | `/api/tmux/sessions` | Discover tmux panes |
 | `GET` | `/api/tmux/capture` | Capture output from a pane |
 | `POST` | `/api/tmux/send` | Send keys to a pane |
@@ -335,7 +352,7 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CLAUDE_MULTI_A
 | `DELETE` | `/api/tmux/monitors/{id}` | Delete monitor |
 | `GET` | `/health` | Health check (always public) |
 
-**WebSocket:** `ws://localhost:8765/ws?since=<seq>` — streams `usage_updated`, `account_switched`, `account_deleted`, `tmux_result`, and `error` events. The `since` parameter requests buffered events the client may have missed; the server falls back to a full snapshot if the buffer gap is too large.
+**WebSocket:** `ws://localhost:41924/ws?since=<seq>` — streams `usage_updated`, `account_switched`, `account_deleted`, `tmux_result`, and `error` events. The `since` parameter requests buffered events the client may have missed; the server falls back to a full snapshot if the buffer gap is too large.
 
 ---
 
@@ -380,12 +397,12 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 - Or re-source your rc file: `source ~/.zshrc`
 
 **WebSocket indicator stays disconnected**
-- Verify the server is running: `curl http://localhost:8765/health`
+- Verify the server is running: `curl http://localhost:41924/health`
 - Check logs: `cc-acc log -n 50`
 
 **`cc-acc` reports "cannot connect"**
 - Start the server first: `cc-acc server start` or `bash scripts/launch.sh`
-- If using a non-default port: `export CLAUDE_MULTI_URL=http://localhost:PORT`
+- If using a non-default port: `export CLAUDE_MULTI_SERVER_PORT=PORT` or `export CLAUDE_MULTI_URL=http://localhost:PORT`
 
 **Usage card shows "Rate limited"**
 - Expected: the app backs off automatically and retries. No action needed.
