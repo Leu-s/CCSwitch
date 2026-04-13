@@ -52,8 +52,11 @@ async def _poll_loop(idle_interval: int) -> None:
             if ws_manager.active_connections:
                 await asyncio.sleep(cfg.poll_interval_active)
             else:
+                # Re-read idle_interval from the DB so in-app setting changes
+                # take effect without a server restart.
+                current_idle = await _get_idle_interval()
                 elapsed = 0
-                while elapsed < idle_interval and not ws_manager.active_connections:
+                while elapsed < current_idle and not ws_manager.active_connections:
                     await asyncio.sleep(5)
                     elapsed += 5
             await bg.poll_usage_and_switch(ws_manager)

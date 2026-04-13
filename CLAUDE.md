@@ -19,13 +19,14 @@ after a switch and evaluate the outcome with a Haiku call.
 ```
 backend/
   main.py              FastAPI app + lifespan + /ws endpoint + single poll loop
-  background.py        poll_usage_and_switch() — the only polling routine;
-                       owns the in-memory usage_cache and token_info_cache
+  background.py        poll_usage_and_switch() — the only polling routine
+  cache.py             _UsageCache class + module-level cache singleton
   config.py            Pydantic settings (env prefix: CLAUDE_MULTI_)
-  database.py          async SQLAlchemy engine + init_db
+  database.py          async SQLAlchemy engine + init_db (Alembic-backed)
   models.py            Account, TmuxMonitor, SwitchLog, Setting (with indexes)
   schemas.py           Pydantic request/response models
   ws.py                Minimal WebSocketManager (broadcast + connection list)
+  auth.py              Optional Bearer/WS token middleware
   routers/
     accounts.py        /api/accounts CRUD + login flow
     service.py         /api/service enable/disable + default-account
@@ -33,15 +34,34 @@ backend/
     tmux.py            /api/tmux/* panes, monitors, evaluate
   services/
     account_service.py paths, login session, activate/backup/restore, active pointer
+    account_queries.py DB query helpers for Account (get_by_id, get_by_email, etc.)
     credential_provider.py  Keychain read/write + credential-file fallbacks
     anthropic_api.py   probe_usage() + refresh_access_token()
     switcher.py        get_next_account() + perform_switch()
     settings_service.py  typed get/set for Setting rows
     tmux_service.py    list_panes, send_keys, capture_pane, evaluate_with_haiku
 frontend/
-  index.html           Vanilla JS SPA (single file, inline CSS)
+  index.html           HTML shell (259 lines)
+  src/
+    main.js            App entry point — tabs, theme, shell status, init
+    api.js             Fetch wrapper (30s timeout, error extraction)
+    ws.js              WebSocket with exponential reconnect + sequence replay
+    state.js           Shared mutable state object
+    constants.js       Timing constants
+    utils.js           DOM helpers (qs, qsa, escapeHtml, fmtTime, etc.)
+    toast.js           Toast notification system
+    style.css          Full stylesheet (dark default, light via data-theme)
+    ui/
+      accounts.js      Account cards, drag-reorder, threshold slider
+      service.js       Service toggle, default account
+      log.js           Switch log with pagination
+      login.js         Add-account modal (multi-step login flow)
+      tmux.js          Monitors, pane terminal, event feed
+      events.js        Custom DOM event helpers
+alembic/
+  versions/            Schema migrations (initial schema + drop_display_name)
 tests/
-  conftest.py          chdirs to a tmp dir so test DBs don't land at repo root
+  conftest.py          tmp-dir isolation + make_test_app factory fixture
   test_*.py            router + service + background + schemas + e2e
 ```
 
@@ -55,13 +75,13 @@ tests/
    connected) and an idle cadence (DB-configurable, floored at
    `cfg.poll_interval_min`).
 3. `poll_usage_and_switch` gates on `service_enabled` before doing any work.
-   For each account it reads the access token, refreshes it if it is within
-   5 minutes of expiry (`expires_in` → ms conversion lives here), probes
-   `/v1/messages` for rate-limit headers, stores the result in
-   `usage_cache[email]`, and caches `token_info` in `token_info_cache[email]`
+   For each account it reads the access token, skips token refresh for
+   already-stale accounts, refreshes otherwise if expiry is within 5 minutes,
+   probes `/v1/messages` for rate-limit headers, stores the result in
+   `cache` (a `_UsageCache` singleton in `cache.py`), and caches `token_info`
    so `GET /api/accounts` does not fan out Keychain subprocess calls per row.
 4. If the active account crosses its `threshold_pct`, it picks the next
-   enabled account by priority, calls `switcher.perform_switch`, which
+   enabled **non-stale** account by priority, calls `switcher.perform_switch`, which
    copies credentials into `~/.claude/`, rewrites both Keychain entries (the
    hashed per-config-dir one and the legacy no-hash one), and writes
    `~/.claude-multi/active`.
@@ -102,12 +122,10 @@ end up inside the tmp dir instead of polluting the repo root.
 
 ## Things that are intentionally NOT done
 
-- No Alembic migrations — `init_db()` runs `create_all()` and contains a
-  small guard that drops everything if the old `keychain_suffix` column
-  still exists from pre-refactor databases.
+- Alembic is set up for production migrations. `init_db()` runs `alembic upgrade head`
+  on startup, so schema changes require a new migration file (`alembic revision --autogenerate`).
 - No global exception handler; background task failures are caught and
   logged inside `poll_usage_and_switch` itself.
 - No `/ws` auth, no CORS config — if you ever expose the port remotely you
   must add both.
-- No Alembic / schema migrations, and no multi-tenant support (one user
-  per machine).
+- No multi-tenant support (one user per machine).

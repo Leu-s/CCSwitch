@@ -266,3 +266,51 @@ def test_get_active_email_falls_back_to_legacy_location(fake_home, fake_keychain
     with patch("backend.services.account_service.active_claude_dir",
                return_value=str(legacy_dir)):
         assert ac.get_active_email() == "legacy@x.com"
+
+
+def test_activate_keychain_write_failure_does_not_advance_pointer(fake_home, fake_keychain, monkeypatch):
+    """If the Keychain write raises during activate_account_config, the
+    ~/.claude-multi/active pointer must NOT be updated to the target account.
+
+    Steps 1–2 (writeback + oauthAccount merge) complete, but step 3
+    (_write_keychain_credentials) raises RuntimeError.  The active-dir pointer
+    (step 6) must stay pointing at the *previous* account — or be absent —
+    so the system is not left advertising a partially-installed account.
+    """
+    from backend.services import account_service as ac
+
+    # Create two account dirs: 'prev' is currently active, 'new' is the target.
+    prev = make_account_dir(fake_home, "prev", "prev@x.com", "tok-prev", fake_keychain)
+    new  = make_account_dir(fake_home, "new",  "new@x.com",  "tok-new",  fake_keychain)
+
+    # Activate the 'prev' account so the pointer file exists and points at it.
+    ac.activate_account_config(str(prev))
+    ptr_path = fake_home / ".claude-multi" / "active"
+    assert ptr_path.read_text().strip() == str(prev)
+
+    # Now make the Keychain write fail for ANY write.
+    def failing_write(credentials: dict, service: str) -> bool:
+        raise RuntimeError("keychain write failed")
+
+    monkeypatch.setattr(
+        "backend.services.account_service._write_keychain_credentials",
+        failing_write,
+    )
+
+    # activate_account_config raises (because _write_keychain_credentials raises).
+    # The exact propagation path: step 3 raises → no try/except wraps it →
+    # the exception escapes activate_account_config before step 6 runs.
+    # If the implementation swallows the error (logs a warning instead of
+    # raising), the pointer is still not supposed to advance because step 6
+    # is only reached when credential operations succeed.
+    try:
+        ac.activate_account_config(str(new))
+    except Exception:
+        pass  # An exception is acceptable (and expected in the raise path)
+
+    # Regardless of whether an exception was raised or swallowed, the active
+    # pointer must NOT have been advanced to the new account.
+    current_ptr = ptr_path.read_text().strip() if ptr_path.exists() else None
+    assert current_ptr != str(new), (
+        "active pointer was advanced to the new account despite a Keychain write failure"
+    )

@@ -15,6 +15,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 
@@ -25,6 +26,11 @@ logger = logging.getLogger(__name__)
 
 # session_id → creation timestamp (time.time())
 _active_login_sessions: dict[str, float] = {}
+# asyncio.to_thread dispatches to a pool with multiple worker threads, so
+# start / verify / cleanup can touch the dict concurrently. The RLock is
+# reentrant because _cleanup_expired_sessions iterates and then calls
+# cleanup_login_session, which also needs the lock.
+_sessions_lock = threading.RLock()
 
 # Sessions older than this many seconds are considered expired
 _SESSION_TIMEOUT: int = 1800  # 30 minutes
@@ -59,11 +65,11 @@ def _get_email_from_config_dir(config_dir: str) -> str | None:
 def _cleanup_expired_sessions() -> None:
     """Remove login session dirs for sessions that have exceeded _SESSION_TIMEOUT."""
     now = time.time()
-    expired = [sid for sid, created_at in list(_active_login_sessions.items())
-               if now - created_at > _SESSION_TIMEOUT]
+    with _sessions_lock:
+        expired = [sid for sid, created_at in _active_login_sessions.items()
+                   if now - created_at > _SESSION_TIMEOUT]
     for sid in expired:
         cleanup_login_session(sid)
-        _active_login_sessions.pop(sid, None)
         logger.debug("Expired login session cleaned up: %s", sid)
 
 
@@ -82,7 +88,8 @@ def start_login_session() -> dict:
     config_dir = _make_account_config_dir(session_id)
 
     # Track this session so _cleanup_expired_sessions can reap it if abandoned
-    _active_login_sessions[session_id] = time.time()
+    with _sessions_lock:
+        _active_login_sessions[session_id] = time.time()
 
     # Ensure at least one tmux server/session is running so new-window works
     sessions = subprocess.run(
@@ -155,13 +162,15 @@ def verify_login_session(session_id: str) -> dict:
 
     # Successful verification — stop tracking this session so the registry
     # does not keep a pointer to a now-durable account dir.
-    _active_login_sessions.pop(session_id, None)
+    with _sessions_lock:
+        _active_login_sessions.pop(session_id, None)
     return {"success": True, "email": email, "config_dir": config_dir}
 
 
 def cleanup_login_session(session_id: str) -> None:
     """Remove a login session's config dir (called on cancel or expiry)."""
-    _active_login_sessions.pop(session_id, None)
+    with _sessions_lock:
+        _active_login_sessions.pop(session_id, None)
     config_dir = os.path.join(_accounts_base(), f"account-{session_id}")
     real = os.path.realpath(config_dir)
     base = os.path.realpath(_accounts_base())
