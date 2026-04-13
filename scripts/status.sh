@@ -15,9 +15,11 @@ PID_FILE="$STATE_DIR/server.pid"
 # Unified log path: both launch.sh and plist write here
 LOG_FILE="$STATE_DIR/server.log"
 LAUNCHAGENT_PLIST="$HOME/Library/LaunchAgents/com.claudemulti.manager.plist"
-API="http://localhost:8765"
+_HOST="${CLAUDE_MULTI_SERVER_HOST:-127.0.0.1}"
+_PORT="${CLAUDE_MULTI_SERVER_PORT:-41924}"
+API="http://${_HOST}:${_PORT}"
 
-echo "=== Claude Multi-Account Manager Status ==="
+echo "=== CCSwitch Status ==="
 echo ""
 
 # 1. Server process
@@ -57,7 +59,7 @@ if [[ -f "$LAUNCHAGENT_PLIST" ]]; then
         echo -e "${YELLOW}⚠ LaunchAgent plist exists but not loaded${NC}"
     fi
 else
-    echo -e "${YELLOW}  LaunchAgent not installed${NC} (run: cc-acc service install)"
+    echo -e "${YELLOW}  LaunchAgent not installed${NC} (run: ccswitch service install)"
 fi
 
 # 4. Active account
@@ -91,7 +93,7 @@ for rc in ".zshrc" ".bashrc" ".zprofile" ".bash_profile"; do
     fi
 done
 if ! $SHELL_OK; then
-    echo -e "${YELLOW}⚠ Shell not configured${NC} — run: cc-acc shell setup"
+    echo -e "${YELLOW}⚠ Shell not configured${NC} — run: ccswitch shell setup"
 fi
 
 # 6. Log tail if server down
@@ -106,4 +108,4 @@ if ! $SERVER_RUNNING; then
 fi
 
 echo ""
-echo "UI: http://localhost:8765"
+echo "UI: http://${_HOST}:${_PORT}"

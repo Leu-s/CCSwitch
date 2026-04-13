@@ -1,4 +1,4 @@
-# Claude Multi-Account Manager — Architecture Tour
+# CCSwitch — Architecture Tour
 
 Short map for future Claude-assisted sessions.  See `README.md` for user-facing
 setup instructions.
@@ -109,7 +109,8 @@ tests/
   On Linux it silently falls back to the file-based credentials, which may
   or may not work depending on the Claude Code build.
 - **Local only**.  The `/ws` endpoint has no authentication — the app is
-  intended to run on `localhost` behind your browser.
+  intended to run on `127.0.0.1:41924` behind your browser.  Host and port
+  are configurable via `CLAUDE_MULTI_SERVER_HOST` / `CLAUDE_MULTI_SERVER_PORT`.
 - **tmux required** for the login flow and monitor features.
 - **Python 3.12+** (the repo's `.venv` runs on 3.14).
 

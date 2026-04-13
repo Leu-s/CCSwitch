@@ -1,6 +1,7 @@
 [project]
-name = "claude-multi-account"
+name = "ccswitch"
 version = "0.1.0"
+description = "CCSwitch — auto-switch between multiple Claude.ai accounts before you hit rate limits."
 requires-python = ">=3.12"
 dependencies = [
     "fastapi==0.115.0",

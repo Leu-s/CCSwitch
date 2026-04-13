@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Claude Accounts</title>
+<title>CCSwitch</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -18,7 +18,7 @@
   <div class="header-inner">
     <div class="title">
       <svg class="bolt" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/></svg>
-      Claude Accounts
+      CCSwitch
     </div>
 
     <button class="service-btn" id="service-toggle-btn" data-on="false" title="Toggle auto-switching. Manual switch is always available via each card.">
@@ -31,18 +31,15 @@
 
     <div class="spacer"></div>
 
-    <div class="tabs" role="tablist">
-      <button class="tab-btn active" data-tab="accounts" role="tab" aria-selected="true">Accounts</button>
-      <button class="tab-btn" data-tab="tmux" role="tab" aria-selected="false">tmux Monitor</button>
-    </div>
-
+    <button class="icon-btn" id="settings-btn" aria-label="Settings" title="Settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+    </button>
     <button class="theme-btn" id="theme-btn" aria-label="Toggle theme"></button>
     <span class="ws-dot" id="ws-dot" title="WebSocket connection"></span>
   </div>
 </header>
 
 <main class="container">
-  <!-- ── Accounts Tab ───────────────────────────────────────────────────── -->
   <section class="tab-panel active" id="tab-accounts" role="tabpanel">
     <div class="accounts-layout">
 
@@ -119,59 +116,76 @@
     </div>
   </section>
 
-  <!-- ── tmux Tab ──────────────────────────────────────────────────────── -->
-  <section class="tab-panel" id="tab-tmux" role="tabpanel">
+  <!-- ── Settings page ─────────────────────────────────────────────────── -->
+  <section class="tab-panel" id="tab-settings" role="tabpanel" hidden>
+    <div class="settings-layout">
+      <div class="settings-header">
+        <button class="back-btn" id="settings-back-btn" aria-label="Back to accounts">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+          Back
+        </button>
+        <h1 class="settings-title">Settings</h1>
+      </div>
 
-    <div class="tmux-grid">
-      <div class="panel">
-        <div class="panel-header">
-          <h3>Discovered Sessions</h3>
-          <div style="display:flex;align-items:center;gap:8px;">
-            <span class="count" id="sessions-count">—</span>
-            <button class="btn icon" id="refresh-sessions-btn" title="Refresh Sessions" style="width:26px;height:26px;padding:5px;">
+      <!-- ── Credential Targets (auto-discovered .claude.json mirror list) ── -->
+      <div class="ct-panel">
+        <div class="ct-panel-header">
+          <div class="ct-title-row">
+            <span class="ct-title">Credential Targets</span>
+            <span class="ct-count" id="ct-count"></span>
+            <button class="btn primary ct-sync-btn" id="ct-sync-btn" title="Mirror the currently active account into every enabled target now">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+              Sync now
+            </button>
+            <button class="btn icon" id="ct-rescan-btn" title="Rescan filesystem">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
             </button>
           </div>
+          <p class="ct-hint">
+            <code>.claude.json</code> files discovered on this machine. Tick
+            the ones this service should rewrite on every switch. When no
+            targets are enabled, switches only update the dashboard's own
+            active-pointer file — nothing else on disk is touched.
+          </p>
         </div>
-        <div class="panel-body" id="sessions-list">
-          <div class="empty-state" style="margin:10px;">Click the refresh icon above to discover tmux panes.</div>
+        <div class="ct-warn" id="ct-warn" style="display:none;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span>No targets enabled — switches won't update any <code>.claude.json</code> file outside the dashboard's own pointer. Tick at least one below.</span>
+        </div>
+        <div id="ct-loading" class="empty-state" style="padding:10px 14px;">Scanning…</div>
+        <div id="ct-list" class="ct-list" style="display:none;"></div>
+        <div id="ct-empty" class="empty-state" style="display:none;padding:10px 14px;">
+          No <code>.claude.json</code> files found on this machine.
         </div>
       </div>
 
-      <div class="panel">
-        <div class="panel-header">
-          <h3>Monitors</h3>
-          <span class="count" id="monitors-count">0</span>
+      <!-- ── Tmux nudge (wake stalled Claude Code sessions after a switch) ── -->
+      <div class="tnudge-panel">
+        <div class="tnudge-header">
+          <label class="toggle tnudge-toggle" title="Wake up tmux Claude Code sessions after every account switch">
+            <input type="checkbox" id="tnudge-enabled-cb" />
+            <span class="track"></span>
+          </label>
+          <span class="tnudge-title">Wake tmux sessions with a message</span>
         </div>
-        <div class="panel-body" id="monitors-list"></div>
-        <form class="add-monitor-form" id="add-monitor-form" autocomplete="off" aria-label="Add tmux monitor">
-          <input class="input" name="name" placeholder="Name" required aria-label="Monitor name" />
-          <div style="display:flex;flex-direction:column;gap:3px;">
-            <select class="select" name="pattern_type" id="pattern-type-select" aria-label="Pattern type">
-              <option value="manual">manual</option>
-              <option value="regex">regex</option>
-            </select>
-            <small id="pattern-type-hint" style="font-size:10px;color:var(--text-mute);line-height:1.3;padding:0 2px;"></small>
-          </div>
-          <input class="input" name="pattern" placeholder="Pattern (e.g. main:0.0)" required aria-label="Monitor pattern" />
-          <button class="btn primary" type="submit">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-            Add
-          </button>
-        </form>
+        <p class="tnudge-hint">
+          After every account switch, the service scans the output of every
+          <code>tmux</code> pane on this machine.  Any pane whose recent
+          output looks like a Claude Code rate-limit notice (<em>"usage limit
+          reached"</em>, <em>"rate_limit_error"</em>, <em>HTTP 429</em>, …)
+          will receive the message below — so an already-running Claude Code
+          session resumes work with the freshly-mirrored credentials instead
+          of stalling.
+        </p>
+        <div class="tnudge-input-row">
+          <label class="tnudge-input-label" for="tnudge-message-input">Nudge message</label>
+          <input type="text" class="input tnudge-input" id="tnudge-message-input" placeholder="continue" autocomplete="off" />
+          <button class="btn primary tnudge-save-btn" id="tnudge-save-btn">Save</button>
+        </div>
       </div>
-    </div>
-
-    <div class="event-feed-section">
-      <div class="event-feed-header">
-        <span class="event-feed-live"></span>
-        <span class="event-feed-title">Event Feed</span>
-        <span class="event-feed-count" id="event-feed-count" style="display:none;">0</span>
-      </div>
-      <div id="event-feed" class="event-feed"></div>
-      <div id="event-feed-empty" class="empty-state">No events yet. Events appear here when monitors trigger.</div>
     </div>
   </section>
+
 </main>
 
 <!-- ── Add Account modal ─────────────────────────────────────────────────── -->
@@ -236,23 +250,6 @@
 </div>
 
 <div class="toast-container" id="toast-container"></div>
-
-<!-- ── Bottom terminal panel ─────────────────────────────────────────────── -->
-<div class="terminal-panel" id="terminal-panel">
-  <div class="terminal-resize-handle" id="terminal-resize-handle"></div>
-  <div class="terminal-header">
-    <div class="terminal-target" id="terminal-target">—</div>
-    <div class="terminal-live" id="terminal-live">live</div>
-    <code id="terminal-attach-cmd" class="terminal-attach-cmd"></code>
-    <button class="terminal-close" id="terminal-close-btn" title="Close (Esc)">✕</button>
-  </div>
-  <div class="terminal-output" id="terminal-output"></div>
-  <form id="terminal-send-form" class="terminal-send-form">
-    <span class="terminal-send-prompt">❯</span>
-    <input id="terminal-input" class="terminal-send-input" type="text" autocomplete="off" spellcheck="false" placeholder="send text to pane…" aria-label="Send text to tmux pane" />
-    <button type="submit" class="terminal-send-btn">Send ↵</button>
-  </form>
-</div>
 
 <script type="module" src="src/main.js"></script>
 </body>

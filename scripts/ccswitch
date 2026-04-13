@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# cc-acc — Claude Code multi-account CLI wrapper
+# ccswitch — CLI wrapper for the CCSwitch dashboard
 # Locates the Python interpreter in the project virtualenv, falls back to
-# system python3, and delegates all arguments to cc-acc.py.
+# system python3, and delegates all arguments to ccswitch.py.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,4 +23,4 @@ else
     exit 1
 fi
 
-exec "$PYTHON" "$SCRIPT_DIR/cc-acc.py" "$@"
+exec "$PYTHON" "$SCRIPT_DIR/ccswitch.py" "$@"

@@ -1,6 +1,6 @@
 <div align="center">
 
-# Claude Code Multi-Account Manager
+# CCSwitch
 
 **Stop hitting Claude rate limits. Start using all your subscriptions.**
 
@@ -13,7 +13,7 @@
 
 </div>
 
-If you've ever been deep in a Claude Code session and hit the 5-hour rate limit, you know the pain. **Claude Code Multi-Account Manager** is a local dashboard that watches usage across every Claude.ai subscription you own and silently swaps credentials *before* you run out — so `claude` keeps working without you noticing the switch.
+If you've ever been deep in a Claude Code session and hit the 5-hour rate limit, you know the pain. **CCSwitch** is a local dashboard that watches usage across every Claude.ai subscription you own and silently swaps credentials *before* you run out — so `claude` keeps working without you noticing the switch.
 
 <!-- To add a screenshot: place it in docs/screenshot.png and uncomment below -->
 <!-- <p align="center"><img src="docs/screenshot.png" alt="Dashboard" width="800"/></p> -->
@@ -66,7 +66,7 @@ You're refactoring a service. The dashboard sits in a tab. Around hour 4, the ac
 - **Shell integration** — a one-liner in `.zshrc`/`.bashrc` exports `CLAUDE_CONFIG_DIR` from `~/.claude-multi/active`, so every new terminal picks up the active account without a restart
 - **Real-time dashboard** — vanilla-JS single-page app; account cards, drag-to-reorder priority, per-account threshold slider, switch log; no build step required
 - **tmux monitors** — watch specific panes, auto-continue paused `claude` sessions after a switch
-- **CLI** (`cc-acc`) — list/switch/enable/disable accounts, tail logs, manage the LaunchAgent, set up shell integration
+- **CLI** (`ccswitch`) — list/switch/enable/disable accounts, tail logs, manage the LaunchAgent, set up shell integration
 - **macOS LaunchAgent** — optional auto-start on login
 
 ---
@@ -87,7 +87,7 @@ You're refactoring a service. The dashboard sits in a tab. Around hour 4, the ac
 ```bash
 # 1. Clone
 git clone <repo-url>
-cd claude-code-multi-account
+cd ccswitch
 
 # 2. Install dependencies
 uv sync
@@ -107,7 +107,7 @@ The SQLite database and schema are created automatically on first start — no m
 
 ```bash
 git clone <repo-url>
-cd claude-code-multi-account
+cd ccswitch
 uv sync
 
 # Optional: copy environment defaults (all have sensible defaults)
@@ -120,9 +120,9 @@ cp .env.example .env
 # Add scripts/ to your PATH first, or use the full path
 export PATH="$PATH:$(pwd)/scripts"
 
-cc-acc service install               # creates ~/Library/LaunchAgents/com.claudemulti.manager.plist
-cc-acc service remove                # uninstall
-cc-acc service remove --purge-logs   # uninstall + delete logs
+ccswitch service install               # creates ~/Library/LaunchAgents/com.claudemulti.manager.plist
+ccswitch service remove                # uninstall
+ccswitch service remove --purge-logs   # uninstall + delete logs
 ```
 
 The LaunchAgent:
@@ -132,8 +132,8 @@ The LaunchAgent:
 - writes logs to `~/.local/state/claude-multi/server.log`
 
 ```bash
-cc-acc log -f                        # tail logs
-cc-acc status                        # check if the service is running
+ccswitch log -f                        # tail logs
+ccswitch status                        # check if the service is running
 launchctl print gui/$(id -u)/com.claudemulti.manager  # raw launchd status
 ```
 
@@ -182,9 +182,9 @@ bash scripts/launch.sh
 
 ```bash
 bash scripts/status.sh    # server health + LaunchAgent status
-cc-acc status             # server, shell config, active account
-cc-acc log -f             # tail logs (follow mode)
-cc-acc log -n 100         # last 100 lines
+ccswitch status             # server, shell config, active account
+ccswitch log -f             # tail logs (follow mode)
+ccswitch log -n 100         # last 100 lines
 ```
 
 ---
@@ -202,7 +202,7 @@ At shell startup it reads `~/.claude-multi/active` (a pointer file updated on ev
 **Automated setup:**
 
 ```bash
-cc-acc shell setup    # appends the block above to .zshrc and/or .bashrc
+ccswitch shell setup    # appends the block above to .zshrc and/or .bashrc
 ```
 
 After a switch, existing terminals can re-source their rc file (`source ~/.zshrc`) or simply open a new tab.
@@ -303,7 +303,7 @@ What a switch *does* touch is determined by the **credential targets** the user 
 ├── alembic/                           # Database migrations
 │   └── versions/                      # initial schema + drop_display_name
 ├── scripts/
-│   ├── cc-acc / cc-acc.py             # CLI tool
+│   ├── ccswitch / ccswitch.py             # CLI tool
 │   ├── launch.sh                      # Production server launcher
 │   ├── status.sh                      # Server health check
 │   ├── create_system_service.sh       # macOS LaunchAgent installer
@@ -315,20 +315,20 @@ What a switch *does* touch is determined by the **credential targets** the user 
 
 ## CLI Reference
 
-Add `scripts/` to your `PATH`, or run `python scripts/cc-acc.py <command>` directly.
+Add `scripts/` to your `PATH`, or run `python scripts/ccswitch.py <command>` directly.
 
 ```bash
-cc-acc list                            # List all accounts with active marker and usage
-cc-acc switch <email>                  # Switch active account immediately
-cc-acc enable <email>                  # Include account in auto-switch rotation
-cc-acc disable <email>                 # Exclude account from auto-switch rotation
-cc-acc status                          # Server health, shell config, active account
-cc-acc shell setup                     # Append CLAUDE_CONFIG_DIR one-liner to rc files
-cc-acc server start                    # Launch server in a new tmux window
-cc-acc server stop                     # Stop server (and unload LaunchAgent if running)
-cc-acc log [-f] [-n N]                # View server logs (-f: follow, -n: line count)
-cc-acc service install                 # Install macOS LaunchAgent (auto-start on login)
-cc-acc service remove [--purge-logs]   # Uninstall LaunchAgent (optionally delete logs)
+ccswitch list                            # List all accounts with active marker and usage
+ccswitch switch <email>                  # Switch active account immediately
+ccswitch enable <email>                  # Include account in auto-switch rotation
+ccswitch disable <email>                 # Exclude account from auto-switch rotation
+ccswitch status                          # Server health, shell config, active account
+ccswitch shell setup                     # Append CLAUDE_CONFIG_DIR one-liner to rc files
+ccswitch server start                    # Launch server in a new tmux window
+ccswitch server stop                     # Stop server (and unload LaunchAgent if running)
+ccswitch log [-f] [-n N]                # View server logs (-f: follow, -n: line count)
+ccswitch service install                 # Install macOS LaunchAgent (auto-start on login)
+ccswitch service remove [--purge-logs]   # Uninstall LaunchAgent (optionally delete logs)
 ```
 
 The CLI connects to `http://127.0.0.1:41924` by default. Override with `CLAUDE_MULTI_SERVER_HOST`/`CLAUDE_MULTI_SERVER_PORT` env vars, or `CLAUDE_MULTI_URL` for a full URL.
@@ -417,17 +417,17 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 
 **WebSocket indicator stays disconnected**
 - Verify the server is running: `curl http://localhost:41924/health`
-- Check logs: `cc-acc log -n 50`
+- Check logs: `ccswitch log -n 50`
 
-**`cc-acc` reports "cannot connect"**
-- Start the server first: `cc-acc server start` or `bash scripts/launch.sh`
+**`ccswitch` reports "cannot connect"**
+- Start the server first: `ccswitch server start` or `bash scripts/launch.sh`
 - If using a non-default port: `export CLAUDE_MULTI_SERVER_PORT=PORT` or `export CLAUDE_MULTI_URL=http://localhost:PORT`
 
 **Usage card shows "Rate limited"**
 - Expected: the app backs off automatically and retries. No action needed.
 
 **LaunchAgent doesn't start after reboot**
-- Re-install: `cc-acc service remove && cc-acc service install`
+- Re-install: `ccswitch service remove && ccswitch service install`
 - Check system log: `log show --predicate 'subsystem == "com.apple.launchd"' --last 5m | grep claudemulti`
 
 **Database schema error after upgrade**

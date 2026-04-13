@@ -34,7 +34,7 @@ if [[ -f "$PID_FILE" ]]; then
         # Verify it's actually our server (PID reuse defense)
         PROC_CMD=$(ps -p "$OLD_PID" -o comm= 2>/dev/null || true)
         if echo "$PROC_CMD" | grep -qE "python|uvicorn"; then
-            echo "Server is already running (PID $OLD_PID). Use 'cc-acc server stop' to stop it." >&2
+            echo "Server is already running (PID $OLD_PID). Use 'ccswitch server stop' to stop it." >&2
             exit 1
         fi
     fi
@@ -47,7 +47,10 @@ trap cleanup EXIT
 
 echo $$ > "$PID_FILE"
 
-echo "Starting Claude Multi-Account Manager on http://127.0.0.1:8765"
+HOST="${CLAUDE_MULTI_SERVER_HOST:-127.0.0.1}"
+PORT="${CLAUDE_MULTI_SERVER_PORT:-41924}"
+
+echo "Starting CCSwitch on http://${HOST}:${PORT}"
 echo "Logs: $LOG_FILE"
 echo "Press Ctrl+C to stop."
 
@@ -55,6 +58,6 @@ echo "Press Ctrl+C to stop."
 trap - EXIT
 
 exec "$PYTHON" -m uvicorn backend.main:app \
-    --host 127.0.0.1 \
-    --port 8765 \
+    --host "$HOST" \
+    --port "$PORT" \
     --log-level warning

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cc-acc — Claude Code multi-account CLI."""
+"""ccswitch — CLI for the CCSwitch dashboard."""
 import argparse
 import json
 import os
@@ -17,7 +17,9 @@ except ImportError:
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS_DIR.parent
-BASE_URL = os.environ.get("CLAUDE_MULTI_URL", "http://localhost:8765").rstrip("/")
+_DEFAULT_HOST = os.environ.get("CLAUDE_MULTI_SERVER_HOST", "127.0.0.1")
+_DEFAULT_PORT = os.environ.get("CLAUDE_MULTI_SERVER_PORT", "41924")
+BASE_URL = os.environ.get("CLAUDE_MULTI_URL", f"http://{_DEFAULT_HOST}:{_DEFAULT_PORT}").rstrip("/")
 TIMEOUT = 5.0
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "claude-multi"
 
@@ -32,7 +34,7 @@ def api(method: str, path: str, **kwargs):
             return resp.json()
     except httpx.ConnectError:
         print(f"ERROR: Cannot connect to server at {BASE_URL}.", file=sys.stderr)
-        print("Start it with: cc-acc server start  OR  cc-acc service install", file=sys.stderr)
+        print("Start it with: ccswitch server start  OR  ccswitch service install", file=sys.stderr)
         sys.exit(1)
     except httpx.HTTPStatusError as e:
         print(f"ERROR: API returned {e.response.status_code}: {e.response.text}", file=sys.stderr)
@@ -89,7 +91,7 @@ def cmd_status(args):
     status = api("get", "/api/settings/shell-status")
     shell_ok = status.get("shell_configured", False)
     active_ok = status.get("active_file_exists", False)
-    print(f"Shell configured:   {'yes' if shell_ok else 'NO — run: cc-acc shell setup'}")
+    print(f"Shell configured:   {'yes' if shell_ok else 'NO — run: ccswitch shell setup'}")
     print(f"Active file exists: {'yes' if active_ok else 'no'}")
 
     accounts = api("get", "/api/accounts")
@@ -216,7 +218,7 @@ def cmd_server_stop(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="cc-acc", description="Claude Code multi-account CLI")
+    p = argparse.ArgumentParser(prog="ccswitch", description="CCSwitch CLI — auto-switch Claude.ai accounts")
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("list", help="List all accounts").set_defaults(func=cmd_list)
