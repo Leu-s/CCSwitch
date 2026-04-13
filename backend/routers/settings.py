@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -37,22 +38,23 @@ async def shell_status():
     Check whether the shell is configured to use the active-dir pointer and
     whether that pointer file currently exists.
     """
-    active_file_exists = os.path.isfile(ac.active_dir_pointer_path())
+    def _check() -> dict:
+        active_file_exists = os.path.isfile(ac.active_dir_pointer_path())
+        snippet_path = _shell_snippet_path()
+        shell_configured = False
+        for rc_name in [".zshrc", ".bashrc"]:
+            path = os.path.expanduser(f"~/{rc_name}")
+            if os.path.exists(path):
+                try:
+                    with open(path) as f:
+                        if snippet_path in f.read():
+                            shell_configured = True
+                            break
+                except OSError:
+                    pass
+        return {"active_file_exists": active_file_exists, "shell_configured": shell_configured}
 
-    snippet_path = _shell_snippet_path()
-    shell_configured = False
-    for rc_name in [".zshrc", ".bashrc"]:
-        path = os.path.expanduser(f"~/{rc_name}")
-        if os.path.exists(path):
-            try:
-                with open(path) as f:
-                    if snippet_path in f.read():
-                        shell_configured = True
-                        break
-            except OSError:
-                pass
-
-    return {"active_file_exists": active_file_exists, "shell_configured": shell_configured}
+    return await asyncio.to_thread(_check)
 
 
 @router.post("/setup-shell")
@@ -68,25 +70,27 @@ async def setup_shell():
     )
     block = f'\n# Claude Code multi-account — active account isolation\n{one_liner}\n'
 
-    results = {}
-    for rc_name in [".zshrc", ".bashrc"]:
-        path = os.path.expanduser(f"~/{rc_name}")
-        if not os.path.exists(path):
-            results[rc_name] = "not_found"
-            continue
-        try:
-            with open(path) as f:
-                content = f.read()
-            if snippet_path in content:
-                results[rc_name] = "already_configured"
+    def _apply() -> dict:
+        results = {}
+        for rc_name in [".zshrc", ".bashrc"]:
+            path = os.path.expanduser(f"~/{rc_name}")
+            if not os.path.exists(path):
+                results[rc_name] = "not_found"
                 continue
-            with open(path, "a") as f:
-                f.write(block)
-            results[rc_name] = "applied"
-        except OSError as e:
-            results[rc_name] = f"error: {e.strerror}"
+            try:
+                with open(path) as f:
+                    content = f.read()
+                if snippet_path in content:
+                    results[rc_name] = "already_configured"
+                    continue
+                with open(path, "a") as f:
+                    f.write(block)
+                results[rc_name] = "applied"
+            except OSError as e:
+                results[rc_name] = f"error: {e.strerror}"
+        return results
 
-    return {"results": results}
+    return {"results": await asyncio.to_thread(_apply)}
 
 
 @router.patch("/{key}", response_model=SettingOut)
