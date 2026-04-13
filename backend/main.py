@@ -1,25 +1,32 @@
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime
+import asyncio
+import json
 import logging
 import os
+import time
+from contextlib import asynccontextmanager
+from datetime import datetime
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 
+from .config import settings as cfg
 from .database import init_db, AsyncSessionLocal
 from .models import Setting
 from .ws import ws_manager
+import backend.background as bg
 from .background import poll_usage_and_switch
 from .routers import accounts, settings, tmux, service
-from .config import settings as cfg
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-_MIN_POLL_INTERVAL = 120   # never faster than 2 min — Anthropic API rate-limits
-_DEFAULT_POLL_INTERVAL = 300  # 5 minutes default
+_MIN_POLL_INTERVAL = 120    # never faster than 2 min — Anthropic API rate-limits
+_DEFAULT_POLL_INTERVAL = 300
+
+# Stored at module level so the websocket handler can read it
+_poll_interval: int = _DEFAULT_POLL_INTERVAL
 
 scheduler = AsyncIOScheduler()
 
@@ -48,15 +55,16 @@ async def _get_poll_interval() -> int:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _poll_interval
     await init_db()
 
-    poll_interval = await _get_poll_interval()
-    logger.info("Usage poll interval: %d seconds", poll_interval)
+    _poll_interval = await _get_poll_interval()
+    logger.info("Usage poll interval: %d seconds", _poll_interval)
 
     scheduler.add_job(
         poll_usage_and_switch,
         "interval",
-        seconds=poll_interval,
+        seconds=_poll_interval,
         args=[ws_manager],
         id="usage_poll",
         replace_existing=True,
@@ -91,6 +99,19 @@ async def root():
 async def websocket_endpoint(websocket: WebSocket):
     await ws_manager.connect(websocket)
     try:
+        age = time.monotonic() - bg.last_poll_time
+        if age > _poll_interval - 10:
+            # Data is stale (or never fetched) — kick off an immediate poll
+            asyncio.create_task(poll_usage_and_switch(ws_manager))
+        elif bg.usage_cache:
+            # Send cached snapshot immediately so the UI renders without waiting
+            snapshot = [
+                {"id": None, "email": email, "usage": usage, "error": usage.get("error")}
+                for email, usage in bg.usage_cache.items()
+            ]
+            await websocket.send_text(
+                json.dumps({"type": "usage_updated", "accounts": snapshot})
+            )
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:

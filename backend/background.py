@@ -20,8 +20,13 @@ logger = logging.getLogger(__name__)
 # In-memory usage cache: {email: usage_dict}
 usage_cache: dict[str, dict] = {}
 
+# Timestamp of the last completed poll (monotonic seconds)
+last_poll_time: float = 0.0
+
 
 async def poll_usage_and_switch(ws: WebSocketManager) -> None:
+    global last_poll_time
+    last_poll_time = time.monotonic()
     async with AsyncSessionLocal() as db:
         # ── Settings ──────────────────────────────────────────────────────────
         service_row = await db.execute(
