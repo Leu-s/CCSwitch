@@ -144,6 +144,13 @@ async def update_account(
         setattr(account, field, value)
     await db.commit()
     await db.refresh(account)
+
+    # If the currently active account was just disabled, switch away from it
+    if payload.enabled is False and account.email == ac.get_active_email():
+        next_acc = await sw.get_next_account(account.email, db)
+        if next_acc:
+            await sw.perform_switch(next_acc, "manual", db, ws_manager)
+
     return account
 
 

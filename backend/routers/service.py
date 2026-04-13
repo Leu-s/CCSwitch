@@ -1,8 +1,8 @@
 """
 Service toggle: enable / disable the multi-account manager.
 
-ON  — our system manages ~/.claude/ credentials, auto-switch is active.
-OFF — original credentials restored (default account or pre-enable backup).
+ON  — service_enabled flag is set; credential switching is handled separately.
+OFF — service_enabled flag is cleared; credentials are left untouched.
 """
 
 import json
@@ -61,69 +61,21 @@ async def get_service_status(db: AsyncSession = Depends(get_db)):
 
 @router.post("/enable")
 async def enable_service(db: AsyncSession = Depends(get_db)):
-    """
-    Enable the service:
-    1. Backup current ~/.claude/ config.
-    2. Activate the default account (if set) or the first enabled account.
-    """
-    # Don't re-enable if already on (but allow re-activation)
-    backup = ac.backup_active_config()
-    await _set_setting("original_credentials_backup", json.dumps(backup), db)
-
-    # Find which account to activate
-    default_raw = await _get_setting("default_account_id", "", db)
-    default_id = int(default_raw) if default_raw.isdigit() else None
-
-    account_to_activate = None
-    if default_id:
-        r = await db.execute(select(Account).where(Account.id == default_id))
-        account_to_activate = r.scalars().first()
-
-    if not account_to_activate:
-        r = await db.execute(
-            select(Account)
-            .where(Account.enabled == True)
-            .order_by(Account.priority.asc(), Account.id.asc())
-        )
-        account_to_activate = r.scalars().first()
-
-    if not account_to_activate:
-        raise HTTPException(400, "No accounts available — add at least one account first")
-
-    ac.activate_account_config(account_to_activate.config_dir)
+    """Enable the service by setting the service_enabled flag."""
     await _set_setting("service_enabled", "true", db)
-    logger.info("Service enabled — active account: %s", account_to_activate.email)
-
-    return {"ok": True, "active_email": account_to_activate.email}
+    active_email = ac.get_active_email()
+    logger.info("Service enabled — current active email: %s", active_email)
+    return {"ok": True, "active_email": active_email}
 
 
 # ── Disable ────────────────────────────────────────────────────────────────────
 
 @router.post("/disable")
 async def disable_service(db: AsyncSession = Depends(get_db)):
-    """
-    Disable the service: always restore the pre-enable original backup.
-
-    "Default account" controls which account activates on Enable — it does NOT
-    affect Disable.  Disable always restores the state that existed before the
-    service was first enabled.  With a single account this means ~/.claude/
-    reverts to whatever was there originally (which may be the same account —
-    that is fine and correct).
-    """
-    backup_raw = await _get_setting("original_credentials_backup", "{}", db)
-    try:
-        backup = json.loads(backup_raw)
-    except Exception:
-        backup = {}
-
-    if backup:
-        ac.restore_config_from_backup(backup)
-        logger.info("Service disabled — original credentials restored")
-    else:
-        logger.info("Service disabled — no original backup found, credentials unchanged")
-
+    """Disable the service by clearing the service_enabled flag."""
     await _set_setting("service_enabled", "false", db)
-    return {"ok": True, "restored_email": ac.get_active_email()}
+    logger.info("Service disabled")
+    return {"ok": True}
 
 
 # ── Default account ────────────────────────────────────────────────────────────
