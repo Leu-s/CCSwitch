@@ -1887,12 +1887,14 @@ async function loadTmuxData() { await Promise.all([loadSessions(), loadMonitors(
 
 async function loadSessions() {
   qs("#sessions-count").textContent = "…";
+  qs("#sessions-list").innerHTML = `<div class="empty-state" style="margin:10px;color:var(--text-mute)">Loading…</div>`;
   try {
     const data = await api("/api/tmux/sessions");
     state.sessions = data || [];
     renderSessions();
   } catch(e) {
     qs("#sessions-count").textContent = "—";
+    qs("#sessions-list").innerHTML = `<div class="empty-state" style="margin:10px;color:var(--danger)">Failed to load sessions.</div>`;
     toast("Load sessions failed",e.message,"error");
   }
 }
@@ -2019,8 +2021,15 @@ qs("#terminal-send-form").addEventListener("submit", async e => {
 });
 
 async function loadMonitors() {
-  try { const data = await api("/api/tmux/monitors"); state.monitors = data||[]; renderMonitors(); }
-  catch(e) { toast("Load monitors failed",e.message,"error"); }
+  qs("#monitors-list").innerHTML = `<div class="empty-state" style="margin:10px;color:var(--text-mute)">Loading…</div>`;
+  try {
+    const data = await api("/api/tmux/monitors");
+    state.monitors = data || [];
+    renderMonitors();
+  } catch(e) {
+    qs("#monitors-list").innerHTML = `<div class="empty-state" style="margin:10px;color:var(--danger)">Failed to load monitors.</div>`;
+    toast("Load monitors failed", e.message, "error");
+  }
 }
 
 function renderMonitors() {
@@ -2294,9 +2303,7 @@ function prependEvent(msg) {
             resultEl.textContent = '';
             resultEl.style.color = '';
             try {
-                const res = await fetch('/api/settings/setup-shell', { method: 'POST' });
-                if (!res.ok) throw new Error(`Server error ${res.status}`);
-                const data = await res.json();
+                const data = await api('/api/settings/setup-shell', { method: 'POST' });
                 const labels = { applied: '✓ applied', already_configured: 'already configured' };
                 const parts = Object.entries(data.results)
                     .filter(([, v]) => v !== 'not_found')
