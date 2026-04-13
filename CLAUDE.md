@@ -33,11 +33,12 @@ backend/
     settings.py        /api/settings get/patch + shell-setup helper
     tmux.py            /api/tmux/* panes, monitors, evaluate
   services/
-    account_service.py paths, activate_account_config, backup/restore, active pointer
-    account_queries.py DB query helpers for Account (get_by_id, get_by_email, etc.)
-    login_session_service.py  isolated add-account login sessions (+threading.RLock)
-    credential_provider.py  Keychain read/write + credential-file fallbacks
-                            (+ _credential_lock serializes Keychain + file writes)
+    credential_provider.py  CANONICAL: Keychain read/write, _load_json_safe,
+                            active_dir_pointer_path, _credential_lock (RLock)
+    account_service.py      activate_account_config (6-step), backup/restore,
+                            path helpers — imports shared utils from credential_provider
+    account_queries.py      DB query helpers (get_by_id, get_by_email, etc.)
+    login_session_service.py  isolated add-account login sessions (+RLock)
     anthropic_api.py   probe_usage() + refresh_access_token()
     switcher.py        get_next_account() + perform_switch() (+ _switch_lock asyncio)
     settings_service.py  typed get/set for Setting rows (bool/int/int_or_none/json)
@@ -121,6 +122,16 @@ uv run pytest tests/ -q
 `tests/conftest.py` chdirs to a pytest-managed tmp directory for the
 session, so hard-coded relative DB URLs (`sqlite+aiosqlite:///./test_*.db`)
 end up inside the tmp dir instead of polluting the repo root.
+
+## Concurrency model
+
+- `_credential_lock` (threading.RLock, in credential_provider.py): serializes ALL
+  mutations to Keychain entries, credential files, and the active-dir pointer.
+  Both `activate_account_config` and `save_refreshed_token` acquire it.
+- `_switch_lock` (asyncio.Lock, in switcher.py): serializes concurrent
+  `perform_switch` calls so two auto-switches can't overlap.
+- `_UsageCache` (cache.py): asyncio.Lock protects in-memory usage + token_info
+  dicts.  All reads from outside the cache use `_async` variants.
 
 ## Things that are intentionally NOT done
 
