@@ -46,6 +46,11 @@ class _UsageCache:
         """Read without locking — safe only when called from already-locked code."""
         return self._usage.get(email, {})
 
+    async def get_usage_async(self, email: str) -> dict:
+        """Thread-safe read — acquires lock, safe to call from any context."""
+        async with self._lock:
+            return self._usage.get(email, {})
+
     # ── Token info ──────────────────────────────────────────────────────────
 
     async def set_token_info(self, email: str, data: dict) -> None:
@@ -171,7 +176,7 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
             raise
 
         await cache.set_usage(account.email, usage)
-        token_info = token_info_cache.get(account.email, {})
+        token_info = cache.get_token_info(account.email) or {}
         try:
             flat = build_usage(usage, token_info)
             flat_dict = flat.model_dump() if flat else {}
@@ -200,7 +205,7 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
         is_rate_limited = "429" in str(e) or "rate_limit" in str(e).lower()
         new_entry, err_str = await cache.set_usage_error(account.email, err_str, is_rate_limited)
 
-        token_info = token_info_cache.get(account.email, {})
+        token_info = cache.get_token_info(account.email) or {}
         try:
             flat = build_usage(new_entry, token_info)
             flat_dict = flat.model_dump() if flat else {"error": err_str}
@@ -232,7 +237,7 @@ async def _maybe_auto_switch(db, ws: WebSocketManager) -> None:
     if not current_account:
         return
 
-    current_usage = cache.get_usage(current_email)
+    current_usage = await cache.get_usage_async(current_email)
     five_hour_pct = (current_usage.get("five_hour") or {}).get("utilization", 0)
     threshold = current_account.threshold_pct
 
