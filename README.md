@@ -75,6 +75,18 @@ cc-acc service remove                # uninstall
 cc-acc service remove --purge-logs   # uninstall + delete logs
 ```
 
+The LaunchAgent:
+- starts the server **immediately** on install (`RunAtLoad: true`)
+- **auto-restarts** on crash with a 30 s throttle (`KeepAlive: {SuccessfulExit: false}`)
+- **starts automatically** on every login
+- writes logs to `~/.local/state/claude-multi/server.log`
+
+```bash
+cc-acc log -f                        # tail logs
+cc-acc status                        # check if the service is running
+launchctl print gui/$(id -u)/com.claudemulti.manager  # raw launchd status
+```
+
 ---
 
 ## Configuration
