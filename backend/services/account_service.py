@@ -39,7 +39,6 @@ import threading
 import time
 import uuid
 
-from sqlalchemy import select
 
 from ..config import settings
 from ..models import Account
@@ -98,7 +97,10 @@ def active_config_file() -> str:
 
 
 def active_dir_pointer_path() -> str:
-    return os.path.expanduser("~/.claude-multi/active")
+    """Path of the file that records which isolated account dir is active.
+    Derived from settings.state_dir so users who override CLAUDE_MULTI_STATE_DIR
+    get a single, consistent location everywhere in the codebase."""
+    return os.path.join(os.path.expanduser(settings.state_dir), "active")
 
 
 def make_account_config_dir(session_id: str) -> str:
@@ -403,17 +405,6 @@ def activate_account_config(target_config_dir: str) -> None:
     write_active_config_dir(target_config_dir)
 
 
-# ── Token liveness ────────────────────────────────────────────────────────────
-
-def is_account_usable(config_dir: str) -> bool:
-    """Quick sanity check: does the account's config dir still hold a token we
-    can read? Does NOT verify the token with the server — callers that want a
-    real liveness check should also call anthropic_api.probe_usage()."""
-    return bool(get_access_token_from_config_dir(config_dir)) or bool(
-        get_refresh_token_from_config_dir(config_dir)
-    )
-
-
 # ── Login session tracking ─────────────────────────────────────────────────────
 
 # session_id → creation timestamp (time.time())
@@ -539,71 +530,15 @@ def cleanup_login_session(session_id: str) -> None:
 
 
 # ── Query helpers ──────────────────────────────────────────────────────────────
-
-async def get_account_by_id(account_id: int, db) -> Account | None:
-    result = await db.execute(select(Account).where(Account.id == account_id))
-    return result.scalars().first()
-
-
-async def get_account_by_email(email: str, db) -> Account | None:
-    result = await db.execute(select(Account).where(Account.email == email))
-    return result.scalars().first()
-
-
-async def get_enabled_accounts(db) -> list:
-    result = await db.execute(
-        select(Account)
-        .where(Account.enabled == True)
-        .order_by(Account.priority.asc(), Account.id.asc())
-    )
-    return result.scalars().all()
-
-
-async def get_all_accounts(db) -> list:
-    result = await db.execute(
-        select(Account).order_by(Account.priority.asc(), Account.id.asc())
-    )
-    return result.scalars().all()
-
-
-async def get_email_to_id_map(db) -> dict[str, int]:
-    """Return a mapping of email → account id for all accounts."""
-    from sqlalchemy import select
-    from ..models import Account
-    rows = await db.execute(select(Account.id, Account.email))
-    return {row[1]: row[0] for row in rows.all()}
-
-
-async def save_verified_account(
-    email: str,
-    config_dir: str,
-    threshold_pct: float,
-    db,
-) -> "Account | None":
-    """
-    Persist a newly verified login account. Returns the saved Account,
-    or None if an account with this email already exists (caller should
-    treat as 'already_exists').
-    """
-    from sqlalchemy import select, func
-    from ..models import Account
-
-    existing = await db.execute(select(Account).where(Account.email == email))
-    if existing.scalars().first():
-        return None
-
-    max_result = await db.execute(select(func.max(Account.priority)))
-    max_prio = max_result.scalar()
-
-    account = Account(
-        email=email,
-        config_dir=config_dir,
-        threshold_pct=threshold_pct,
-        priority=(max_prio + 1) if max_prio is not None else 0,
-    )
-    db.add(account)
-    await db.commit()
-    return account
+# Extracted to account_queries.py; re-exported here for backward compatibility.
+from .account_queries import (  # noqa: F401
+    get_account_by_id,
+    get_account_by_email,
+    get_enabled_accounts,
+    get_all_accounts,
+    get_email_to_id_map,
+    save_verified_account,
+)
 
 
 # ── Usage helpers ──────────────────────────────────────────────────────────────
