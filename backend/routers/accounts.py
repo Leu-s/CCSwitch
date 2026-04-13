@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -12,7 +13,7 @@ from ..config import settings
 from ..services import account_service as ac
 from ..services.account_service import build_usage
 from ..services import switcher as sw
-from ..background import usage_cache, token_info_cache, _cache_lock
+from ..background import usage_cache, token_info_cache, _cache_lock, cache, forget_account
 from ..ws import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
 async def start_login():
     """Create an isolated tmux window for authenticating a new Claude account."""
     try:
-        info = ac.start_login_session()
+        info = await asyncio.to_thread(ac.start_login_session)
     except Exception as e:
         raise HTTPException(500, str(e))
     return LoginSessionOut(**info)
@@ -163,9 +164,7 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
 
     # Drop any cached usage/token entries so the deleted account does not
     # linger in memory forever.
-    async with _cache_lock:
-        usage_cache.pop(account.email, None)
-        token_info_cache.pop(account.email, None)
+    await cache.invalidate(account.email)
 
     # Notify all connected clients so their UI removes the card immediately.
     # The account is already deleted at this point, so a broadcast failure must

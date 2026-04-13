@@ -18,34 +18,80 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-# In-memory usage cache: {email: usage_dict}
-usage_cache: dict[str, dict] = {}
-# In-memory token metadata cache: {email: token_info_dict}.  Populated here so
-# GET /api/accounts does not need a subprocess Keychain lookup per account on
-# every request (N+1).  New accounts fall back to a direct lookup until the
-# next poll hydrates this cache.
-token_info_cache: dict[str, dict] = {}
-_cache_lock = asyncio.Lock()
+class _UsageCache:
+    """Thread-safe wrapper for in-memory usage and token-info caches.
+
+    All public methods acquire the internal lock, so callers never access
+    the raw dicts directly.  The _unlocked_ helpers are only for use inside
+    already-locked code paths within this module.
+    """
+
+    def __init__(self):
+        self._usage: dict[str, dict] = {}
+        self._token_info: dict[str, dict] = {}
+        self._lock = asyncio.Lock()
+
+    # ── Usage ──────────────────────────────────────────────────────────────
+
+    async def set_usage(self, email: str, data: dict) -> None:
+        async with self._lock:
+            self._usage[email] = data
+
+    async def snapshot(self) -> dict[str, dict]:
+        """Return a shallow copy safe for iteration outside the lock."""
+        async with self._lock:
+            return dict(self._usage)
+
+    def get_usage(self, email: str) -> dict:
+        """Read without locking — safe only when called from already-locked code."""
+        return self._usage.get(email, {})
+
+    # ── Token info ──────────────────────────────────────────────────────────
+
+    async def set_token_info(self, email: str, data: dict) -> None:
+        async with self._lock:
+            self._token_info[email] = data
+
+    def get_token_info(self, email: str) -> dict | None:
+        """Read without locking — safe from within an already-locked context."""
+        return self._token_info.get(email)
+
+    # ── Invalidation ──────────────────────────────────────────────────────
+
+    async def invalidate(self, email: str) -> None:
+        """Remove all cache entries for an account (e.g. on account delete)."""
+        async with self._lock:
+            self._usage.pop(email, None)
+            self._token_info.pop(email, None)
+
+
+cache = _UsageCache()
+
+# Backward-compatible aliases — prefer cache.* directly for new code.
+usage_cache = cache._usage
+token_info_cache = cache._token_info
+_cache_lock = cache._lock
 
 
 async def snapshot_usage_cache() -> dict[str, dict]:
-    """Shallow copy of usage_cache taken under the lock so callers can
-    iterate safely without racing the next poll cycle."""
-    async with _cache_lock:
-        return dict(usage_cache)
+    """Shallow copy of usage_cache — backward-compatible wrapper."""
+    return await cache.snapshot()
 
 
 async def forget_account(email: str) -> None:
     """Drop any cached usage and token-info entries for an account that has
-    been deleted. Held under _cache_lock so an in-flight poll cycle cannot
-    re-insert a stale entry between the two pops."""
-    async with _cache_lock:
-        usage_cache.pop(email, None)
-        token_info_cache.pop(email, None)
+    been deleted. Delegates to cache.invalidate()."""
+    await cache.invalidate(email)
 
 
-async def _poll_one_account(account, db) -> tuple[dict, bool]:
-    """Poll usage for a single account and return (update_entry, stale_changed)."""
+async def _process_single_account(account: Account, db) -> tuple[dict, "str | None"]:
+    """Fetch token, optionally refresh, probe usage, and update caches for one account.
+
+    Returns:
+        (usage_entry, new_stale_reason) where usage_entry is a dict with keys
+        ``id``, ``email``, ``usage``, ``error`` suitable for the WS broadcast,
+        and new_stale_reason is the (possibly None) stale reason to persist.
+    """
     new_stale_reason: str | None = None
     try:
         token = await asyncio.to_thread(ac.get_access_token_from_config_dir, account.config_dir)
@@ -57,8 +103,7 @@ async def _poll_one_account(account, db) -> tuple[dict, bool]:
         # expiry + subscription metadata without spawning a Keychain
         # subprocess per account per request.
         token_info = await asyncio.to_thread(ac.get_token_info, account.config_dir)
-        async with _cache_lock:
-            token_info_cache[account.email] = token_info
+        await cache.set_token_info(account.email, token_info)
 
         # Refresh the token if it is about to expire (within 5 minutes).
         # Compute in integer milliseconds throughout to avoid float drift.
@@ -77,8 +122,8 @@ async def _poll_one_account(account, db) -> tuple[dict, bool]:
                             if expires_in
                             else None
                         )
-                        ac.save_refreshed_token(
-                            account.config_dir, new_token, new_expires_at_ms
+                        await asyncio.to_thread(
+                            ac.save_refreshed_token, account.config_dir, new_token, new_expires_at_ms
                         )
                         token = new_token
                         logger.info("Refreshed access token for %s", account.email)
@@ -90,7 +135,7 @@ async def _poll_one_account(account, db) -> tuple[dict, bool]:
                 )
                 new_stale_reason = "Refresh token revoked — re-login required"
                 # Mark token as permanently expired so we don't retry on every poll.
-                ac.save_refreshed_token(account.config_dir, token, expires_at=1)
+                await asyncio.to_thread(lambda: ac.save_refreshed_token(account.config_dir, token, expires_at=1))
             else:
                 logger.warning("Token refresh HTTP error for %s: %s", account.email, refresh_http_err)
         except Exception as refresh_err:
@@ -104,8 +149,7 @@ async def _poll_one_account(account, db) -> tuple[dict, bool]:
                 new_stale_reason = "Anthropic API returned 401 — re-login required"
             raise
 
-        async with _cache_lock:
-            usage_cache[account.email] = usage
+        await cache.set_usage(account.email, usage)
         token_info = token_info_cache.get(account.email, {})
         try:
             flat = build_usage(usage, token_info)
@@ -113,7 +157,7 @@ async def _poll_one_account(account, db) -> tuple[dict, bool]:
         except Exception as _bu_err:
             logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
             flat_dict = {}
-        update_entry = {
+        usage_entry: dict = {
             "id": account.id,
             "email": account.email,
             "usage": flat_dict,
@@ -135,14 +179,14 @@ async def _poll_one_account(account, db) -> tuple[dict, bool]:
         # Determine new cache entry and err_str inside a single lock
         # to avoid stale-read races between check and write.
         is_rate_limited = "429" in str(e) or "rate_limit" in str(e).lower()
-        async with _cache_lock:
-            prev = usage_cache.get(account.email, {})
+        async with cache._lock:
+            prev = cache._usage.get(account.email, {})
             if is_rate_limited and prev and "error" not in prev:
                 new_entry = {**prev, "rate_limited": True}
                 err_str = "Rate limited"
             else:
                 new_entry = {"error": err_str}
-            usage_cache[account.email] = new_entry
+            cache._usage[account.email] = new_entry
 
         token_info = token_info_cache.get(account.email, {})
         try:
@@ -151,42 +195,19 @@ async def _poll_one_account(account, db) -> tuple[dict, bool]:
         except Exception as _bu_err:
             logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
             flat_dict = {"error": err_str}
-        update_entry = {
+        usage_entry = {
             "id": account.id,
             "email": account.email,
             "usage": flat_dict,
             "error": err_str if "error" in new_entry else None,
         }
 
-    # Flip stale_reason on the DB row if it changed. Rate-limiting is NOT
-    # staleness — we only set stale for 401-class auth failures.
-    stale_changed = False
-    if new_stale_reason != account.stale_reason:
-        account.stale_reason = new_stale_reason
-        async with _cache_lock:
-            token_info_cache.pop(account.email, None)
-        stale_changed = True
-        if new_stale_reason:
-            logger.warning("Marking %s stale: %s", account.email, new_stale_reason)
-        else:
-            logger.info("Cleared stale flag for %s", account.email)
-
-    return update_entry, stale_changed
+    return usage_entry, new_stale_reason
 
 
-async def _broadcast_usage(ws, updated: list) -> None:
-    """Broadcast the usage_updated event to all connected WebSocket clients."""
-    try:
-        await ws.broadcast({"type": "usage_updated", "accounts": updated})
-    except Exception as _bc_err:
-        logger.warning("WS broadcast failed: %s", _bc_err)
-
-
-async def _auto_switch_if_needed(ws, db) -> None:
-    """Check usage thresholds and perform an auto-switch if needed."""
-    # ── Auto-switch logic ─────────────────────────────────────────────────
+async def _maybe_auto_switch(db, ws: WebSocketManager) -> None:
+    """Check auto-switch threshold for the active account and switch if needed."""
     auto_enabled = await ss.get_bool("auto_switch_enabled", False, db)
-
     if not auto_enabled:
         return
 
@@ -199,8 +220,8 @@ async def _auto_switch_if_needed(ws, db) -> None:
     if not current_account:
         return
 
-    async with _cache_lock:
-        current_usage = usage_cache.get(current_email, {})
+    async with cache._lock:
+        current_usage = cache._usage.get(current_email, {})
     five_hour_pct = (current_usage.get("five_hour") or {}).get("utilization", 0)
     threshold = current_account.threshold_pct
 
@@ -234,7 +255,6 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
     async with AsyncSessionLocal() as db:
         # ── Check service status FIRST ────────────────────────────────────────
         service_enabled = await ss.get_bool("service_enabled", False, db)
-
         if not service_enabled:
             return  # service is OFF — exit immediately, no polling, no broadcast
 
@@ -245,12 +265,28 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
         updated = []
         stale_changed = False
         for account in accounts:
-            entry, changed = await _poll_one_account(account, db)
-            updated.append(entry)
-            stale_changed = stale_changed or changed
+            usage_entry, new_stale_reason = await _process_single_account(account, db)
+            updated.append(usage_entry)
+
+            # Flip stale_reason on the DB row if it changed. Rate-limiting is NOT
+            # staleness — we only set stale for 401-class auth failures.
+            if new_stale_reason != account.stale_reason:
+                account.stale_reason = new_stale_reason
+                async with _cache_lock:
+                    token_info_cache.pop(account.email, None)
+                stale_changed = True
+                if new_stale_reason:
+                    logger.warning("Marking %s stale: %s", account.email, new_stale_reason)
+                else:
+                    logger.info("Cleared stale flag for %s", account.email)
 
         if stale_changed:
             await db.commit()
 
-        await _broadcast_usage(ws, updated)
-        await _auto_switch_if_needed(ws, db)
+        try:
+            await ws.broadcast({"type": "usage_updated", "accounts": updated})
+        except Exception as _bc_err:
+            logger.warning("WS broadcast failed: %s", _bc_err)
+
+        # ── Auto-switch logic ─────────────────────────────────────────────────
+        await _maybe_auto_switch(db, ws)
