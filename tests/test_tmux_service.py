@@ -35,8 +35,10 @@ def test_capture_pane():
 async def test_evaluate_with_haiku_success():
     from backend.services.tmux_service import evaluate_with_haiku
     from unittest.mock import AsyncMock
-    mock_proc = AsyncMock()
-    mock_proc.communicate = AsyncMock(return_value=(b"SUCCESS The session continued normally.", b""))
+    mock_proc = MagicMock()
+    # communicate is called as an argument to wait_for (which is also mocked),
+    # so it must be a plain MagicMock — an AsyncMock would leave the coroutine unawaited.
+    mock_proc.communicate = MagicMock(return_value=(b"SUCCESS The session continued normally.", b""))
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc), \
          patch("asyncio.wait_for", new_callable=AsyncMock, return_value=(b"SUCCESS The session continued normally.", b"")):
         result = await evaluate_with_haiku("some terminal output", "claude-haiku-4-5-20251001")
@@ -46,8 +48,8 @@ async def test_evaluate_with_haiku_success():
 async def test_evaluate_with_haiku_defaults_uncertain():
     from backend.services.tmux_service import evaluate_with_haiku
     from unittest.mock import AsyncMock
-    mock_proc = AsyncMock()
-    mock_proc.communicate = AsyncMock(return_value=(b"Something happened.", b""))
+    mock_proc = MagicMock()
+    mock_proc.communicate = MagicMock(return_value=(b"Something happened.", b""))
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc), \
          patch("asyncio.wait_for", new_callable=AsyncMock, return_value=(b"Something happened.", b"")):
         result = await evaluate_with_haiku("output", "model")

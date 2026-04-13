@@ -306,6 +306,34 @@
     color: #fcd34d; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
   }
 
+  .stale-pill {
+    display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px;
+    background: rgba(239,68,68,0.14); border: 1px solid rgba(239,68,68,0.38);
+    color: #fca5a5; border-radius: 999px; font-size: 10px; font-weight: 800;
+    letter-spacing: 0.06em; cursor: help;
+  }
+  .stale-pill::before {
+    content: ""; width: 5px; height: 5px; background: var(--danger); border-radius: 50%;
+    box-shadow: 0 0 6px var(--danger);
+  }
+  .account-card.stale {
+    border-color: rgba(239,68,68,0.35);
+    background: linear-gradient(160deg, var(--card) 0%, rgba(239,68,68,0.05) 100%);
+  }
+  .account-card.stale.active {
+    border-color: var(--danger);
+    box-shadow: 0 0 0 1px var(--danger), 0 0 26px rgba(239,68,68,0.35);
+  }
+  .stale-banner {
+    display: flex; align-items: center; gap: 6px; padding: 7px 14px;
+    background: rgba(239,68,68,0.09); border-top: 1px solid rgba(239,68,68,0.2);
+    color: #fecaca; font-size: 11px; font-weight: 600;
+  }
+  .stale-banner svg { flex-shrink: 0; }
+  [data-theme="light"] .stale-pill { background: rgba(239,68,68,0.08); border-color: rgba(239,68,68,0.3); color: #b91c1c; }
+  [data-theme="light"] .stale-pill::before { box-shadow: none; }
+  [data-theme="light"] .stale-banner { background: rgba(239,68,68,0.07); color: #991b1b; }
+
   /* Usage */
   .usage-block { display: flex; flex-direction: column; gap: 7px; padding: 12px 18px; border-top: 1px solid var(--border); }
   .usage-window { display: flex; flex-direction: column; gap: 4px; }
@@ -852,10 +880,12 @@
                 </div>
             </div>
         </div>
+        <div id="accounts-loading" class="empty-state">Loading accounts…</div>
         <div id="accounts-grid" class="accounts-grid"></div>
         <div id="accounts-empty" class="empty-state" style="display:none;">
           No accounts yet — click "Add Account" above to authenticate one.
         </div>
+        <div id="accounts-error" class="empty-state" style="display:none;color:#fca5a5;"></div>
       </div>
 
       <!-- ── Sidebar: Switch Log ── -->
@@ -918,16 +948,16 @@
           <span class="count" id="monitors-count">0</span>
         </div>
         <div class="panel-body" id="monitors-list"></div>
-        <form class="add-monitor-form" id="add-monitor-form" autocomplete="off">
-          <input class="input" name="name" placeholder="Name" required />
+        <form class="add-monitor-form" id="add-monitor-form" autocomplete="off" aria-label="Add tmux monitor">
+          <input class="input" name="name" placeholder="Name" required aria-label="Monitor name" />
           <div style="display:flex;flex-direction:column;gap:3px;">
-            <select class="select" name="pattern_type" id="pattern-type-select">
+            <select class="select" name="pattern_type" id="pattern-type-select" aria-label="Pattern type">
               <option value="manual">manual</option>
               <option value="regex">regex</option>
             </select>
             <small id="pattern-type-hint" style="font-size:10px;color:var(--text-mute);line-height:1.3;padding:0 2px;"></small>
           </div>
-          <input class="input" name="pattern" placeholder="Pattern (e.g. main:0.0)" required />
+          <input class="input" name="pattern" placeholder="Pattern (e.g. main:0.0)" required aria-label="Monitor pattern" />
           <button class="btn primary" type="submit">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
             Add
@@ -983,7 +1013,7 @@
           <div class="add-terminal-output" id="add-term-output">(waiting for output…)</div>
           <form class="add-terminal-send" id="add-term-send-form">
             <span class="prompt">❯</span>
-            <input id="add-term-input" type="text" autocomplete="off" spellcheck="false" placeholder="send keys to terminal…" />
+            <input id="add-term-input" type="text" autocomplete="off" spellcheck="false" placeholder="send keys to terminal…" aria-label="Send keys to add-account terminal" />
             <button type="submit">Send ↵</button>
           </form>
         </div>
@@ -1023,12 +1053,28 @@
   <div class="terminal-output" id="terminal-output"></div>
   <form id="terminal-send-form" class="terminal-send-form">
     <span class="terminal-send-prompt">❯</span>
-    <input id="terminal-input" class="terminal-send-input" type="text" autocomplete="off" spellcheck="false" placeholder="send text to pane…" />
+    <input id="terminal-input" class="terminal-send-input" type="text" autocomplete="off" spellcheck="false" placeholder="send text to pane…" aria-label="Send text to tmux pane" />
     <button type="submit" class="terminal-send-btn">Send ↵</button>
   </form>
 </div>
 
 <script>
+// =============================================================
+// Constants
+// =============================================================
+const API_TIMEOUT_MS = 30000;
+const WS_PING_INTERVAL_MS = 25000;
+const TOAST_TTL_MS = 4000;
+const TOAST_FADEOUT_MS = 300;
+const MAX_TOASTS = 5;
+const SLIDER_DEBOUNCE_MS = 400;
+const TERMINAL_REFRESH_MS = 2000;
+const _sliderDebounce = new Map(); // accountId → timer handle
+const MAX_EVENT_FEED = 20;
+const MAX_RECONNECT_MS = 15000;
+const LOG_REFRESH_MS = 30000;
+const TOKEN_EXPIRY_SOON_MS = 3600000;
+
 // =============================================================
 // State
 // =============================================================
@@ -1111,16 +1157,16 @@ function usageClass(pct, threshold = 95) {
 // =============================================================
 // Toast
 // =============================================================
-function toast(title, body = "", kind = "info", ttl = 4000) {
+function toast(title, body = "", kind = "info", ttl = TOAST_TTL_MS) {
   const container = qs("#toast-container");
   // Cap at 5 concurrent toasts — evict the oldest if at limit
   const existing = container.querySelectorAll(".toast");
-  if (existing.length >= 5) existing[0].remove();
+  if (existing.length >= MAX_TOASTS) existing[0].remove();
   const el = document.createElement("div");
   el.className = "toast " + kind;
   el.innerHTML = `<div class="toast-title">${escapeHtml(title)}</div>${body ? `<div class="toast-body">${escapeHtml(body)}</div>` : ""}`;
   container.appendChild(el);
-  setTimeout(() => { el.classList.add("fade-out"); setTimeout(() => el.remove(), 300); }, ttl);
+  setTimeout(() => { el.classList.add("fade-out"); setTimeout(() => el.remove(), TOAST_FADEOUT_MS); }, ttl);
 }
 
 // =============================================================
@@ -1128,7 +1174,7 @@ function toast(title, body = "", kind = "info", ttl = 4000) {
 // =============================================================
 async function api(path, opts = {}) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
   const init = { headers: { "Content-Type": "application/json" }, ...opts, signal: controller.signal };
   if (opts.body && typeof opts.body === "object") init.body = JSON.stringify(opts.body);
   try {
@@ -1272,6 +1318,9 @@ let pendingRenderAfterDrag = false;
 function renderAccounts() {
   if (isDragging || isSavingPriorities) { pendingRenderAfterDrag = true; return; }
   pendingRenderAfterDrag = false;
+  // Clear all pending slider debounce timers before re-render
+  _sliderDebounce.forEach(t => clearTimeout(t));
+  _sliderDebounce.clear();
   const grid = qs("#accounts-grid");
   const empty = qs("#accounts-empty");
   const countEl = qs("#accounts-count");
@@ -1327,7 +1376,7 @@ function usageBlockHtml(acc) {
   const subBadge = usage.subscription_type
     ? `<span class="sub-badge">${escapeHtml(usage.subscription_type)}</span>` : "";
   const tokenExpMs = tsToMs(usage.token_expires_at);
-  const tokenExpiringSoon = tokenExpMs && (tokenExpMs - Date.now()) < 3600000;
+  const tokenExpiringSoon = tokenExpMs && (tokenExpMs - Date.now()) < TOKEN_EXPIRY_SOON_MS;
   const sessionLine = tokenExpMs
     ? `<span class="session-expiry${tokenExpiringSoon ? " expiring-soon" : ""}">Token ${fmtReset(usage.token_expires_at)} · ${fmtRelative(usage.token_expires_at)}</span>` : "";
   const footer = (subBadge || sessionLine || rateLimitedBadge)
@@ -1339,11 +1388,18 @@ function usageBlockHtml(acc) {
 function accountCardHtml(acc, index) {
   const isActive = !!acc.is_active;
   const disabled = !acc.enabled;
+  const isStale = !!acc.stale_reason;
   const isDefault = Number(acc.id) === Number(state.service.default_account_id);
   const threshold = acc.threshold_pct ?? 95;
 
+  const staleBanner = isStale ? `
+    <div class="stale-banner" title="${escapeHtml(acc.stale_reason)}">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <span>${escapeHtml(acc.stale_reason)} — click "Re-login" in the Add Account flow.</span>
+    </div>` : "";
+
   return `
-    <article class="account-card ${isActive?"active":""} ${disabled?"disabled":""}"
+    <article class="account-card ${isActive?"active":""} ${disabled?"disabled":""} ${isStale?"stale":""}"
              draggable="true" data-id="${acc.id}" data-email="${escapeHtml(acc.email)}">
       ${index !== undefined ? `<span class="card-num">${String(index + 1).padStart(2, "0")}</span>` : ""}
       <div class="card-header">
@@ -1355,6 +1411,7 @@ function accountCardHtml(acc, index) {
           <div class="card-meta">
             ${isActive ? `<span class="active-pill">Active</span>` : ""}
             ${isDefault ? `<span class="default-pill">Default</span>` : ""}
+            ${isStale ? `<span class="stale-pill" title="${escapeHtml(acc.stale_reason)}">Re-login needed</span>` : ""}
             <label class="toggle" title="Include in auto-switching">
               <input type="checkbox" class="enabled-toggle" data-id="${acc.id}" ${acc.enabled?"checked":""} />
               <span class="track"></span>
@@ -1371,6 +1428,7 @@ function accountCardHtml(acc, index) {
           </button>
         </div>
       </div>
+      ${staleBanner}
       ${usageBlockHtml(acc)}
       <div class="card-footer">
         <div class="threshold-row">
@@ -1381,8 +1439,8 @@ function accountCardHtml(acc, index) {
           </div>
           <span class="threshold-value" id="tval-${acc.id}">${threshold.toFixed(0)}%</span>
         </div>
-        <button class="btn primary ${isActive?"outlined":""} switch-btn" data-id="${acc.id}" ${isActive?"disabled":""} ${!isActive && disabled ? 'title="Manual switch — available even when excluded from auto-switching"' : ""}>
-          ${isActive ? "Currently active" : "Switch to"}
+        <button class="btn primary ${isActive?"outlined":""} switch-btn" data-id="${acc.id}" ${(isActive||isStale)?"disabled":""} title="${isStale?"Credentials invalid — re-login this account first":(!isActive && disabled ? "Manual switch — available even when excluded from auto-switching":"")}">
+          ${isActive ? "Currently active" : (isStale ? "Credentials invalid" : "Switch to")}
         </button>
       </div>
     </article>`;
@@ -1421,18 +1479,19 @@ function attachCardEvents() {
       updateSliderFill(slider);
     });
     updateSliderFill(slider); // initialise fill on render
-    let tDebounce;
     slider.addEventListener("change", () => {
       const val = Number(slider.value);
-      clearTimeout(tDebounce);
-      tDebounce = setTimeout(async () => {
+      const prev = _sliderDebounce.get(id);
+      if (prev) clearTimeout(prev);
+      _sliderDebounce.set(id, setTimeout(async () => {
+        _sliderDebounce.delete(id);
         try {
           await api(`/api/accounts/${id}`, {method:"PATCH", body:{threshold_pct:val}});
           const acc = state.accounts.find(a => String(a.id)===id);
           if (acc) acc.threshold_pct = val;
           toast("Threshold saved", `${val}%`, "success", 1800);
         } catch(e) { toast("Update failed", e.message, "error"); }
-      }, 400);
+      }, SLIDER_DEBOUNCE_MS));
     });
   });
 
@@ -1457,17 +1516,23 @@ function attachCardEvents() {
   qsa(".switch-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       if (btn.disabled) return;
+      if (isSwitching) return;
+      isSwitching = true;
       const id = btn.dataset.id;
       let ok = false;
-      await withLoading(btn, async () => {
-        try {
-          await api(`/api/accounts/${id}/switch`, {method:"POST"});
-          toast("Switch requested", "Waiting for confirmation…", "success");
-          ok = true;
-        } catch(e) { toast("Switch failed", e.message, "error"); }
-      });
-      // Load outside withLoading to avoid orphaned-button cleanup on detached node
-      if (ok) { await loadAccounts(); await loadServiceStatus(); }
+      try {
+        await withLoading(btn, async () => {
+          try {
+            await api(`/api/accounts/${id}/switch`, {method:"POST"});
+            toast("Switch requested", "Waiting for confirmation…", "success");
+            ok = true;
+          } catch(e) { toast("Switch failed", e.message, "error"); }
+        });
+        // Load outside withLoading to avoid orphaned-button cleanup on detached node
+        if (ok) { await loadAccounts(); await loadServiceStatus(); }
+      } finally {
+        isSwitching = false;
+      }
     });
   });
 
@@ -1495,6 +1560,7 @@ function attachCardEvents() {
 let dragSrc = null;
 let isDragging = false;
 let isSavingPriorities = false;
+let isSwitching = false;
 
 function attachDragHandlers(card) {
   let fromHandle = false;
@@ -1555,11 +1621,22 @@ function attachDragHandlers(card) {
 // Data loaders
 // =============================================================
 async function loadAccounts() {
+  const loadingEl = qs("#accounts-loading");
+  const errorEl = qs("#accounts-error");
   try {
     const data = await api("/api/accounts");
     state.accounts = data;
+    if (errorEl) errorEl.style.display = "none";
     renderAccounts();
-  } catch(e) { toast("Load accounts failed",e.message,"error"); }
+  } catch(e) {
+    toast("Load accounts failed", e.message, "error");
+    if (errorEl) {
+      errorEl.textContent = `Failed to load accounts: ${e.message}`;
+      errorEl.style.display = "block";
+    }
+  } finally {
+    if (loadingEl) loadingEl.style.display = "none";
+  }
 }
 
 
@@ -1575,7 +1652,7 @@ async function loadSwitchLog(page) {
     state.logTotal = countData.total;
     state.switchLog = data;
     renderSwitchLog();
-  } catch(e) { console.warn("switch log:",e); }
+  } catch(e) { console.warn("loadSwitchLog error", e); toast("Failed to load switch log", e.message, "error"); }
 }
 
 // ── Switch Log helpers ─────────────────────────────────────────────────────
@@ -1677,7 +1754,7 @@ function prependSwitchLogRow() {
 qs("#log-prev-btn").addEventListener("click", () => loadSwitchLog(state.logPage - 1));
 
 // Refresh relative timestamps every 30s without a full re-render
-setInterval(() => {
+const _tsInterval = setInterval(() => {
   if (!state.switchLog.length) return;
   const lastEl = qs("#sl-last");
   if (lastEl) lastEl.textContent = `last · ${relTime(state.switchLog[0].triggered_at)}`;
@@ -1685,7 +1762,7 @@ setInterval(() => {
   state.switchLog.forEach((row, i) => {
     if (times[i]) times[i].textContent = relTime(row.triggered_at);
   });
-}, 30000);
+}, LOG_REFRESH_MS);
 qs("#log-next-btn").addEventListener("click", () => loadSwitchLog(state.logPage + 1));
 
 // =============================================================
@@ -1708,7 +1785,7 @@ function closeAddModal() {
   if (addTermInterval) { clearInterval(addTermInterval); addTermInterval = null; }
   // Cancel dangling session
   if (loginSession) {
-    api(`/api/accounts/cancel-login?session_id=${loginSession.session_id}`, {method:"DELETE"}).catch(()=>{});
+    api(`/api/accounts/cancel-login?session_id=${loginSession.session_id}`, {method:"DELETE"}).catch(e => console.warn("cancel-login:", e));
     loginSession = null;
   }
 }
@@ -1729,7 +1806,7 @@ qs("#open-terminal-btn").addEventListener("click", async () => {
       // Poll terminal output
       refreshAddTerminal();
       if (addTermInterval) { clearInterval(addTermInterval); addTermInterval = null; }
-      addTermInterval = setInterval(refreshAddTerminal, 2000);
+      addTermInterval = setInterval(refreshAddTerminal, TERMINAL_REFRESH_MS);
     } catch(e) { toast("Failed to open terminal", e.message, "error"); }
   });
 });
@@ -1743,6 +1820,7 @@ async function fetchTerminalCapture(target, outputEl, liveEl) {
     if (atBottom) outputEl.scrollTop = outputEl.scrollHeight;
     if (liveEl) { liveEl.className = "terminal-live"; liveEl.title = "Live"; liveEl.textContent = "live"; }
   } catch (e) {
+    outputEl.textContent = "Error fetching terminal output: " + String(e);
     if (liveEl) { liveEl.className = "terminal-live error"; liveEl.title = String(e); liveEl.textContent = "error"; }
   }
 }
@@ -1844,7 +1922,7 @@ function openTerminal(target) {
   qs("#terminal-input").focus();
   refreshCapture();
   if (captureInterval) clearInterval(captureInterval);
-  captureInterval = setInterval(refreshCapture, 2000);
+  captureInterval = setInterval(refreshCapture, TERMINAL_REFRESH_MS);
 }
 
 function closeTerminal() {
@@ -1858,6 +1936,7 @@ function closeTerminal() {
 window.addEventListener("beforeunload", () => {
   if (captureInterval) { clearInterval(captureInterval); captureInterval = null; }
   if (addTermInterval) { clearInterval(addTermInterval); addTermInterval = null; }
+  clearInterval(_tsInterval);
 });
 
 function prefillMonitorForm(target, cmd) {
@@ -1903,20 +1982,24 @@ qs("#terminal-close-btn").addEventListener("click", closeTerminal);
     document.body.style.userSelect = "none";
     document.body.style.cursor = "ns-resize";
     qs("main").style.transition = "none";
-  });
-  document.addEventListener("mousemove", e => {
-    if (!dragging) return;
-    const newH = Math.min(Math.max(startH + (startY - e.clientY), 120), window.innerHeight * 0.85);
-    panel.style.height = newH + "px";
-    qs("main").style.paddingBottom = (newH + 20) + "px";
-  });
-  document.addEventListener("mouseup", () => {
-    if (!dragging) return;
-    dragging = false;
-    handle.classList.remove("dragging");
-    document.body.style.userSelect = "";
-    document.body.style.cursor = "";
-    qs("main").style.transition = "";
+
+    function onMove(e) {
+      if (!dragging) return;
+      const newH = Math.min(Math.max(startH + (startY - e.clientY), 120), window.innerHeight * 0.85);
+      panel.style.height = newH + "px";
+      qs("main").style.paddingBottom = (newH + 20) + "px";
+    }
+    function onUp() {
+      dragging = false;
+      handle.classList.remove("dragging");
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      qs("main").style.transition = "";
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
   });
 })();
 
@@ -1959,110 +2042,141 @@ function renderMonitors() {
         </div>
       </div>
     </div>`).join("");
+}
 
-  qsa(".monitor-enabled").forEach(cb => {
-    cb.addEventListener("change", async () => {
-      const id = cb.dataset.id; const m = state.monitors.find(x=>String(x.id)===id); if (!m) return;
-      try {
-        await api(`/api/tmux/monitors/${id}`,{method:"PATCH",body:{name:m.name,pattern_type:m.pattern_type,pattern:m.pattern,enabled:cb.checked}});
-        m.enabled = cb.checked;
-        cb.closest(".monitor-row").classList.toggle("disabled", !cb.checked);
-        toast(cb.checked ? "Monitor enabled" : "Monitor disabled", m.name, "success", 2000);
-      } catch(e) { cb.checked = !cb.checked; toast("Update failed",e.message,"error"); }
-    });
-  });
+// Delegated listeners for #monitors-list — attached ONCE, handle all renders.
+// Per-row state (delete confirm timer) is stored in a WeakMap keyed on the wrap element.
+const _monitorDelState = new WeakMap(); // wrap → { timer }
 
-  qsa(".monitor-del-wrap").forEach(wrap => {
-    const id = wrap.querySelector(".monitor-del").dataset.id;
+qs("#monitors-list").addEventListener("change", async e => {
+  const cb = e.target.closest(".monitor-enabled");
+  if (!cb) return;
+  const id = cb.dataset.id;
+  const m = state.monitors.find(x => String(x.id) === id);
+  if (!m) return;
+  try {
+    await api(`/api/tmux/monitors/${id}`, {method:"PATCH", body:{name:m.name, pattern_type:m.pattern_type, pattern:m.pattern, enabled:cb.checked}});
+    m.enabled = cb.checked;
+    cb.closest(".monitor-row").classList.toggle("disabled", !cb.checked);
+    toast(cb.checked ? "Monitor enabled" : "Monitor disabled", m.name, "success", 2000);
+  } catch(e) { cb.checked = !cb.checked; toast("Update failed", e.message, "error"); }
+});
+
+qs("#monitors-list").addEventListener("click", async e => {
+  // ── Edit button ───────────────────────────────────────────────
+  const editBtn = e.target.closest(".monitor-edit");
+  if (editBtn) {
+    if (document.querySelector(".monitor-row.editing")) return;
+    const id = editBtn.dataset.id;
     const m = state.monitors.find(x => String(x.id) === id);
     if (!m) return;
-    const trashBtn = wrap.querySelector(".monitor-del");
+    const row = editBtn.closest(".monitor-row");
+    row.innerHTML = `
+      <div class="monitor-edit-fields">
+        <input class="input monitor-edit-name" value="${escapeHtml(m.name)}" placeholder="Name" aria-label="Monitor name" />
+        <select class="select monitor-edit-type" aria-label="Pattern type">
+          <option value="manual"${m.pattern_type==="manual"?" selected":""}>manual</option>
+          <option value="regex"${m.pattern_type==="regex"?" selected":""}>regex</option>
+        </select>
+        <input class="input monitor-edit-pattern" value="${escapeHtml(m.pattern)}" placeholder="Pattern" aria-label="Monitor pattern" />
+      </div>
+      <button type="button" class="btn primary icon monitor-save" title="Save">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+      </button>
+      <button type="button" class="btn icon monitor-cancel" title="Cancel">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>`;
+    row.classList.add("editing");
+    row.querySelector(".monitor-edit-name").focus();
+
+    row.querySelectorAll(".monitor-edit-name,.monitor-edit-pattern,.monitor-edit-type").forEach(el => {
+      el.addEventListener("keydown", async ev => {
+        if (ev.key === "Enter") { ev.preventDefault(); row.querySelector(".monitor-save").click(); }
+        if (ev.key === "Escape") { await loadMonitors(); }
+      });
+    });
+
+    row.querySelector(".monitor-cancel").addEventListener("click", async () => { await loadMonitors(); });
+
+    const saveBtn = row.querySelector(".monitor-save");
+    saveBtn.addEventListener("click", async () => {
+      const name = row.querySelector(".monitor-edit-name").value.trim();
+      const pattern_type = row.querySelector(".monitor-edit-type").value;
+      const pattern = row.querySelector(".monitor-edit-pattern").value.trim();
+      if (!name || !pattern) {
+        if (!name) row.querySelector(".monitor-edit-name").classList.add("error");
+        if (!pattern) row.querySelector(".monitor-edit-pattern").classList.add("error");
+        return;
+      }
+      await withLoading(saveBtn, async () => {
+        try {
+          await api(`/api/tmux/monitors/${id}`, {method:"PATCH", body:{name, pattern_type, pattern, enabled:m.enabled}});
+          toast("Saved", name, "success", 2000);
+          await loadMonitors();
+        } catch(e) { toast("Save failed", e.message, "error"); }
+      });
+    });
+
+    row.querySelector(".monitor-edit-name").addEventListener("input", function() { this.classList.remove("error"); });
+    row.querySelector(".monitor-edit-pattern").addEventListener("input", function() { this.classList.remove("error"); });
+    return;
+  }
+
+  // ── Delete (trash) button — show confirm strip ────────────────
+  const trashBtn = e.target.closest(".monitor-del:not(.monitor-del-ok)");
+  if (trashBtn && !trashBtn.classList.contains("monitor-del-ok")) {
+    if (document.querySelector(".monitor-row.editing")) return;
+    const wrap = trashBtn.closest(".monitor-del-wrap");
     const confirmStrip = wrap.querySelector(".monitor-del-confirm");
-    const okBtn = wrap.querySelector(".monitor-del-ok");
-    const cancelBtn = wrap.querySelector(".monitor-del-cancel");
-    let timer = null;
+    let state_ = _monitorDelState.get(wrap);
+    if (!state_) { state_ = { timer: null }; _monitorDelState.set(wrap, state_); }
     function hideConfirm() {
-      clearTimeout(timer);
+      clearTimeout(state_.timer);
       trashBtn.style.display = "";
       confirmStrip.style.display = "none";
     }
-    trashBtn.addEventListener("click", () => {
-      if (document.querySelector(".monitor-row.editing")) return;
-      trashBtn.style.display = "none";
-      confirmStrip.style.display = "flex";
-      timer = setTimeout(hideConfirm, 4000);
-    });
-    cancelBtn.addEventListener("click", hideConfirm);
-    okBtn.addEventListener("click", async () => {
-      clearTimeout(timer);
-      trashBtn.disabled = true;
-      await withLoading(okBtn, async () => {
-        try { await api(`/api/tmux/monitors/${id}`,{method:"DELETE"}); toast("Deleted",m.name,"success",2000); await loadMonitors(); }
-        catch(e) { hideConfirm(); trashBtn.disabled = false; toast("Delete failed",e.message,"error"); }
-      });
-    });
-  });
+    trashBtn.style.display = "none";
+    confirmStrip.style.display = "flex";
+    clearTimeout(state_.timer);
+    state_.timer = setTimeout(hideConfirm, 4000);
+    // Store hideConfirm so cancel can reach it
+    state_.hideConfirm = hideConfirm;
+    return;
+  }
 
-  qsa(".monitor-edit").forEach(editBtn => {
-    editBtn.addEventListener("click", () => {
-      if (document.querySelector(".monitor-row.editing")) return;
-      const id = editBtn.dataset.id;
-      const m = state.monitors.find(x => String(x.id) === id);
-      if (!m) return;
-      const row = editBtn.closest(".monitor-row");
-      row.innerHTML = `
-        <div class="monitor-edit-fields">
-          <input class="input monitor-edit-name" value="${escapeHtml(m.name)}" placeholder="Name" />
-          <select class="select monitor-edit-type">
-            <option value="manual"${m.pattern_type==="manual"?" selected":""}>manual</option>
-            <option value="regex"${m.pattern_type==="regex"?" selected":""}>regex</option>
-          </select>
-          <input class="input monitor-edit-pattern" value="${escapeHtml(m.pattern)}" placeholder="Pattern" />
-        </div>
-        <button type="button" class="btn primary icon monitor-save" title="Save">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
-        </button>
-        <button type="button" class="btn icon monitor-cancel" title="Cancel">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>`;
-      row.classList.add("editing");
-      row.querySelector(".monitor-edit-name").focus();
+  // ── Delete cancel ─────────────────────────────────────────────
+  const cancelBtn = e.target.closest(".monitor-del-cancel");
+  if (cancelBtn) {
+    const wrap = cancelBtn.closest(".monitor-del-wrap");
+    const s = _monitorDelState.get(wrap);
+    if (s && s.hideConfirm) s.hideConfirm();
+    return;
+  }
 
-      row.querySelectorAll(".monitor-edit-name,.monitor-edit-pattern,.monitor-edit-type").forEach(el => {
-        el.addEventListener("keydown", async e => {
-          if (e.key === "Enter") { e.preventDefault(); row.querySelector(".monitor-save").click(); }
-          if (e.key === "Escape") { await loadMonitors(); }
-        });
-      });
-
-      row.querySelector(".monitor-cancel").addEventListener("click", async () => {
+  // ── Delete confirm (ok) ───────────────────────────────────────
+  const okBtn = e.target.closest(".monitor-del-ok");
+  if (okBtn) {
+    const wrap = okBtn.closest(".monitor-del-wrap");
+    const id = okBtn.dataset.id;
+    const m = state.monitors.find(x => String(x.id) === id);
+    const s = _monitorDelState.get(wrap);
+    if (s) clearTimeout(s.timer);
+    const trashBtnInner = wrap.querySelector(".monitor-del");
+    if (trashBtnInner) trashBtnInner.disabled = true;
+    await withLoading(okBtn, async () => {
+      try {
+        await api(`/api/tmux/monitors/${id}`, {method:"DELETE"});
+        toast("Deleted", m ? m.name : id, "success", 2000);
         await loadMonitors();
-      });
-
-      const saveBtn = row.querySelector(".monitor-save");
-      saveBtn.addEventListener("click", async () => {
-        const name = row.querySelector(".monitor-edit-name").value.trim();
-        const pattern_type = row.querySelector(".monitor-edit-type").value;
-        const pattern = row.querySelector(".monitor-edit-pattern").value.trim();
-        if (!name || !pattern) {
-          if (!name) row.querySelector(".monitor-edit-name").classList.add("error");
-          if (!pattern) row.querySelector(".monitor-edit-pattern").classList.add("error");
-          return;
-        }
-        await withLoading(saveBtn, async () => {
-          try {
-            await api(`/api/tmux/monitors/${id}`, {method:"PATCH", body:{name, pattern_type, pattern, enabled:m.enabled}});
-            toast("Saved", name, "success", 2000);
-            await loadMonitors();
-          } catch(e) { toast("Save failed", e.message, "error"); }
-        });
-      });
-
-      row.querySelector(".monitor-edit-name").addEventListener("input", function() { this.classList.remove("error"); });
-      row.querySelector(".monitor-edit-pattern").addEventListener("input", function() { this.classList.remove("error"); });
+      } catch(e) {
+        if (s && s.hideConfirm) s.hideConfirm();
+        if (trashBtnInner) trashBtnInner.disabled = false;
+        toast("Delete failed", e.message, "error");
+      }
     });
-  });
-}
+    return;
+  }
+});
 
 qs("#refresh-sessions-btn").addEventListener("click", async () => await withLoading(qs("#refresh-sessions-btn"), loadSessions));
 
@@ -2077,6 +2191,15 @@ qs("#add-monitor-form").addEventListener("submit", async e => {
   const payload = { name:fd.get("name").trim(), pattern_type:fd.get("pattern_type"), pattern:fd.get("pattern").trim(), enabled:true };
   if (!payload.name||!payload.pattern) return;
   const patternInput = form.querySelector('[name="pattern"]');
+  if (payload.pattern_type === "regex") {
+    try { new RegExp(payload.pattern); }
+    catch(err) {
+      patternInput.setCustomValidity("Invalid regex: " + err.message);
+      patternInput.reportValidity();
+      return;
+    }
+  }
+  patternInput.setCustomValidity("");
   if (payload.pattern_type === "manual" && state.sessions.length > 0) {
     if (!state.sessions.some(p => p.target === payload.pattern)) {
       patternInput.setCustomValidity("No known session with this target. Known: " + state.sessions.map(p=>p.target).join(", "));
@@ -2084,7 +2207,6 @@ qs("#add-monitor-form").addEventListener("submit", async e => {
       return;
     }
   }
-  patternInput.setCustomValidity("");
   const btn = form.querySelector("button[type=submit]");
   await withLoading(btn, async () => {
     try { await api("/api/tmux/monitors",{method:"POST",body:payload}); form.reset(); updatePatternTypeHint(); toast("Monitor added",payload.name,"success"); await loadMonitors(); }
@@ -2121,7 +2243,7 @@ function prependEvent(msg) {
     const open = pre.classList.toggle("open");
     e.currentTarget.textContent = open?"Hide raw capture ▴":"Show raw capture ▾";
   });
-  while (feed.children.length > 20) feed.removeChild(feed.lastChild);
+  while (feed.children.length > MAX_EVENT_FEED) feed.removeChild(feed.lastChild);
   const countEl = qs("#event-feed-count");
   countEl.textContent = feed.children.length;
   countEl.style.display = "";
@@ -2209,10 +2331,17 @@ let ws = null;
 let wsReconnectAttempts = 0;
 
 function connectWs() {
+  if (_wsPingInterval) { clearInterval(_wsPingInterval); _wsPingInterval = null; }
   const proto = location.protocol==="https:"?"wss:":"ws:";
   const url = `${proto}//${location.host}/ws`;
   try { ws = new WebSocket(url); } catch(e) { scheduleReconnect(); return; }
-  ws.onopen = () => { qs("#ws-dot").classList.remove("disconnected"); wsReconnectAttempts = 0; };
+  ws.onopen = () => {
+    qs("#ws-dot").classList.remove("disconnected");
+    wsReconnectAttempts = 0;
+    // Restart ping on every (re)connect
+    if (_wsPingInterval) { clearInterval(_wsPingInterval); _wsPingInterval = null; }
+    _startWsPing();
+  };
   ws.onclose = () => { qs("#ws-dot").classList.add("disconnected"); scheduleReconnect(); };
   ws.onerror = () => qs("#ws-dot").classList.add("disconnected");
   ws.onmessage = evt => {
@@ -2224,18 +2353,24 @@ function connectWs() {
       case "account_switched":
         prependSwitchLogRow(msg);
         // Refresh both accounts and full service state (default_account_id may have changed)
-        // active_email is set inside the IIFE so it is only updated after the loads complete
         (async () => {
-          await loadAccounts();
-          state.service.active_email = msg.to;
-          await loadServiceStatus();
+          await Promise.all([loadAccounts(), loadServiceStatus()]);
           updateServiceUI(state.service);
         })();
         toast("Account switched", `→ ${msg.to} (${msg.reason})`, "success");
         break;
       case "account_deleted":
+        // Cancel drag if the deleted account is being dragged
+        if (typeof dragSrc !== "undefined" && dragSrc && dragSrc.dataset.id === String(msg.id)) {
+            isDragging = false;
+            dragSrc = null;
+        }
         state.accounts = state.accounts.filter(a => a.id !== Number(msg.id));
-        renderAccounts();
+        if (typeof isDragging !== "undefined" && isDragging) {
+            pendingRenderAfterDrag = true;
+        } else {
+            renderAccounts();
+        }
         break;
       case "usage_updated": updateUsageLive(msg.accounts||[]); break;
       case "tmux_result": prependEvent(msg); break;
@@ -2253,13 +2388,13 @@ function _startWsPing() {
     if (ws && ws.readyState === WebSocket.OPEN) {
       try { ws.send(JSON.stringify({type:"ping"})); } catch(_) {}
     }
-  }, 25000);
+  }, WS_PING_INTERVAL_MS);
 }
-_startWsPing();
 
 function scheduleReconnect() {
+  if (_wsPingInterval) { clearInterval(_wsPingInterval); _wsPingInterval = null; }
   wsReconnectAttempts++;
-  setTimeout(connectWs, Math.min(15000, 1000 * Math.pow(1.5, wsReconnectAttempts)));
+  setTimeout(connectWs, Math.min(MAX_RECONNECT_MS, 1000 * Math.pow(1.5, wsReconnectAttempts)));
 }
 
 function updateUsageLive(updates) {
@@ -2342,10 +2477,8 @@ document.addEventListener("keydown", e => {
 // Init
 // =============================================================
 (async () => {
-  await loadAccounts();
-  await loadServiceStatus();
-  await loadAutoSwitchSetting();
-  await loadSwitchLog();
+  loadTmuxData();
+  await Promise.all([loadAccounts(), loadServiceStatus(), loadAutoSwitchSetting(), loadSwitchLog()]);
   connectWs();
 })();
 </script>

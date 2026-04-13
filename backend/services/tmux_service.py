@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import re
 import subprocess
 
 from ..ws import WebSocketManager
+
+logger = logging.getLogger(__name__)
 
 def list_panes() -> list[dict]:
     try:
@@ -87,20 +90,26 @@ async def notify_monitors(monitors, ws: WebSocketManager, model: str) -> None:
                 await asyncio.sleep(2)
                 capture = capture_pane(pane["target"])
                 eval_result = await evaluate_with_haiku(capture, model)
-                await ws.broadcast({
-                    "type": "tmux_result",
-                    "monitor_id": monitor.id,
-                    "target": pane["target"],
-                    "status": eval_result["status"],
-                    "explanation": eval_result["explanation"],
-                    "capture": capture,
-                })
+                try:
+                    await ws.broadcast({
+                        "type": "tmux_result",
+                        "monitor_id": monitor.id,
+                        "target": pane["target"],
+                        "status": eval_result["status"],
+                        "explanation": eval_result["explanation"],
+                        "capture": capture,
+                    })
+                except Exception as _bc_err:
+                    logger.warning("WS broadcast failed: %s", _bc_err)
             except Exception as e:
-                await ws.broadcast({
-                    "type": "tmux_result",
-                    "monitor_id": monitor.id,
-                    "target": pane["target"],
-                    "status": "FAILED",
-                    "explanation": str(e),
-                    "capture": "",
-                })
+                try:
+                    await ws.broadcast({
+                        "type": "tmux_result",
+                        "monitor_id": monitor.id,
+                        "target": pane["target"],
+                        "status": "FAILED",
+                        "explanation": str(e),
+                        "capture": "",
+                    })
+                except Exception as _bc_err:
+                    logger.warning("WS broadcast failed: %s", _bc_err)

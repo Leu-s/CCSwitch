@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     active_claude_dir: str = "~/.claude"
     # Base directory for per-account isolated Claude config dirs
     accounts_base_dir: str = "~/.claude-multi-accounts"
-    haiku_model: str = "claude-haiku-4-5-20251001"
+    haiku_model: str = "claude-3-5-haiku-20241022"
     poll_interval_active: int = 15      # seconds between polls while clients are connected
     poll_interval_idle: int = 300       # seconds between polls while nobody is watching
     poll_interval_min: int = 120        # floor for the DB-overridden idle interval

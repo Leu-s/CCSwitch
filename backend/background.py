@@ -27,6 +27,13 @@ token_info_cache: dict[str, dict] = {}
 _cache_lock = asyncio.Lock()
 
 
+async def snapshot_usage_cache() -> dict[str, dict]:
+    """Shallow copy of usage_cache taken under the lock so callers can
+    iterate safely without racing the next poll cycle."""
+    async with _cache_lock:
+        return dict(usage_cache)
+
+
 async def poll_usage_and_switch(ws: WebSocketManager) -> None:
     async with AsyncSessionLocal() as db:
         # ── Check service status FIRST ────────────────────────────────────────
@@ -40,11 +47,14 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
         accounts = accounts_result.scalars().all()
 
         updated = []
+        stale_changed = False
         for account in accounts:
+            new_stale_reason: str | None = None
             try:
                 token = ac.get_access_token_from_config_dir(account.config_dir)
                 if not token:
-                    raise ValueError("No access token found in config directory")
+                    new_stale_reason = "No access token in config dir — re-login required"
+                    raise ValueError(new_stale_reason)
 
                 # Hydrate the token_info cache so GET /api/accounts can read
                 # expiry + subscription metadata without spawning a Keychain
@@ -54,13 +64,11 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                     token_info_cache[account.email] = token_info
 
                 # Refresh the token if it is about to expire (within 5 minutes).
-                # Anthropic's OAuth response returns `expires_in` (seconds, relative);
-                # Claude Code stores `expiresAt` in milliseconds (JS convention), so we
-                # need to translate before persisting or the next poll will consider
-                # the token still expired and refresh again on every cycle.
+                # Compute in integer milliseconds throughout to avoid float drift.
                 try:
                     expires_at_ms = token_info.get("token_expires_at")
-                    if expires_at_ms and time.time() * 1000 > expires_at_ms - 300_000:
+                    now_ms = int(time.time() * 1000)
+                    if expires_at_ms and now_ms > expires_at_ms - 300_000:
                         refresh_token = ac.get_refresh_token_from_config_dir(account.config_dir)
                         if refresh_token:
                             resp = await anthropic_api.refresh_access_token(refresh_token)
@@ -68,7 +76,7 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                             if new_token:
                                 expires_in = resp.get("expires_in")
                                 new_expires_at_ms = (
-                                    int((time.time() + expires_in) * 1000)
+                                    now_ms + int(expires_in) * 1000
                                     if expires_in
                                     else None
                                 )
@@ -77,10 +85,28 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                                 )
                                 token = new_token
                                 logger.info("Refreshed access token for %s", account.email)
+                except httpx.HTTPStatusError as refresh_http_err:
+                    if refresh_http_err.response.status_code == 401:
+                        logger.error(
+                            "Refresh token revoked for %s — re-login required.",
+                            account.email,
+                        )
+                        new_stale_reason = "Refresh token revoked — re-login required"
+                        # Mark token as permanently expired so we don't retry on every poll.
+                        ac.save_refreshed_token(account.config_dir, token, expires_at=1)
+                    else:
+                        logger.warning("Token refresh HTTP error for %s: %s", account.email, refresh_http_err)
                 except Exception as refresh_err:
                     logger.warning("Token refresh failed for %s: %s", account.email, refresh_err)
 
-                usage = await anthropic_api.probe_usage(token)
+                # Probe usage; a 401 here also means the credentials are dead.
+                try:
+                    usage = await anthropic_api.probe_usage(token)
+                except httpx.HTTPStatusError as probe_err:
+                    if probe_err.response.status_code == 401:
+                        new_stale_reason = "Anthropic API returned 401 — re-login required"
+                    raise
+
                 async with _cache_lock:
                     usage_cache[account.email] = usage
                 updated.append({
@@ -101,23 +127,43 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                     except Exception:
                         pass
                 logger.warning("Usage fetch failed for %s: %s", account.email, err_str)
+
+                # Determine new cache entry and err_str inside a single lock
+                # to avoid stale-read races between check and write.
                 is_rate_limited = "429" in str(e) or "rate_limit" in str(e).lower()
-                prev = usage_cache.get(account.email, {})
-                if is_rate_limited and prev and "error" not in prev:
-                    async with _cache_lock:
-                        usage_cache[account.email] = {**prev, "rate_limited": True}
-                    err_str = "Rate limited"
-                else:
-                    async with _cache_lock:
-                        usage_cache[account.email] = {"error": err_str}
+                async with _cache_lock:
+                    prev = usage_cache.get(account.email, {})
+                    if is_rate_limited and prev and "error" not in prev:
+                        new_entry = {**prev, "rate_limited": True}
+                        err_str = "Rate limited"
+                    else:
+                        new_entry = {"error": err_str}
+                    usage_cache[account.email] = new_entry
+
                 updated.append({
                     "id": account.id,
                     "email": account.email,
-                    "usage": usage_cache[account.email],
-                    "error": err_str if "error" in usage_cache.get(account.email, {}) else None,
+                    "usage": new_entry,
+                    "error": err_str if "error" in new_entry else None,
                 })
 
-        await ws.broadcast({"type": "usage_updated", "accounts": updated})
+            # Flip stale_reason on the DB row if it changed. Rate-limiting is NOT
+            # staleness — we only set stale for 401-class auth failures.
+            if new_stale_reason != account.stale_reason:
+                account.stale_reason = new_stale_reason
+                stale_changed = True
+                if new_stale_reason:
+                    logger.warning("Marking %s stale: %s", account.email, new_stale_reason)
+                else:
+                    logger.info("Cleared stale flag for %s", account.email)
+
+        if stale_changed:
+            await db.commit()
+
+        try:
+            await ws.broadcast({"type": "usage_updated", "accounts": updated})
+        except Exception as _bc_err:
+            logger.warning("WS broadcast failed: %s", _bc_err)
 
         # ── Auto-switch logic ─────────────────────────────────────────────────
         auto_enabled = await ss.get_bool("auto_switch_enabled", True, db)
@@ -159,8 +205,10 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                 await tmux_service.notify_monitors(monitors, ws, settings.haiku_model)
             else:
                 logger.warning("No eligible account to switch to")
-                await ws.broadcast({
-                    "type": "error",
-                    "message": "Rate limit reached — no eligible accounts to switch to",
-                })
-
+                try:
+                    await ws.broadcast({
+                        "type": "error",
+                        "message": "Rate limit reached — no eligible accounts to switch to",
+                    })
+                except Exception as _bc_err:
+                    logger.warning("WS broadcast failed: %s", _bc_err)

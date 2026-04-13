@@ -18,32 +18,6 @@ from ..ws import ws_manager
 logger = logging.getLogger(__name__)
 
 
-def _build_usage(usage_raw: dict, token_info: dict) -> UsageData | None:
-    """Convert raw usage cache entry + token metadata into UsageData schema."""
-    if "error" in usage_raw:
-        return UsageData(error=usage_raw["error"], **token_info)
-    fh = usage_raw.get("five_hour") or {}
-    sd = usage_raw.get("seven_day") or {}
-    if usage_raw.get("rate_limited"):
-        return UsageData(
-            five_hour_pct=fh.get("utilization"),
-            five_hour_resets_at=fh.get("resets_at"),
-            seven_day_pct=sd.get("utilization"),
-            seven_day_resets_at=sd.get("resets_at"),
-            rate_limited=True,
-            **token_info,
-        )
-    if usage_raw:
-        return UsageData(
-            five_hour_pct=fh.get("utilization"),
-            five_hour_resets_at=fh.get("resets_at"),
-            seven_day_pct=sd.get("utilization"),
-            seven_day_resets_at=sd.get("resets_at"),
-            **token_info,
-        )
-    return UsageData(**token_info) if token_info else None
-
-
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
 
@@ -51,10 +25,7 @@ router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
 @router.get("", response_model=list[AccountWithUsage])
 async def list_accounts(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Account).order_by(Account.priority.asc(), Account.id.asc())
-    )
-    accounts = result.scalars().all()
+    accounts = await ac.get_all_accounts(db)
     active_email = ac.get_active_email()
 
     out = []
@@ -67,7 +38,7 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
         token_info = token_info_cache.get(acc.email)
         if token_info is None:
             token_info = ac.get_token_info(acc.config_dir)
-        usage = _build_usage(usage_raw, token_info)
+        usage = UsageData.from_raw(usage_raw, token_info)
 
         out.append(AccountWithUsage(
             **AccountOut.model_validate(acc).model_dump(),
@@ -158,8 +129,7 @@ async def switch_log(
 async def update_account(
     account_id: int, payload: AccountUpdate, db: AsyncSession = Depends(get_db)
 ):
-    result = await db.execute(select(Account).where(Account.id == account_id))
-    account = result.scalars().first()
+    account = await ac.get_account_by_id(account_id, db)
     if not account:
         raise HTTPException(404, "Account not found")
     for field, value in payload.model_dump(exclude_none=True).items():
@@ -180,8 +150,7 @@ async def update_account(
 
 @router.delete("/{account_id}", status_code=204)
 async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Account).where(Account.id == account_id))
-    account = result.scalars().first()
+    account = await ac.get_account_by_id(account_id, db)
     if not account:
         raise HTTPException(404, "Account not found")
 
@@ -209,7 +178,6 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     default_setting = setting_result.scalars().first()
     if default_setting and default_setting.value.isdigit() and int(default_setting.value) == account_id:
         default_setting.value = ""
-        await db.flush()
 
     await db.delete(account)
     await db.commit()
@@ -230,8 +198,7 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{account_id}/switch", status_code=200)
 async def manual_switch(account_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Account).where(Account.id == account_id))
-    account = result.scalars().first()
+    account = await ac.get_account_by_id(account_id, db)
     if not account:
         raise HTTPException(404, "Account not found")
     await sw.perform_switch(account, "manual", db, ws_manager)

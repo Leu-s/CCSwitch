@@ -1,16 +1,19 @@
 """Accounts router tests — updated for the isolated-config-dir schema."""
+import asyncio
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
+
+from backend.database import Base, get_db
+from backend.models import Account
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_accounts.db"
 
 
 @pytest.fixture(scope="module")
 def test_app():
-    from backend.database import Base, get_db
     from backend.routers.accounts import router
 
     engine = create_async_engine(TEST_DB_URL, echo=False)
@@ -21,7 +24,6 @@ def test_app():
             await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
 
-    import asyncio
     asyncio.run(_init())
 
     async def override_get_db():
@@ -54,14 +56,7 @@ def test_switch_log_empty(client):
 
 def test_delete_account(client):
     """Create an account via POST-equivalent DB insertion, delete it, verify removal."""
-    import asyncio
-    from backend.database import Base, get_db
-    from backend.models import Account
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-    from unittest.mock import AsyncMock
-
     # Insert an account directly so we can test deletion without the full login flow
-    TEST_DB_URL = "sqlite+aiosqlite:///./test_accounts.db"
     engine = create_async_engine(TEST_DB_URL, echo=False)
     SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -89,13 +84,6 @@ def test_delete_account(client):
 
 def test_update_account_disabled_when_not_active(client):
     """PATCH enabled=False on an account that is not currently active."""
-    import asyncio
-    from backend.database import Base
-    from backend.models import Account
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-    from unittest.mock import AsyncMock
-
-    TEST_DB_URL = "sqlite+aiosqlite:///./test_accounts.db"
     engine = create_async_engine(TEST_DB_URL, echo=False)
     SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

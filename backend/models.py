@@ -16,6 +16,10 @@ class Account(Base):
     threshold_pct: Mapped[float] = mapped_column(Float, default=95.0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     priority: Mapped[int] = mapped_column(Integer, default=0)
+    # Non-null when the account's credentials are no longer usable (refresh
+    # token revoked, 401 from probe, missing config_dir, etc.). Human-readable
+    # reason shown in the UI so the user knows they need to re-login.
+    stale_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

@@ -1,10 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException
+import re
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from pydantic import BaseModel
+
 from ..database import get_db
 from ..models import TmuxMonitor
-from pydantic import BaseModel
-from ..schemas import TmuxMonitorCreate, TmuxMonitorOut, TmuxPane
+from ..schemas import TmuxMonitorCreate, TmuxMonitorOut, TmuxMonitorUpdate, TmuxPane
 from ..services import tmux_service
 
 router = APIRouter(prefix="/api/tmux", tags=["tmux"])
@@ -14,7 +17,7 @@ async def list_sessions():
     return tmux_service.list_panes()
 
 @router.get("/capture")
-async def capture_session(target: str, lines: int = 50):
+async def capture_session(target: str, lines: int = Query(50, ge=1, le=500)):
     try:
         output = tmux_service.capture_pane(target, lines)
         return {"target": target, "output": output}
@@ -48,13 +51,19 @@ async def create_monitor(payload: TmuxMonitorCreate, db: AsyncSession = Depends(
     return monitor
 
 @router.patch("/monitors/{monitor_id}", response_model=TmuxMonitorOut)
-async def update_monitor(monitor_id: int, payload: TmuxMonitorCreate, db: AsyncSession = Depends(get_db)):
+async def update_monitor(monitor_id: int, payload: TmuxMonitorUpdate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(TmuxMonitor).where(TmuxMonitor.id == monitor_id))
     monitor = result.scalars().first()
     if not monitor:
         raise HTTPException(404, "Monitor not found")
-    for field, value in payload.model_dump().items():
+    for field, value in payload.model_dump(exclude_none=True).items():
         setattr(monitor, field, value)
+    # Re-validate the pattern if the resulting monitor is a regex monitor.
+    if monitor.pattern_type == "regex":
+        try:
+            re.compile(monitor.pattern)
+        except re.error as e:
+            raise HTTPException(400, f"Invalid regex pattern: {e}")
     await db.commit()
     await db.refresh(monitor)
     return monitor

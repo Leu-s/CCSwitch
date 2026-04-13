@@ -45,54 +45,38 @@ def _read_keychain_credentials(config_dir: str) -> dict:
     return {}
 
 
-def _write_keychain_credentials(config_dir: str, credentials: dict) -> bool:
-    """Returns True if credentials were successfully written, False otherwise."""
+def _write_keychain_entry(service_name: str, credentials: dict) -> bool:
+    """Write credentials to a Keychain entry identified by service_name.
+
+    Returns True if credentials were successfully written, False otherwise.
+    """
     import getpass
-    service = _keychain_service_name(config_dir)
     acct = getpass.getuser()
     cred_json = json.dumps(credentials)
     try:
         subprocess.run(
-            ["security", "delete-generic-password", "-s", service, "-a", acct],
+            ["security", "delete-generic-password", "-s", service_name, "-a", acct],
             capture_output=True, timeout=5,
         )
         result = subprocess.run(
-            ["security", "add-generic-password", "-s", service, "-a", acct, "-w", cred_json],
+            ["security", "add-generic-password", "-s", service_name, "-a", acct, "-w", cred_json],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
-            logger.warning("Keychain write failed for %s: %s", service, result.stderr.strip())
             return False
+        return True
+    except Exception:
+        return False
+
+
+def _write_keychain_credentials(credentials: dict, service: str) -> bool:
+    """Returns True if credentials were successfully written, False otherwise."""
+    ok = _write_keychain_entry(service, credentials)
+    if not ok:
+        logger.warning("Keychain write failed for %s", service)
+    else:
         logger.debug("Keychain credentials written for %s", service)
-        return True
-    except Exception as e:
-        logger.warning("Keychain write exception for %s: %s", service, e)
-        return False
-
-
-def _write_keychain_credentials_legacy(credentials: dict) -> bool:
-    """Returns True if credentials were successfully written, False otherwise."""
-    import getpass
-    service = "Claude Code-credentials"
-    acct = getpass.getuser()
-    cred_json = json.dumps(credentials)
-    try:
-        subprocess.run(
-            ["security", "delete-generic-password", "-s", service, "-a", acct],
-            capture_output=True, timeout=5,
-        )
-        result = subprocess.run(
-            ["security", "add-generic-password", "-s", service, "-a", acct, "-w", cred_json],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode != 0:
-            logger.warning("Legacy Keychain write failed: %s", result.stderr.strip())
-            return False
-        logger.debug("Legacy Keychain credentials updated for active account")
-        return True
-    except Exception as e:
-        logger.warning("Legacy Keychain write exception: %s", e)
-        return False
+    return ok
 
 
 def get_token_info(config_dir: str) -> dict:
@@ -125,6 +109,37 @@ def get_token_info(config_dir: str) -> dict:
     return {}
 
 
+def _get_oauth_field(config_dir: str, field: str) -> str | None:
+    """
+    Look up an OAuth credential field from Keychain then files.
+
+    field: key inside the nested "claudeAiOauth" object (e.g. "accessToken", "refreshToken").
+           Also checked at the top level when claudeAiOauth is absent.
+    """
+    # 1. macOS Keychain (primary location for native Claude Code)
+    kc = _read_keychain_credentials(config_dir)
+    if kc:
+        token = (kc.get("claudeAiOauth") or {}).get(field)
+        if token:
+            return token
+        if kc.get(field):
+            return kc[field]
+
+    # 2. Fall back to credential files (Linux / older versions)
+    for fname in [".credentials.json", "credentials.json", ".claude.json"]:
+        path = os.path.join(config_dir, fname)
+        data = _load_json_safe(path)
+        if not data:
+            continue
+        if "claudeAiOauth" in data:
+            token = data["claudeAiOauth"].get(field)
+            if token:
+                return token
+        if data.get(field):
+            return data[field]
+    return None
+
+
 def get_access_token_from_config_dir(config_dir: str) -> str | None:
     """
     Try several locations Claude Code may use to persist the OAuth access token
@@ -133,61 +148,11 @@ def get_access_token_from_config_dir(config_dir: str) -> str | None:
     On macOS (native build) Claude Code stores tokens in the Keychain.
     On other platforms it writes credential files to the config directory.
     """
-    # 1. macOS Keychain (primary location for native Claude Code)
-    kc = _read_keychain_credentials(config_dir)
-    if kc:
-        token = kc.get("claudeAiOauth", {}).get("accessToken")
-        if token:
-            return token
-        if kc.get("accessToken"):
-            return kc["accessToken"]
-
-    # 2. Fall back to credential files (Linux / older versions)
-    candidates = [
-        os.path.join(config_dir, ".credentials.json"),
-        os.path.join(config_dir, "credentials.json"),
-        os.path.join(config_dir, ".claude.json"),
-    ]
-    for path in candidates:
-        if not os.path.exists(path):
-            continue
-        data = _load_json_safe(path)
-        if "claudeAiOauth" in data:
-            token = data["claudeAiOauth"].get("accessToken")
-            if token:
-                return token
-        if "accessToken" in data:
-            return data["accessToken"]
-    return None
+    return _get_oauth_field(config_dir, "accessToken")
 
 
 def get_refresh_token_from_config_dir(config_dir: str) -> str | None:
-    # 1. macOS Keychain
-    kc = _read_keychain_credentials(config_dir)
-    if kc:
-        token = kc.get("claudeAiOauth", {}).get("refreshToken")
-        if token:
-            return token
-        if kc.get("refreshToken"):
-            return kc["refreshToken"]
-
-    # 2. Credential files
-    candidates = [
-        os.path.join(config_dir, ".credentials.json"),
-        os.path.join(config_dir, "credentials.json"),
-        os.path.join(config_dir, ".claude.json"),
-    ]
-    for path in candidates:
-        if not os.path.exists(path):
-            continue
-        data = _load_json_safe(path)
-        if "claudeAiOauth" in data:
-            token = data["claudeAiOauth"].get("refreshToken")
-            if token:
-                return token
-        if "refreshToken" in data:
-            return data["refreshToken"]
-    return None
+    return _get_oauth_field(config_dir, "refreshToken")
 
 
 def save_refreshed_token(config_dir: str, access_token: str, expires_at: int | None = None) -> None:
@@ -233,7 +198,18 @@ def save_refreshed_token(config_dir: str, access_token: str, expires_at: int | N
                 kc["accessToken"] = access_token
                 if expires_at is not None:
                     kc["expiresAt"] = expires_at
-            _write_keychain_credentials(config_dir, kc)
-            _write_keychain_credentials_legacy(kc)
+            _write_keychain_credentials(kc, service=_keychain_service_name(config_dir))
+            # Only touch the legacy (no-hash) entry if THIS account is the
+            # one currently active system-wide; otherwise a background refresh
+            # of a non-active account would clobber the active account's
+            # credentials in the shared "Claude Code-credentials" entry.
+            active_dir = ""
+            try:
+                with open(os.path.expanduser("~/.claude-multi/active")) as f:
+                    active_dir = f.read().strip()
+            except Exception:
+                pass
+            if active_dir and os.path.abspath(active_dir) == os.path.abspath(config_dir):
+                _write_keychain_credentials(kc, service="Claude Code-credentials")
     except Exception as e:
         logger.warning("Failed to update Keychain after token refresh for %s: %s", config_dir, e)

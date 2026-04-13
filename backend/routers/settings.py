@@ -1,32 +1,27 @@
 import os
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from ..database import get_db
 from ..models import Setting
 from ..schemas import SettingOut, SettingUpdate
+from ..services.settings_service import ensure_defaults
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-DEFAULTS = {
-    "auto_switch_enabled": "true",
-    "usage_poll_interval_seconds": "300",
-    # service_enabled / default_account_id / original_credentials_backup
-    # are managed by the /api/service router — not initialised here.
+INTERNAL_KEYS = {"original_credentials_backup"}
+
+ALLOWED_KEYS = {
+    "auto_switch_enabled",
+    "usage_poll_interval_seconds",
 }
 
-async def ensure_defaults(db: AsyncSession):
-    for key, value in DEFAULTS.items():
-        result = await db.execute(select(Setting).where(Setting.key == key))
-        if not result.scalars().first():
-            db.add(Setting(key=key, value=value))
-    await db.commit()
 
 @router.get("", response_model=list[SettingOut])
 async def get_settings(db: AsyncSession = Depends(get_db)):
     await ensure_defaults(db)
-    result = await db.execute(select(Setting))
+    result = await db.execute(select(Setting).where(Setting.key.notin_(INTERNAL_KEYS)))
     return result.scalars().all()
 
 @router.get("/shell-status")
@@ -85,6 +80,8 @@ async def setup_shell():
 
 @router.patch("/{key}", response_model=SettingOut)
 async def update_setting(key: str, payload: SettingUpdate, db: AsyncSession = Depends(get_db)):
+    if key not in ALLOWED_KEYS:
+        raise HTTPException(status_code=403, detail="Setting key not allowed")
     await ensure_defaults(db)
     result = await db.execute(select(Setting).where(Setting.key == key))
     setting = result.scalars().first()

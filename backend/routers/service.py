@@ -9,11 +9,9 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import Account
 from ..schemas import ServiceStatus
 from ..services import account_service as ac
 from ..services import settings_service as ss
@@ -46,10 +44,7 @@ async def get_service_status(db: AsyncSession = Depends(get_db)):
 @router.post("/enable")
 async def enable_service(db: AsyncSession = Depends(get_db)):
     """Enable the service. Always activates the default or first enabled account."""
-    result = await db.execute(
-        select(Account).where(Account.enabled == True).order_by(Account.priority.asc(), Account.id.asc())
-    )
-    enabled_accounts = result.scalars().all()
+    enabled_accounts = await ac.get_enabled_accounts(db)
 
     if not enabled_accounts:
         raise HTTPException(400, "No enabled accounts available")
@@ -60,7 +55,7 @@ async def enable_service(db: AsyncSession = Depends(get_db)):
     default_raw = await ss.get_setting("default_account_id", "", db)
     default_id = int(default_raw) if default_raw.isdigit() else None
     target = None
-    if default_id:
+    if default_id is not None:
         target = next((a for a in enabled_accounts if a.id == default_id), None)
     if not target:
         target = enabled_accounts[0]
@@ -116,8 +111,7 @@ async def set_default_account(
     db: AsyncSession = Depends(get_db),
 ):
     """Set the starting account activated when the service is enabled."""
-    r = await db.execute(select(Account).where(Account.id == account_id))
-    account = r.scalars().first()
+    account = await ac.get_account_by_id(account_id, db)
     if not account:
         raise HTTPException(404, "Account not found")
 

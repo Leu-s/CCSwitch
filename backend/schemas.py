@@ -9,12 +9,10 @@ import re as re_module
 class AccountOut(BaseModel):
     id: int
     email: str
-    display_name: Optional[str] = None
-    config_dir: str
     threshold_pct: float
     enabled: bool
     priority: int
-    created_at: datetime
+    stale_reason: Optional[str] = None
     model_config = {"from_attributes": True}
 
 
@@ -35,6 +33,33 @@ class UsageData(BaseModel):
     # Token metadata (non-secret: expiry timestamp + subscription tier)
     token_expires_at: Optional[int] = None
     subscription_type: Optional[str] = None
+
+    @classmethod
+    def from_raw(cls, usage_raw: dict, token_info: dict) -> "UsageData | None":
+        """Build a UsageData from the background poll cache entry + token
+        metadata dict.  Returns None when there is literally nothing worth
+        showing — a brand-new account that has never been polled and has no
+        Keychain metadata.  Centralising this shape keeps routers free of the
+        background module's internal cache structure."""
+        base = dict(token_info)
+        if "error" in usage_raw:
+            base["error"] = usage_raw["error"]
+            return cls(**base)
+        fh = usage_raw.get("five_hour") or {}
+        sd = usage_raw.get("seven_day") or {}
+        if fh or sd or usage_raw.get("rate_limited"):
+            base.update(
+                five_hour_pct=fh.get("utilization"),
+                five_hour_resets_at=fh.get("resets_at"),
+                seven_day_pct=sd.get("utilization"),
+                seven_day_resets_at=sd.get("resets_at"),
+            )
+            if usage_raw.get("rate_limited"):
+                base["rate_limited"] = True
+            return cls(**base)
+        if base:
+            return cls(**base)
+        return None
 
 
 class AccountWithUsage(AccountOut):
@@ -114,6 +139,19 @@ class TmuxMonitorUpdate(BaseModel):
     pattern_type: Optional[str] = None
     pattern: Optional[str] = None
     enabled: Optional[bool] = None
+
+    @field_validator("pattern")
+    @classmethod
+    def validate_pattern(cls, v, info):
+        if v is None:
+            return v
+        pattern_type = (info.data or {}).get("pattern_type", "manual")
+        if pattern_type == "regex":
+            try:
+                re_module.compile(v)
+            except re_module.error as e:
+                raise ValueError(f"Invalid regex pattern: {e}") from e
+        return v
 
 
 class TmuxMonitorOut(BaseModel):

@@ -49,7 +49,6 @@ def test_patch_setting(client):
     assert resp.status_code == 200
     assert resp.json()["value"] == "false"
 
-def test_patch_custom_key(client):
+def test_patch_custom_key_rejected(client):
     resp = client.patch("/api/settings/custom_key", json={"value": "hello"})
-    assert resp.status_code == 200
-    assert resp.json()["key"] == "custom_key"
+    assert resp.status_code == 403

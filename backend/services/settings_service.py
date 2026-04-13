@@ -11,6 +11,22 @@ from ..models import Setting
 
 logger = logging.getLogger(__name__)
 
+# Default values seeded into the DB on first startup so background tasks always
+# have a row to read (avoids relying on in-code defaults only).
+SETTING_DEFAULTS: dict[str, str] = {
+    "auto_switch_enabled": "true",
+    "usage_poll_interval_seconds": "300",
+}
+
+
+async def ensure_defaults(db: AsyncSession) -> None:
+    """Upsert default setting rows that are missing from the DB."""
+    for key, value in SETTING_DEFAULTS.items():
+        result = await db.execute(select(Setting).where(Setting.key == key))
+        if not result.scalars().first():
+            db.add(Setting(key=key, value=value))
+    await db.commit()
+
 
 async def get_setting(key: str, default: str, db: AsyncSession) -> str:
     """Return raw string value for a setting key, or default if not found."""

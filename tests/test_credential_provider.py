@@ -240,13 +240,12 @@ class TestSaveRefreshedToken:
 
         kc_data = {"claudeAiOauth": {"accessToken": "kc-old", "refreshToken": "kc-refresh"}}
         with patch("backend.services.credential_provider._read_keychain_credentials", return_value=kc_data), \
-             patch("backend.services.credential_provider._write_keychain_credentials") as mock_write_kc, \
-             patch("backend.services.credential_provider._write_keychain_credentials_legacy") as mock_write_legacy:
+             patch("backend.services.credential_provider._write_keychain_credentials") as mock_write_kc:
             save_refreshed_token(str(tmp_path), "updated-token", expires_at=1234)
 
         # Keychain should have been written with the new token
         mock_write_kc.assert_called_once()
-        written_creds = mock_write_kc.call_args[0][1]
+        written_creds = mock_write_kc.call_args[0][0]
         assert written_creds["claudeAiOauth"]["accessToken"] == "updated-token"
         assert written_creds["claudeAiOauth"]["expiresAt"] == 1234
 

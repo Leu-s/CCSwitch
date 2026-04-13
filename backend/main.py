@@ -15,6 +15,7 @@ from .models import Account
 from .routers import accounts, settings, tmux, service
 from .services import account_service as ac
 from .services import settings_service as ss
+from .services.settings_service import ensure_defaults
 from .ws import ws_manager
 
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +57,10 @@ async def _poll_loop(idle_interval: int) -> None:
 async def lifespan(app: FastAPI):
     await init_db()
 
+    # Seed default settings so background tasks always have rows to read.
+    async with AsyncSessionLocal() as db:
+        await ensure_defaults(db)
+
     # Sync ~/.claude-multi/active on startup so CLAUDE_CONFIG_DIR works in new terminals
     # even before the first switch event occurs.
     active_email = ac.get_active_email()
@@ -64,7 +69,7 @@ async def lifespan(app: FastAPI):
             row = await db.execute(select(Account).where(Account.email == active_email))
             acc = row.scalars().first()
             if acc:
-                ac._write_active_config_dir(acc.config_dir)
+                ac.write_active_config_dir(acc.config_dir)
                 logger.info("Synced ~/.claude-multi/active → %s", acc.config_dir)
 
     idle_interval = await _get_idle_interval()
@@ -105,12 +110,13 @@ async def root():
 async def websocket_endpoint(websocket: WebSocket):
     await ws_manager.connect(websocket)
     try:
-        # Send cached data immediately so the UI renders without waiting 15 s
-        if bg.usage_cache:
-            # Build an email→id map so the frontend can match by id (not just email)
+        # Send cached data immediately so the UI renders without waiting 15 s.
+        # Snapshot under the cache lock to avoid "dictionary changed size during
+        # iteration" when a poll fires concurrently.
+        cache_snapshot = await bg.snapshot_usage_cache()
+        if cache_snapshot:
             async with AsyncSessionLocal() as db:
-                rows = await db.execute(select(Account.id, Account.email))
-                id_map = {row[1]: row[0] for row in rows.all()}
+                id_map = await ac.get_email_to_id_map(db)
             snapshot = [
                 {
                     "id": id_map[email],
@@ -118,7 +124,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     "usage": usage,
                     "error": usage.get("error"),
                 }
-                for email, usage in bg.usage_cache.items()
+                for email, usage in cache_snapshot.items()
                 if id_map.get(email) is not None
             ]
             await websocket.send_text(
@@ -126,7 +132,9 @@ async def websocket_endpoint(websocket: WebSocket):
             )
         while True:
             await websocket.receive_text()
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
         ws_manager.disconnect(websocket)
 
 

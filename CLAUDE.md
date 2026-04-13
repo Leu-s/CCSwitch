@@ -1,0 +1,113 @@
+# Claude Multi-Account Manager — Architecture Tour
+
+Short map for future Claude-assisted sessions.  See `README.md` for user-facing
+setup instructions.
+
+## What this app does
+
+A local FastAPI dashboard that lets you keep several Claude.ai subscription
+accounts, each in its own isolated `CLAUDE_CONFIG_DIR`.  It polls Anthropic's
+`/v1/messages` endpoint with a near-empty probe just to read the unified
+rate-limit headers, and when the active account approaches its 5-hour window
+limit it auto-switches to the next eligible account (credentials are copied
+into `~/.claude/` and the macOS Keychain so a fresh `claude` run picks the
+change up immediately).  A tmux integration can "continue" paused sessions
+after a switch and evaluate the outcome with a Haiku call.
+
+## Layout
+
+```
+backend/
+  main.py              FastAPI app + lifespan + /ws endpoint + single poll loop
+  background.py        poll_usage_and_switch() — the only polling routine;
+                       owns the in-memory usage_cache and token_info_cache
+  config.py            Pydantic settings (env prefix: CLAUDE_MULTI_)
+  database.py          async SQLAlchemy engine + init_db
+  models.py            Account, TmuxMonitor, SwitchLog, Setting (with indexes)
+  schemas.py           Pydantic request/response models
+  ws.py                Minimal WebSocketManager (broadcast + connection list)
+  routers/
+    accounts.py        /api/accounts CRUD + login flow
+    service.py         /api/service enable/disable + default-account
+    settings.py        /api/settings get/patch + shell-setup helper
+    tmux.py            /api/tmux/* panes, monitors, evaluate
+  services/
+    account_service.py paths, login session, activate/backup/restore, active pointer
+    credential_provider.py  Keychain read/write + credential-file fallbacks
+    anthropic_api.py   probe_usage() + refresh_access_token()
+    switcher.py        get_next_account() + perform_switch()
+    settings_service.py  typed get/set for Setting rows
+    tmux_service.py    list_panes, send_keys, capture_pane, evaluate_with_haiku
+frontend/
+  index.html           Vanilla JS SPA (single file, inline CSS)
+tests/
+  conftest.py          chdirs to a tmp dir so test DBs don't land at repo root
+  test_*.py            router + service + background + schemas + e2e
+```
+
+## Key data flow
+
+1. `main.lifespan` runs `init_db()`, syncs `~/.claude-multi/active`, then
+   starts exactly **one** background task: `_poll_loop(idle_interval)`.
+2. `_poll_loop` calls `bg.poll_usage_and_switch(ws_manager)` immediately (to
+   warm caches), then alternates between a tight active cadence
+   (`cfg.poll_interval_active`, default 15 s, while any WS client is
+   connected) and an idle cadence (DB-configurable, floored at
+   `cfg.poll_interval_min`).
+3. `poll_usage_and_switch` gates on `service_enabled` before doing any work.
+   For each account it reads the access token, refreshes it if it is within
+   5 minutes of expiry (`expires_in` → ms conversion lives here), probes
+   `/v1/messages` for rate-limit headers, stores the result in
+   `usage_cache[email]`, and caches `token_info` in `token_info_cache[email]`
+   so `GET /api/accounts` does not fan out Keychain subprocess calls per row.
+4. If the active account crosses its `threshold_pct`, it picks the next
+   enabled account by priority, calls `switcher.perform_switch`, which
+   copies credentials into `~/.claude/`, rewrites both Keychain entries (the
+   hashed per-config-dir one and the legacy no-hash one), and writes
+   `~/.claude-multi/active`.
+5. Every outcome is broadcast over `/ws` so the SPA updates live.
+
+## Account switching = four artefacts
+
+`account_service.activate_account_config()` keeps these in sync so any fresh
+`claude` invocation picks up the current account even without
+`CLAUDE_CONFIG_DIR` in the environment:
+
+1. Credential files (`.credentials.json`, `credentials.json`, `.claude.json`)
+   copied into `~/.claude/`.
+2. Keychain entry keyed by `sha256(~/.claude)[:8]` (hashed per-dir service).
+3. Legacy `Claude Code-credentials` Keychain entry (no hash).
+4. `~/.claude-multi/active` — a plain file the shell integration reads to
+   export `CLAUDE_CONFIG_DIR` for new terminals.
+
+## Constraints
+
+- **macOS only** for the credential-switching path (uses the `security` CLI).
+  On Linux it silently falls back to the file-based credentials, which may
+  or may not work depending on the Claude Code build.
+- **Local only**.  The `/ws` endpoint has no authentication — the app is
+  intended to run on `localhost` behind your browser.
+- **tmux required** for the login flow and monitor features.
+- **Python 3.12+** (the repo's `.venv` runs on 3.14).
+
+## Tests
+
+```bash
+uv run pytest tests/ -q
+```
+
+`tests/conftest.py` chdirs to a pytest-managed tmp directory for the
+session, so hard-coded relative DB URLs (`sqlite+aiosqlite:///./test_*.db`)
+end up inside the tmp dir instead of polluting the repo root.
+
+## Things that are intentionally NOT done
+
+- No Alembic migrations — `init_db()` runs `create_all()` and contains a
+  small guard that drops everything if the old `keychain_suffix` column
+  still exists from pre-refactor databases.
+- No global exception handler; background task failures are caught and
+  logged inside `poll_usage_and_switch` itself.
+- No `/ws` auth, no CORS config — if you ever expose the port remotely you
+  must add both.
+- No Alembic / schema migrations, and no multi-tenant support (one user
+  per machine).

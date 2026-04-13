@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -5,8 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Account, SwitchLog
 from ..ws import WebSocketManager
-from ..config import settings
 from . import account_service as ac
+
+logger = logging.getLogger(__name__)
 
 
 async def get_next_account(current_email: str, db: AsyncSession) -> Account | None:
@@ -45,9 +47,12 @@ async def perform_switch(
     db.add(log)
     await db.commit()
 
-    await ws.broadcast({
-        "type": "account_switched",
-        "from": current_email,
-        "to": target.email,
-        "reason": reason,
-    })
+    try:
+        await ws.broadcast({
+            "type": "account_switched",
+            "from": current_email,
+            "to": target.email,
+            "reason": reason,
+        })
+    except Exception as _bc_err:
+        logger.warning("WS broadcast failed: %s", _bc_err)

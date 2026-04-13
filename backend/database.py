@@ -43,6 +43,17 @@ async def init_db() -> None:
         await conn.run_sync(ModelBase.metadata.create_all)
         logger.info("Database tables ready")
 
+        # Additive migration: add the stale_reason column when missing (for
+        # databases created before stale-account detection landed).
+        try:
+            result = await conn.execute(text("PRAGMA table_info(accounts)"))
+            columns = [row[1] for row in result.fetchall()]
+            if columns and "stale_reason" not in columns:
+                await conn.execute(text("ALTER TABLE accounts ADD COLUMN stale_reason VARCHAR(255)"))
+                logger.info("Added accounts.stale_reason column")
+        except Exception as e:
+            logger.warning("stale_reason migration skipped: %s", e)
+
         # Migrate: bump usage_poll_interval_seconds from the old 60-second default
         # to 300, because the Anthropic usage API rate-limits at that frequency.
         await conn.execute(
