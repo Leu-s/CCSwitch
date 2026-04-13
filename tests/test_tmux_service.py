@@ -34,15 +34,21 @@ def test_capture_pane():
 @pytest.mark.asyncio
 async def test_evaluate_with_haiku_success():
     from backend.services.tmux_service import evaluate_with_haiku
-    with patch("subprocess.run", return_value=MagicMock(
-        stdout="SUCCESS The session continued normally.", returncode=0
-    )):
+    from unittest.mock import AsyncMock
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(b"SUCCESS The session continued normally.", b""))
+    with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc), \
+         patch("asyncio.wait_for", new_callable=AsyncMock, return_value=(b"SUCCESS The session continued normally.", b"")):
         result = await evaluate_with_haiku("some terminal output", "claude-haiku-4-5-20251001")
     assert result["status"] == "SUCCESS"
 
 @pytest.mark.asyncio
 async def test_evaluate_with_haiku_defaults_uncertain():
     from backend.services.tmux_service import evaluate_with_haiku
-    with patch("subprocess.run", return_value=MagicMock(stdout="Something happened.", returncode=0)):
+    from unittest.mock import AsyncMock
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(b"Something happened.", b""))
+    with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc), \
+         patch("asyncio.wait_for", new_callable=AsyncMock, return_value=(b"Something happened.", b"")):
         result = await evaluate_with_haiku("output", "model")
     assert result["status"] == "UNCERTAIN"

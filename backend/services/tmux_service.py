@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 
 def list_panes() -> list[dict]:
@@ -42,12 +43,17 @@ async def evaluate_with_haiku(capture: str, model: str) -> dict:
         "Reply with one of: SUCCESS, FAILED, UNCERTAIN. Then one sentence of explanation.\n\n"
         f"Terminal output:\n{capture}"
     )
-    result = subprocess.run(
-        ["claude", "-p", "--model", model],
-        input=prompt,
-        capture_output=True, text=True, timeout=30
-    )
-    output = result.stdout.strip()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "claude", "--print", "--model", model,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(prompt.encode()), timeout=30)
+        output = stdout.decode().strip()
+    except Exception as e:
+        return {"status": "UNCERTAIN", "explanation": str(e), "raw": ""}
     status = "UNCERTAIN"
     for s in ("SUCCESS", "FAILED", "UNCERTAIN"):
         if s in output:

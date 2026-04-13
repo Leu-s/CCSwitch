@@ -27,19 +27,37 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
     out = []
     for acc in accounts:
         usage_raw = usage_cache.get(acc.email, {})
+        token_info = ac.get_token_info(acc.config_dir)
         if "error" in usage_raw:
-            usage = UsageData(error=usage_raw["error"])
-        elif usage_raw:
-            fh = usage_raw.get("five_hour", {})
-            sd = usage_raw.get("seven_day", {})
             usage = UsageData(
-                five_hour_pct=fh.get("used_percentage"),
+                error=usage_raw["error"],
+                **token_info,
+            )
+        elif usage_raw.get("rate_limited"):
+            # Rate limited — show last known usage data with a rate_limited flag
+            fh = usage_raw.get("five_hour") or {}
+            sd = usage_raw.get("seven_day") or {}
+            usage = UsageData(
+                five_hour_pct=fh.get("utilization"),
                 five_hour_resets_at=fh.get("resets_at"),
-                seven_day_pct=sd.get("used_percentage"),
+                seven_day_pct=sd.get("utilization"),
                 seven_day_resets_at=sd.get("resets_at"),
+                rate_limited=True,
+                **token_info,
+            )
+        elif usage_raw:
+            fh = usage_raw.get("five_hour") or {}
+            sd = usage_raw.get("seven_day") or {}
+            usage = UsageData(
+                five_hour_pct=fh.get("utilization"),
+                five_hour_resets_at=fh.get("resets_at"),
+                seven_day_pct=sd.get("utilization"),
+                seven_day_resets_at=sd.get("resets_at"),
+                **token_info,
             )
         else:
-            usage = None
+            # No usage data yet — still show token metadata if available
+            usage = UsageData(**token_info) if token_info else None
 
         out.append(AccountWithUsage(
             **AccountOut.model_validate(acc).model_dump(),

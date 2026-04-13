@@ -9,7 +9,6 @@ class AccountOut(BaseModel):
     id: int
     email: str
     display_name: Optional[str] = None
-    config_dir: str
     threshold_pct: float
     enabled: bool
     priority: int
@@ -30,6 +29,10 @@ class UsageData(BaseModel):
     seven_day_pct: Optional[float] = None
     seven_day_resets_at: Optional[Any] = None
     error: Optional[str] = None
+    rate_limited: Optional[bool] = None  # True when 429 but showing stale data
+    # Token metadata (non-secret: expiry timestamp + subscription tier)
+    token_expires_at: Optional[int] = None
+    subscription_type: Optional[str] = None
 
 
 class AccountWithUsage(AccountOut):

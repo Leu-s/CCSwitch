@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from datetime import datetime
 import logging
 import os
 
@@ -28,6 +29,7 @@ async def lifespan(app: FastAPI):
         args=[ws_manager],
         id="usage_poll",
         replace_existing=True,
+        next_run_time=datetime.now(),  # poll immediately on startup
     )
     scheduler.start()
     logger.info("Server running on port %d", cfg.server_port)

@@ -58,13 +58,33 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                     "error": None,
                 })
             except Exception as e:
-                logger.warning("Usage fetch failed for %s: %s", account.email, e)
-                usage_cache[account.email] = {"error": str(e)}
+                err_str = str(e)
+                # Simplify HTTP error messages
+                import httpx as _httpx
+                if isinstance(e, _httpx.HTTPStatusError):
+                    err_str = f"HTTP {e.response.status_code}"
+                    try:
+                        body = e.response.json()
+                        msg = (body.get("error") or {}).get("message") or body.get("message")
+                        if msg: err_str = msg
+                    except Exception:
+                        pass
+                logger.warning("Usage fetch failed for %s: %s", account.email, err_str)
+                # On 429 (rate limited) keep previous usage data — only update the error flag
+                is_rate_limited = "429" in str(e) or "rate_limit" in str(e).lower()
+                prev = usage_cache.get(account.email, {})
+                if is_rate_limited and prev and "error" not in prev:
+                    # Preserve last good usage, mark as rate limited
+                    usage_cache[account.email] = {**prev, "rate_limited": True}
+                    error_str = "Rate limited"
+                else:
+                    usage_cache[account.email] = {"error": err_str}
+                    error_str = err_str
                 updated.append({
                     "id": account.id,
                     "email": account.email,
-                    "usage": None,
-                    "error": str(e),
+                    "usage": usage_cache[account.email],
+                    "error": error_str,
                 })
 
         await ws.broadcast({"type": "usage_updated", "accounts": updated})
@@ -95,7 +115,7 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
             return
 
         current_usage = usage_cache.get(current_email, {})
-        five_hour_pct = (current_usage.get("five_hour") or {}).get("used_percentage", 0)
+        five_hour_pct = (current_usage.get("five_hour") or {}).get("utilization", 0)
         threshold = current_account.threshold_pct
 
         if five_hour_pct >= threshold:

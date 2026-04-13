@@ -7,6 +7,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script>
+  (function(){var t=localStorage.getItem("theme")||(window.matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light");if(t==="light")document.documentElement.setAttribute("data-theme","light");}());
+</script>
 <style>
   :root {
     --bg: #0a0a0f;
@@ -185,16 +188,21 @@
   .service-banner-sub { font-size: 12px; color: var(--text-dim); }
 
   /* ── Account cards ──────────────────────────────────────────────────────── */
-  .accounts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 18px; }
+  .accounts-grid { display: flex; flex-direction: column; gap: 6px; }
 
   .account-card {
     position: relative; background: var(--card); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 18px;
-    transition: transform var(--t), border-color var(--t), box-shadow var(--t), background var(--t);
+    border-radius: var(--radius); padding: 12px 16px;
+    transition: border-color var(--t), box-shadow var(--t), background var(--t);
     cursor: grab;
+    display: grid;
+    grid-template-columns: 210px 1fr 180px auto;
+    grid-template-areas: "identity usage threshold actions";
+    column-gap: 20px;
+    align-items: center;
   }
   .account-card:active { cursor: grabbing; }
-  .account-card:hover { transform: translateY(-2px); border-color: var(--border-strong); background: var(--card-hover); box-shadow: var(--shadow); }
+  .account-card:hover { border-color: var(--border-strong); }
   .account-card.dragging { opacity: 0.45; transform: rotate(1.5deg); }
   .account-card.drop-above { box-shadow: 0 -4px 0 0 var(--accent); }
   .account-card.drop-below { box-shadow: 0 4px 0 0 var(--accent); }
@@ -212,8 +220,8 @@
   }
   .account-card.disabled { opacity: 0.55; }
 
-  .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
-  .card-head-left { min-width: 0; flex: 1; }
+  .card-head { grid-area: identity; display: flex; flex-direction: column; gap: 4px; margin-bottom: 0; min-width: 0; }
+  .card-head-left { min-width: 0; }
   .email { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .display-name {
     display: inline-block; margin-top: 3px; font-size: 12px; color: var(--text-dim);
@@ -224,7 +232,7 @@
   .display-name:hover, .display-name:focus { background: rgba(255,255,255,0.04); border-color: var(--border); }
   .display-name:empty::before { content: "Add name…"; color: var(--text-mute); }
 
-  .card-head-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .card-head-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
 
   .active-pill {
     display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px;
@@ -240,21 +248,37 @@
   }
 
   /* Usage */
-  .usage-block { margin-top: 12px; }
-  .usage-row { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
-  .usage-row .label { font-weight: 600; color: var(--text-mute); letter-spacing: 0.04em; }
-  .usage-row .value { color: var(--text); font-weight: 600; }
-  .usage-bar { height: 6px; background: rgba(255,255,255,0.06); border-radius: 999px; overflow: hidden; margin-bottom: 10px; }
-  .usage-fill { height: 100%; border-radius: 999px; transition: width 0.5s ease, background 0.3s ease; background: var(--success); }
+  .usage-block { grid-area: usage; margin-top: 0; display: flex; flex-direction: column; gap: 6px; }
+  .usage-window { display: flex; flex-direction: column; gap: 3px; }
+  .usage-header { display: flex; align-items: center; justify-content: space-between; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .usage-label { font-weight: 700; color: var(--text-mute); letter-spacing: 0.05em; font-size: 10px; text-transform: uppercase; }
+  .usage-pct { font-weight: 700; color: var(--text); font-size: 13px; }
+  .usage-pct.warn { color: var(--warning); }
+  .usage-pct.crit { color: var(--danger); }
+  .usage-reset { font-size: 10px; color: var(--text-mute); font-variant-numeric: tabular-nums; text-align: right; }
+  .usage-bar { height: 5px; background: rgba(255,255,255,0.06); border-radius: 999px; overflow: hidden; }
+  .usage-fill { height: 100%; border-radius: 999px; transition: width 0.6s ease, background 0.3s ease; background: var(--success); }
   .usage-fill.warn { background: var(--warning); }
   .usage-fill.crit { background: var(--danger); }
-  .usage-error { color: var(--warning); font-size: 12px; padding: 8px; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.2); border-radius: var(--radius-sm); margin-top: 8px; }
+  .usage-divider { height: 1px; background: var(--border); margin: 2px 0; }
+  .usage-footer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+  .usage-error { color: var(--danger); font-size: 11px; padding: 5px 8px; background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: var(--radius-sm); }
+  .usage-rate-limited { color: var(--warning); font-size: 11px; padding: 4px 8px; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.2); border-radius: var(--radius-sm); display: flex; align-items: center; gap: 4px; }
+  .usage-empty { font-size: 11px; color: var(--text-mute); padding: 4px 0; }
+  .sub-badge {
+    display: inline-flex; align-items: center; padding: 2px 7px;
+    background: rgba(124,58,237,0.15); border: 1px solid rgba(124,58,237,0.3);
+    color: var(--accent-2); border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  }
+  .session-expiry { font-size: 10px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
+  .session-expiry.expiring-soon { color: var(--warning); font-weight: 600; }
 
   /* Threshold row */
   .threshold-row {
+    grid-area: threshold;
     display: flex; align-items: center; gap: 10px;
-    margin-top: 12px; padding-top: 12px;
-    border-top: 1px solid var(--border);
+    margin-top: 0; padding-top: 0;
+    border-top: none;
     font-size: 11px; color: var(--text-dim);
   }
   .threshold-row .label { font-weight: 600; color: var(--text-mute); letter-spacing: 0.04em; flex-shrink: 0; }
@@ -271,7 +295,7 @@
   .threshold-value { font-weight: 700; color: var(--text); min-width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
 
   /* Card actions */
-  .card-actions { display: flex; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .card-actions { grid-area: actions; display: flex; gap: 6px; margin-top: 0; padding-top: 0; border-top: none; align-items: center; }
 
   /* Buttons */
   .btn {
@@ -409,6 +433,13 @@
     box-shadow: 0 -8px 32px rgba(0,0,0,0.6);
   }
   .terminal-panel.hidden { display: none; }
+  .terminal-resize-handle {
+    position: absolute; top: 0; left: 0; right: 0; height: 5px;
+    cursor: ns-resize; z-index: 10; background: transparent;
+    transition: background 150ms;
+  }
+  .terminal-resize-handle:hover { background: rgba(124,58,237,0.35); }
+  .terminal-resize-handle.dragging { background: rgba(124,58,237,0.55); }
   .terminal-header { display: flex; align-items: center; gap: 10px; padding: 7px 14px; background: #161b22; border-bottom: 1px solid rgba(255,255,255,0.07); flex-shrink: 0; }
   .terminal-target { font-family: "JetBrains Mono", monospace; font-size: 12px; font-weight: 600; color: #58a6ff; }
   .terminal-live { font-size: 11px; color: #3fb950; display: flex; align-items: center; gap: 5px; }
@@ -448,8 +479,81 @@
     .container { padding: 18px; }
     .header { padding: 12px 16px; }
     .header-inner { gap: 10px; }
-    .accounts-grid { grid-template-columns: 1fr; }
+    .account-card {
+      grid-template-columns: 1fr;
+      grid-template-areas: "identity" "usage" "threshold" "actions";
+      padding: 14px 16px; row-gap: 12px;
+    }
+    .threshold-row { border-top: 1px solid var(--border); padding-top: 12px; }
+    .card-actions { border-top: 1px solid var(--border); padding-top: 12px; }
   }
+
+  /* ── Theme toggle button ─────────────────────────────────────────────────── */
+  .theme-btn {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--text-dim); cursor: pointer;
+    width: 32px; height: 32px; border-radius: var(--radius-sm);
+    display: inline-flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    transition: background var(--t), color var(--t), border-color var(--t);
+  }
+  .theme-btn:hover { background: var(--card); color: var(--text); border-color: var(--border-strong); }
+
+  /* ── Light theme ─────────────────────────────────────────────────────────── */
+  [data-theme="light"] {
+    --bg: #f4f4f9;
+    --bg-2: #ededf5;
+    --card: #ffffff;
+    --card-2: #f0f0f8;
+    --card-hover: #e8e8f2;
+    --card-border: rgba(100,100,180,0.1);
+    --border: rgba(100,100,180,0.14);
+    --border-strong: rgba(100,100,180,0.26);
+    --text: #1a1a2e;
+    --text-dim: #4a5068;
+    --text-mute: #7878a0;
+    --accent: #7c3aed;
+    --accent-2: #8b5cf6;
+    --accent-glow: rgba(124,58,237,0.2);
+    --success: #059669;
+    --warning: #d97706;
+    --danger: #dc2626;
+    --info: #2563eb;
+    --shadow: 0 10px 30px rgba(0,0,0,0.07);
+    --shadow-lg: 0 20px 50px rgba(0,0,0,0.12);
+  }
+  [data-theme="light"] body {
+    background-image:
+      radial-gradient(circle at 15% -10%, rgba(124,58,237,0.05), transparent 40%),
+      radial-gradient(circle at 85% 110%, rgba(168,85,247,0.03), transparent 40%);
+  }
+  [data-theme="light"] .header { background: rgba(244,244,249,0.92); }
+  [data-theme="light"] ::-webkit-scrollbar-thumb { background: #c8c8da; }
+  [data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #adadc2; }
+  [data-theme="light"] .toggle .track { background: #d1d5db; }
+  [data-theme="light"] .threshold-slider { background: #d1d5db; }
+  [data-theme="light"] .modal-backdrop { background: rgba(80,80,140,0.4); }
+  [data-theme="light"] .usage-bar { background: rgba(0,0,0,0.08); }
+  [data-theme="light"] .tab-btn:hover { background: rgba(0,0,0,0.05); }
+  [data-theme="light"] .display-name:hover,
+  [data-theme="light"] .display-name:focus { background: rgba(0,0,0,0.04); border-color: var(--border); }
+  [data-theme="light"] .panel-header .count { background: rgba(0,0,0,0.05); }
+  [data-theme="light"] .active-pill { background: rgba(124,58,237,0.1); border-color: rgba(124,58,237,0.3); color: #6d28d9; }
+  [data-theme="light"] .active-pill::before { box-shadow: none; }
+  [data-theme="light"] .default-pill { background: rgba(245,158,11,0.1); border-color: rgba(245,158,11,0.3); color: #92400e; }
+  [data-theme="light"] .service-btn[data-on="false"] { color: #dc2626; }
+  [data-theme="light"] .service-btn[data-on="true"] { color: #059669; }
+  [data-theme="light"] .service-banner.off .service-banner-title { color: #b91c1c; }
+  [data-theme="light"] .service-banner.on .service-banner-title { color: #065f46; }
+  [data-theme="light"] .badge.manual { color: #1d4ed8; background: rgba(59,130,246,0.1); }
+  [data-theme="light"] .badge.regex { color: #6d28d9; background: rgba(124,58,237,0.1); }
+  [data-theme="light"] .badge.success { color: #065f46; background: rgba(16,185,129,0.1); }
+  [data-theme="light"] .badge.failed { color: #991b1b; background: rgba(239,68,68,0.1); }
+  [data-theme="light"] .badge.uncertain { color: #92400e; background: rgba(245,158,11,0.1); }
+  [data-theme="light"] .log-table .reason-pill { color: #6d28d9; background: rgba(124,58,237,0.1); }
+  [data-theme="light"] .log-table .reason-pill.manual { color: #1d4ed8; background: rgba(59,130,246,0.1); }
+  [data-theme="light"] .log-table .reason-pill.threshold { color: #92400e; background: rgba(245,158,11,0.1); }
+  [data-theme="light"] .log-table .reason-pill.api_error { color: #991b1b; background: rgba(239,68,68,0.1); }
 </style>
 </head>
 <body>
@@ -479,6 +583,7 @@
       <span>Auto-switch</span>
     </label>
 
+    <button class="theme-btn" id="theme-btn" aria-label="Toggle theme"></button>
     <span class="ws-dot" id="ws-dot" title="WebSocket connection"></span>
   </div>
 </header>
@@ -636,6 +741,7 @@
 
 <!-- ── Bottom terminal panel ─────────────────────────────────────────────── -->
 <div class="terminal-panel hidden" id="terminal-panel">
+  <div class="terminal-resize-handle" id="terminal-resize-handle"></div>
   <div class="terminal-header">
     <div class="terminal-target" id="terminal-target">—</div>
     <div class="terminal-live" id="terminal-live">live</div>
@@ -689,12 +795,41 @@ function fmtTime(iso) {
   } catch { return iso; }
 }
 
+// Parse any timestamp format: ISO string, ms number, or seconds number
+function tsToMs(ts) {
+  if (!ts) return null;
+  if (typeof ts === "string") { const d = new Date(ts); return isNaN(d) ? null : d.getTime(); }
+  return ts > 1e12 ? ts : ts * 1000;
+}
+
 function fmtReset(ts) {
-  if (!ts) return "—";
+  const ms = tsToMs(ts);
+  if (!ms) return "—";
   try {
-    const ms = ts > 1e12 ? ts : ts * 1000;
-    return new Date(ms).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" });
+    const d = new Date(ms);
+    if (isNaN(d)) return "—";
+    const diffH = (d - Date.now()) / 3600000;
+    if (diffH < 0) return "—";
+    if (diffH < 24) return d.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" });
+    return d.toLocaleDateString([], { month:"short", day:"numeric" }) + " " + d.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" });
   } catch { return "—"; }
+}
+
+function fmtRelative(ts) {
+  const ms = tsToMs(ts);
+  if (!ms) return "";
+  try {
+    const diff = ms - Date.now();
+    if (diff <= 0) return "expired";
+    const h = Math.floor(diff / 3600000);
+    const m = Math.floor((diff % 3600000) / 60000);
+    if (h >= 24) {
+      const d = Math.floor(h / 24);
+      return `in ${d}d ${h % 24}h`;
+    }
+    if (h > 0) return `in ${h}h ${m}m`;
+    return `in ${m}m`;
+  } catch { return ""; }
 }
 
 function usageClass(pct) {
@@ -829,28 +964,47 @@ function accountCardHtml(acc) {
   const disabled = !acc.enabled;
   const isDefault = acc.id === state.service.default_account_id;
   const usage = acc.usage || {};
+  const threshold = acc.threshold_pct ?? 95;
+
   const fiveH = usage.five_hour_pct;
   const sevenD = usage.seven_day_pct;
   const err = usage.error;
-  const threshold = acc.threshold_pct ?? 95;
+  const rateLimited = usage.rate_limited;
 
-  const fiveBar = fiveH != null ? `
-    <div class="usage-row">
-      <span class="label">5h</span>
-      <span class="value">${fiveH.toFixed(0)}% · resets ${fmtReset(usage.five_hour_resets_at)}</span>
-    </div>
-    <div class="usage-bar"><div class="usage-fill ${usageClass(fiveH)}" style="width:${Math.min(100,fiveH)}%"></div></div>` : "";
+  function usageWindow(label, pct, resetsAt) {
+    const cls = usageClass(pct);
+    const rel = fmtRelative(resetsAt);
+    const resetStr = fmtReset(resetsAt);
+    return `
+      <div class="usage-window">
+        <div class="usage-header">
+          <span class="usage-label">${label}</span>
+          <span class="usage-reset">${resetStr}${rel ? " · " + rel : ""}</span>
+        </div>
+        <div class="usage-bar"><div class="usage-fill ${cls}" style="width:${Math.min(100,pct)}%"></div></div>
+        <div style="display:flex;justify-content:flex-end;margin-top:1px"><span class="usage-pct ${cls}">${pct.toFixed(0)}%</span></div>
+      </div>`;
+  }
 
-  const sevenBar = sevenD != null ? `
-    <div class="usage-row">
-      <span class="label">7d</span>
-      <span class="value">${sevenD.toFixed(0)}% · resets ${fmtReset(usage.seven_day_resets_at)}</span>
-    </div>
-    <div class="usage-bar"><div class="usage-fill ${usageClass(sevenD)}" style="width:${Math.min(100,sevenD)}%"></div></div>` : "";
+  const fiveBlock = fiveH != null ? usageWindow("5 h window", fiveH, usage.five_hour_resets_at) : "";
+  const sevenBlock = sevenD != null ? usageWindow("7 d window", sevenD, usage.seven_day_resets_at) : "";
+
+  const hasBars = fiveBlock || sevenBlock;
+  const divider = (hasBars) ? `<div class="usage-divider"></div>` : "";
 
   const errBlock = err ? `<div class="usage-error">⚠ ${escapeHtml(err)}</div>` : "";
-  const usageEmpty = (!fiveBar && !sevenBar && !err)
-    ? `<div class="usage-error" style="color:var(--text-mute);background:rgba(255,255,255,0.02);border-color:var(--border);">No usage data yet.</div>` : "";
+  const rateLimitedBadge = rateLimited ? `<span class="usage-rate-limited">⚡ Rate limited${fiveH != null ? " (stale data)" : ""}</span>` : "";
+  const usageEmpty = (!hasBars && !err) ? `<div class="usage-empty">No usage data yet</div>` : "";
+
+  // Footer: subscription badge + token expiry
+  const subBadge = usage.subscription_type
+    ? `<span class="sub-badge">${escapeHtml(usage.subscription_type)}</span>` : "";
+  const tokenExpMs = tsToMs(usage.token_expires_at);
+  const tokenExpiringSoon = tokenExpMs && (tokenExpMs - Date.now()) < 3600000;
+  const sessionLine = tokenExpMs
+    ? `<span class="session-expiry${tokenExpiringSoon ? " expiring-soon" : ""}">Token ${fmtReset(usage.token_expires_at)} · ${fmtRelative(usage.token_expires_at)}</span>` : "";
+  const footer = (subBadge || sessionLine || rateLimitedBadge)
+    ? `<div class="usage-footer">${subBadge}${rateLimitedBadge}${sessionLine}</div>` : "";
 
   return `
     <article class="account-card ${isActive?"active":""} ${disabled?"disabled":""}"
@@ -869,7 +1023,7 @@ function accountCardHtml(acc) {
           </label>
         </div>
       </div>
-      <div class="usage-block">${fiveBar}${sevenBar}${errBlock}${usageEmpty}</div>
+      <div class="usage-block">${fiveBlock}${sevenBlock}${errBlock}${usageEmpty}${footer}</div>
       <div class="threshold-row">
         <span class="label">Threshold</span>
         <input type="range" class="threshold-slider" data-id="${acc.id}" min="50" max="100" step="1" value="${threshold}" />
@@ -1228,7 +1382,7 @@ function openTerminal(target) {
   const session = target.split(":")[0];
   qs("#terminal-attach-cmd").textContent = `tmux attach -t ${session}`;
   qs("#terminal-panel").classList.remove("hidden");
-  qs("main").style.paddingBottom = "320px";
+  qs("main").style.paddingBottom = (qs("#terminal-panel").offsetHeight + 20) + "px";
   qsa(".pane-item").forEach(el => el.classList.toggle("selected", el.dataset.target===target));
   qs("#terminal-input").focus();
   refreshCapture();
@@ -1258,6 +1412,34 @@ async function refreshCapture() {
 }
 
 qs("#terminal-close-btn").addEventListener("click", closeTerminal);
+
+// ── Terminal panel drag-to-resize ─────────────────────────────────────────
+(function() {
+  const panel = qs("#terminal-panel");
+  const handle = qs("#terminal-resize-handle");
+  let dragging = false, startY = 0, startH = 0;
+  handle.addEventListener("mousedown", e => {
+    e.preventDefault();
+    dragging = true; startY = e.clientY; startH = panel.offsetHeight;
+    handle.classList.add("dragging");
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "ns-resize";
+  });
+  document.addEventListener("mousemove", e => {
+    if (!dragging) return;
+    const newH = Math.min(Math.max(startH + (startY - e.clientY), 120), window.innerHeight * 0.85);
+    panel.style.height = newH + "px";
+    qs("main").style.paddingBottom = (newH + 20) + "px";
+  });
+  document.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove("dragging");
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+  });
+})();
+
 qs("#terminal-send-form").addEventListener("submit", async e => {
   e.preventDefault();
   const input = qs("#terminal-input");
@@ -1393,22 +1575,64 @@ function updateUsageLive(updates) {
   for (const u of updates) {
     const acc = state.accounts.find(a=>a.id===u.id||a.email===u.email);
     if (!acc) continue;
-    if (u.error) { acc.usage = {error:u.error}; }
-    else if (u.usage) {
+    // Preserve token metadata loaded from the initial HTTP fetch
+    const prevMeta = acc.usage ? {
+      token_expires_at: acc.usage.token_expires_at,
+      subscription_type: acc.usage.subscription_type,
+    } : {};
+    if (u.error === "Rate limited" && u.usage && u.usage.rate_limited) {
+      // Keep previous usage values but mark as rate-limited
       const fh = u.usage.five_hour||{};
       const sd = u.usage.seven_day||{};
-      acc.usage = { five_hour_pct:fh.used_percentage, five_hour_resets_at:fh.resets_at, seven_day_pct:sd.used_percentage, seven_day_resets_at:sd.resets_at };
+      acc.usage = { five_hour_pct:fh.utilization, five_hour_resets_at:fh.resets_at, seven_day_pct:sd.utilization, seven_day_resets_at:sd.resets_at, rate_limited:true, ...prevMeta };
+    } else if (u.error) {
+      acc.usage = {error:u.error, ...prevMeta};
+    } else if (u.usage) {
+      const fh = u.usage.five_hour||{};
+      const sd = u.usage.seven_day||{};
+      acc.usage = { five_hour_pct:fh.utilization, five_hour_resets_at:fh.resets_at, seven_day_pct:sd.utilization, seven_day_resets_at:sd.resets_at, ...prevMeta };
     }
+    // Update only the usage block — do NOT replace the whole card (that would lose all event listeners)
     const card = qs(`.account-card[data-id="${acc.id}"]`);
     if (card) {
-      const tmp = document.createElement("div");
-      tmp.innerHTML = accountCardHtml(acc);
-      const newCard = tmp.firstElementChild;
-      card.replaceWith(newCard);
-      attachDragHandlers(newCard);
+      const usageBlock = card.querySelector(".usage-block");
+      if (usageBlock) {
+        // Render a fresh card into a temp element, then swap only the usage block
+        const tmp = document.createElement("div");
+        tmp.innerHTML = accountCardHtml(acc);
+        const newUsage = tmp.firstElementChild.querySelector(".usage-block");
+        if (newUsage) usageBlock.replaceWith(newUsage);
+      }
     }
   }
 }
+
+// =============================================================
+// Theme
+// =============================================================
+function applyTheme(theme) {
+  if (theme === "light") document.documentElement.setAttribute("data-theme", "light");
+  else document.documentElement.removeAttribute("data-theme");
+  localStorage.setItem("theme", theme);
+  syncThemeBtn();
+}
+
+function syncThemeBtn() {
+  const btn = qs("#theme-btn");
+  if (!btn) return;
+  const isLight = document.documentElement.getAttribute("data-theme") === "light";
+  btn.title = isLight ? "Switch to dark theme" : "Switch to light theme";
+  btn.innerHTML = isLight
+    ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`
+    : `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.22" y1="4.22" x2="7.05" y2="7.05"/><line x1="16.95" y1="16.95" x2="19.78" y2="19.78"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.22" y1="19.78" x2="7.05" y2="16.95"/><line x1="16.95" y1="7.05" x2="19.78" y2="4.22"/></svg>`;
+}
+
+qs("#theme-btn").addEventListener("click", () => {
+  const isLight = document.documentElement.getAttribute("data-theme") === "light";
+  applyTheme(isLight ? "dark" : "light");
+});
+
+syncThemeBtn();
 
 // ── Keyboard shortcuts ──────────────────────────────────────────────────────
 document.addEventListener("keydown", e => {

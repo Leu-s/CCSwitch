@@ -84,6 +84,36 @@ def _read_keychain_credentials(config_dir: str) -> dict:
     return {}
 
 
+def get_token_info(config_dir: str) -> dict:
+    """
+    Return non-secret token metadata: token expiry timestamp and subscription type.
+    Does NOT return access/refresh tokens or rate limit tier.
+    Falls back to file-based credentials if Keychain is unavailable.
+    """
+    kc = _read_keychain_credentials(config_dir)
+    oauth = kc.get("claudeAiOauth", kc)
+    result = {}
+    if oauth.get("expiresAt"):
+        result["token_expires_at"] = oauth["expiresAt"]
+    if oauth.get("subscriptionType"):
+        result["subscription_type"] = oauth["subscriptionType"]
+    if result:
+        return result
+
+    # Fall back to file-based credentials
+    for filename in [".credentials.json", "credentials.json", ".claude.json"]:
+        path = os.path.join(config_dir, filename)
+        data = _load_json_safe(path)
+        oauth_data = data.get("claudeAiOauth", data)
+        if oauth_data.get("expiresAt"):
+            result["token_expires_at"] = oauth_data["expiresAt"]
+        if oauth_data.get("subscriptionType"):
+            result["subscription_type"] = oauth_data["subscriptionType"]
+        if result:
+            return result
+    return {}
+
+
 def get_access_token_from_config_dir(config_dir: str) -> str | None:
     """
     Try several locations Claude Code may use to persist the OAuth access token
