@@ -102,22 +102,14 @@ async def enable_service(db: AsyncSession = Depends(get_db)):
 @router.post("/disable")
 async def disable_service(db: AsyncSession = Depends(get_db)):
     """
-    Disable the service:
-    Restore the default account's config, or fall back to the pre-enable backup.
+    Disable the service: always restore the pre-enable original backup.
+
+    "Default account" controls which account activates on Enable — it does NOT
+    affect Disable.  Disable always restores the state that existed before the
+    service was first enabled.  With a single account this means ~/.claude/
+    reverts to whatever was there originally (which may be the same account —
+    that is fine and correct).
     """
-    default_raw = await _get_setting("default_account_id", "", db)
-    default_id = int(default_raw) if default_raw.isdigit() else None
-
-    if default_id:
-        r = await db.execute(select(Account).where(Account.id == default_id))
-        default_account = r.scalars().first()
-        if default_account:
-            ac.activate_account_config(default_account.config_dir)
-            await _set_setting("service_enabled", "false", db)
-            logger.info("Service disabled — restored default account: %s", default_account.email)
-            return {"ok": True, "restored_email": default_account.email}
-
-    # No default account — use original backup
     backup_raw = await _get_setting("original_credentials_backup", "{}", db)
     try:
         backup = json.loads(backup_raw)
@@ -126,19 +118,19 @@ async def disable_service(db: AsyncSession = Depends(get_db)):
 
     if backup:
         ac.restore_config_from_backup(backup)
-        await _set_setting("service_enabled", "false", db)
         logger.info("Service disabled — original credentials restored")
-        return {"ok": True, "restored_email": ac.get_active_email()}
+    else:
+        logger.info("Service disabled — no original backup found, credentials unchanged")
 
     await _set_setting("service_enabled", "false", db)
-    return {"ok": True, "restored_email": None}
+    return {"ok": True, "restored_email": ac.get_active_email()}
 
 
 # ── Default account ────────────────────────────────────────────────────────────
 
 @router.patch("/default-account")
 async def set_default_account(account_id: int, db: AsyncSession = Depends(get_db)):
-    """Set which account's credentials are restored when the service is disabled."""
+    """Set the starting account activated when the service is enabled."""
     r = await db.execute(select(Account).where(Account.id == account_id))
     account = r.scalars().first()
     if not account:
