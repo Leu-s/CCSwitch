@@ -33,12 +33,14 @@ backend/
     settings.py        /api/settings get/patch + shell-setup helper
     tmux.py            /api/tmux/* panes, monitors, evaluate
   services/
-    account_service.py paths, login session, activate/backup/restore, active pointer
+    account_service.py paths, activate_account_config, backup/restore, active pointer
     account_queries.py DB query helpers for Account (get_by_id, get_by_email, etc.)
+    login_session_service.py  isolated add-account login sessions (+threading.RLock)
     credential_provider.py  Keychain read/write + credential-file fallbacks
+                            (+ _credential_lock serializes Keychain + file writes)
     anthropic_api.py   probe_usage() + refresh_access_token()
-    switcher.py        get_next_account() + perform_switch()
-    settings_service.py  typed get/set for Setting rows
+    switcher.py        get_next_account() + perform_switch() (+ _switch_lock asyncio)
+    settings_service.py  typed get/set for Setting rows (bool/int/int_or_none/json)
     tmux_service.py    list_panes, send_keys, capture_pane, evaluate_with_haiku
 frontend/
   index.html           HTML shell (259 lines)
