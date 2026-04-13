@@ -239,25 +239,60 @@ def restore_config_from_backup(backup: dict) -> None:
 
 # ── Activation ────────────────────────────────────────────────────────────────
 
+def _write_keychain_credentials(config_dir: str, credentials: dict) -> None:
+    """
+    Write a credentials dict into the macOS Keychain entry that Claude Code
+    will read for the given config_dir.
+    """
+    import getpass
+    service = _keychain_service_name(config_dir)
+    acct = getpass.getuser()
+    cred_json = json.dumps(credentials)
+
+    # Remove existing entry (ignore errors — may not exist yet)
+    subprocess.run(
+        ["security", "delete-generic-password", "-s", service, "-a", acct],
+        capture_output=True, timeout=5,
+    )
+    result = subprocess.run(
+        ["security", "add-generic-password", "-s", service, "-a", acct, "-w", cred_json],
+        capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode != 0:
+        logger.warning("Keychain write failed for %s: %s", service, result.stderr.strip())
+    else:
+        logger.debug("Keychain credentials written for %s", service)
+
+
 def activate_account_config(config_dir: str) -> None:
     """
-    Copy all config/credential files from an account's isolated directory
-    into the active ~/.claude/ directory, making that account the one Claude
-    Code will use when run without an explicit CLAUDE_CONFIG_DIR.
+    Activate an account so Claude Code CLI (run without CLAUDE_CONFIG_DIR)
+    uses it.
+
+    Two things must happen together:
+    1. Copy credential / config files into ~/.claude/  (Linux + older builds)
+    2. Copy the Keychain entry to the ~/.claude/ service name  (macOS)
+
+    Without step 2 the CLI still reads the OLD token from Keychain even
+    though .claude.json says the new email.
     """
     dst = active_claude_dir()
     os.makedirs(dst, exist_ok=True)
 
-    files_to_copy = [
-        ".claude.json",
-        "credentials.json",
-        ".credentials.json",
-    ]
-    for filename in files_to_copy:
+    # ── 1. File-based credentials (Linux / older Claude Code) ─────────────────
+    for filename in [".claude.json", "credentials.json", ".credentials.json"]:
         src = os.path.join(config_dir, filename)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(dst, filename))
             logger.debug("Copied %s → %s", src, os.path.join(dst, filename))
+
+    # ── 2. macOS Keychain ──────────────────────────────────────────────────────
+    kc = _read_keychain_credentials(config_dir)
+    if kc:
+        _write_keychain_credentials(dst, kc)
+        logger.debug("Keychain credentials copied %s → %s",
+                     _keychain_service_name(config_dir),
+                     _keychain_service_name(dst))
 
 
 # ── Login session ─────────────────────────────────────────────────────────────
