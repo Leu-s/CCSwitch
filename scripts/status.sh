@@ -68,7 +68,7 @@ if [[ -f "$ACTIVE_FILE" ]]; then
         # Parse email from .claude.json
         CLAUDE_JSON="$ACTIVE_DIR/.claude.json"
         if [[ -f "$CLAUDE_JSON" ]]; then
-            EMAIL=$(python3 -c "import json,sys; d=json.load(open('$CLAUDE_JSON')); print(d.get('oauthAccount',{}).get('emailAddress','unknown'))" 2>/dev/null || echo "unknown")
+            EMAIL=$(CLAUDE_JSON="$CLAUDE_JSON" python3 -c "import json,os; d=json.load(open(os.environ['CLAUDE_JSON'])); print(d.get('oauthAccount',{}).get('emailAddress','unknown'))" 2>/dev/null || echo "unknown")
             echo -e "${GREEN}✓ Active account: $EMAIL${NC}"
         else
             echo -e "${YELLOW}⚠ Active dir set but .claude.json missing${NC}"

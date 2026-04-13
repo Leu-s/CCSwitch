@@ -92,6 +92,13 @@ EOF
 
 chmod 644 "$PLIST_PATH"
 
+# Validate plist before loading
+if ! plutil -lint "$PLIST_PATH" &>/dev/null; then
+    echo "ERROR: Generated plist is invalid. Check PATH for XML-unsafe characters." >&2
+    rm -f "$PLIST_PATH"
+    exit 1
+fi
+
 # Load with modern API, fall back to legacy
 echo "Loading service..."
 launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || \

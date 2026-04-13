@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -130,13 +131,10 @@ def cmd_log(args):
     if not log_file.exists():
         print(f"No log file found at {log_file}", file=sys.stderr)
         sys.exit(1)
-    lines = args.lines if hasattr(args, "lines") and args.lines else None
     if args.follow:
         os.execv("/usr/bin/tail", ["/usr/bin/tail", "-f", str(log_file)])
-    elif lines:
-        os.execv("/usr/bin/tail", ["/usr/bin/tail", f"-{lines}", str(log_file)])
     else:
-        os.execv("/usr/bin/tail", ["/usr/bin/tail", "-50", str(log_file)])
+        os.execv("/usr/bin/tail", ["/usr/bin/tail", f"-{args.lines}", str(log_file)])
 
 
 def cmd_server_start(args):
@@ -146,8 +144,7 @@ def cmd_server_start(args):
         print(f"ERROR: Script not found: {script}", file=sys.stderr)
         sys.exit(1)
     # Check tmux is available
-    result = subprocess.run(["which", "tmux"], capture_output=True)
-    if result.returncode != 0:
+    if not shutil.which("tmux"):
         print("ERROR: tmux not found. Install with: brew install tmux", file=sys.stderr)
         sys.exit(1)
     # Ensure a tmux session exists
