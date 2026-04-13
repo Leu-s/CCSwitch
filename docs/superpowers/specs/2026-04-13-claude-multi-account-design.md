@@ -33,7 +33,6 @@ claude-code-multi-account/
     routers/
       accounts.py         # Account CRUD, manual switch, scan Keychain
       tmux.py             # Monitor CRUD, live capture endpoint
-      hooks.py            # POST /api/hooks/stop-failure (StopFailure handler)
       settings.py         # Global settings (threshold, auto-switch toggle)
     services/
       keychain.py         # security CLI wrapper: read/write/list credentials
@@ -43,8 +42,6 @@ claude-code-multi-account/
     background.py         # APScheduler: usage polling every 60s, auto-switch check
   frontend/
     index.html            # SPA — two tabs: Accounts, tmux Monitor
-  hooks/
-    stop-failure.sh       # Installed to ~/.claude/settings.json StopFailure hook
   docker-compose.yml      # MySQL service
   requirements.txt
   .env.example
@@ -96,6 +93,8 @@ Default settings:
 - `switch_threshold_percent`: `90` (switch when 5h usage ≥ this)
 - `usage_poll_interval_seconds`: `60`
 
+Auto-switch is triggered solely by the background polling task — no external hooks required.
+
 ---
 
 ## Core Mechanisms
@@ -144,20 +143,6 @@ Returns `five_hour.used_percentage`, `five_hour.resets_at`, `seven_day.used_perc
 3. If `five_hour.used_percentage >= switch_threshold_percent` → call switcher
 4. Switcher selects next `enabled=true` account ordered by `priority ASC`, skipping current
 5. Performs switch, logs reason=`threshold`
-
-### StopFailure Hook
-
-`hooks/stop-failure.sh` is registered in `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "StopFailure": [{"matcher": "", "hooks": [{"type": "command", "command": "~/.config/claude-multi-account/stop-failure.sh"}]}]
-  }
-}
-```
-
-The script POSTs `{"error_type": "..."}` to `http://localhost:8765/api/hooks/stop-failure`. The FastAPI endpoint handles `rate_limit` and `billing_error` by triggering an immediate switch.
 
 ---
 
