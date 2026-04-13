@@ -140,12 +140,7 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     # If there is no replacement, clear the active pointer so new shells do
     # not export CLAUDE_CONFIG_DIR to a directory that no longer exists.
     if account.email == await asyncio.to_thread(ac.get_active_email):
-        next_result = await db.execute(
-            select(Account)
-            .where((Account.id != account_id) & (Account.enabled == True))
-            .order_by(Account.priority.asc(), Account.id.asc())
-        )
-        next_acc = next_result.scalars().first()
+        next_acc = await sw.get_next_account(account.email, db)
         if next_acc:
             await sw.perform_switch(next_acc, "manual", db, ws_manager)
         else:

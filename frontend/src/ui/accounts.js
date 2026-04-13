@@ -26,8 +26,12 @@ let dragSrc = null;
 export function renderAccounts() {
   if (isDragging || isSavingPriorities) { pendingRenderAfterDrag = true; return; }
   pendingRenderAfterDrag = false;
-  _sliderDebounce.forEach(t => clearTimeout(t));
-  _sliderDebounce.clear();
+  // Only cancel timers for accounts that are leaving the DOM; preserve
+  // in-flight saves for accounts that are still present.
+  const currentIds = new Set(state.accounts.map(a => String(a.id)));
+  for (const [id, t] of [..._sliderDebounce]) {
+    if (!currentIds.has(String(id))) { clearTimeout(t); _sliderDebounce.delete(id); }
+  }
   const grid = qs("#accounts-grid");
   const empty = qs("#accounts-empty");
   const countEl = qs("#accounts-count");
@@ -332,7 +336,12 @@ export function updateUsageLive(updates) {
         const tmp = document.createElement("div");
         tmp.innerHTML = usageBlockHtml(acc);
         const newUsage = tmp.firstElementChild;
-        if (newUsage) usageBlock.replaceWith(newUsage);
+        if (newUsage) {
+          // Preserve the existing element (keeps any parent event delegation intact);
+          // only replace its content and classes.
+          usageBlock.innerHTML = newUsage.innerHTML;
+          usageBlock.className = newUsage.className;
+        }
       }
     }
   }

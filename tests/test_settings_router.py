@@ -1,41 +1,26 @@
 import asyncio
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_settings.db"
 
 @pytest.fixture(scope="module")
-def test_app():
-    from backend.database import Base, get_db
+def client(make_test_app):
     from backend.routers.settings import router
+    from backend.services.settings_service import ensure_defaults
 
+    app, c = make_test_app(router, db_name="settings")
+
+    # Seed default settings rows — required by tests that check defaults exist.
     engine = create_async_engine(TEST_DB_URL, echo=False)
-    TestSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    async def _init():
-        from backend.services.settings_service import ensure_defaults
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.run_sync(Base.metadata.create_all)
-        async with TestSessionLocal() as session:
+    async def _seed():
+        async with SessionLocal() as session:
             await ensure_defaults(session)
 
-    asyncio.run(_init())
-
-    async def override_get_db():
-        async with TestSessionLocal() as session:
-            yield session
-
-    app = FastAPI()
-    app.include_router(router)
-    app.dependency_overrides[get_db] = override_get_db
-    return app
-
-@pytest.fixture(scope="module")
-def client(test_app):
-    return TestClient(test_app)
+    asyncio.run(_seed())
+    return c
 
 def test_get_settings_returns_defaults(client):
     resp = client.get("/api/settings")

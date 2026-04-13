@@ -36,8 +36,6 @@ import os
 import shutil
 import subprocess
 import threading
-import time
-import uuid
 
 
 from ..config import settings
@@ -421,128 +419,16 @@ def activate_account_config(target_config_dir: str) -> None:
     write_active_config_dir(target_config_dir)
 
 
-# ── Login session tracking ─────────────────────────────────────────────────────
-
-# session_id → creation timestamp (time.time())
-_active_login_sessions: dict[str, float] = {}
-
-# Sessions older than this many seconds are considered expired
-_SESSION_TIMEOUT: int = 1800  # 30 minutes
-
-
-def _cleanup_expired_sessions() -> None:
-    """Remove login session dirs for sessions that have exceeded _SESSION_TIMEOUT."""
-    now = time.time()
-    expired = [sid for sid, created_at in list(_active_login_sessions.items())
-               if now - created_at > _SESSION_TIMEOUT]
-    for sid in expired:
-        cleanup_login_session(sid)
-        _active_login_sessions.pop(sid, None)
-        logger.debug("Expired login session cleaned up: %s", sid)
-
-
-# ── Login session ─────────────────────────────────────────────────────────────
-
-def start_login_session() -> dict:
-    """
-    Create a fresh isolated config directory and open a tmux window where the
-    user can run `claude` (with CLAUDE_CONFIG_DIR set) to authenticate.
-
-    Returns session metadata including the tmux pane target.
-    """
-    # Reap any abandoned sessions before creating a new one so the in-memory
-    # registry and the on-disk account dirs do not grow without bound.
-    _cleanup_expired_sessions()
-
-    session_id = str(uuid.uuid4())[:8]
-    config_dir = make_account_config_dir(session_id)
-
-    # Track this session so _cleanup_expired_sessions can reap it if abandoned
-    _active_login_sessions[session_id] = time.time()
-
-    # Ensure at least one tmux server/session is running so new-window works
-    sessions = subprocess.run(
-        ["tmux", "list-sessions", "-F", "#{session_name}"],
-        capture_output=True, text=True,
-    )
-    if sessions.returncode != 0 or not sessions.stdout.strip():
-        subprocess.run(
-            ["tmux", "new-session", "-d", "-s", settings.tmux_session_name],
-            capture_output=True, text=True,
-        )
-
-    result = subprocess.run(
-        [
-            "tmux", "new-window",
-            "-P", "-F", "#{session_name}:#{window_index}.#{pane_index}",
-            "-n", f"add-acct",
-        ],
-        capture_output=True, text=True, check=True,
-    )
-    pane_target = result.stdout.strip()
-
-    # Launch claude with the isolated config dir
-    subprocess.run(
-        ["tmux", "send-keys", "-t", pane_target,
-         f"CLAUDE_CONFIG_DIR={config_dir} claude", "Enter"],
-        check=True, capture_output=True,
-    )
-
-    return {
-        "session_id": session_id,
-        "pane_target": pane_target,
-        "config_dir": config_dir,
-        "instructions": (
-            "Authenticate in the terminal below. "
-            "After login completes, click 'Verify & Save'."
-        ),
-    }
-
-
-def verify_login_session(session_id: str) -> dict:
-    """
-    Verify that a login session completed successfully.
-    Returns {"success": True, "email": "..."} or {"success": False, "error": "..."}.
-    """
-    config_dir = os.path.join(accounts_base(), f"account-{session_id}")
-    real = os.path.realpath(config_dir)
-    base = os.path.realpath(accounts_base())
-    if not real.startswith(base + os.sep):
-        return {"success": False, "error": "Invalid session ID"}
-    if not os.path.isdir(config_dir):
-        return {"success": False, "error": "Session not found"}
-
-    email = get_email_from_config_dir(config_dir)
-    if not email:
-        return {
-            "success": False,
-            "error": "Login not detected yet — .claude.json not found or missing email",
-        }
-
-    token = get_access_token_from_config_dir(config_dir)
-    if not token:
-        return {
-            "success": False,
-            "error": (
-                "Credentials not found in the config directory. "
-                "Make sure CLAUDE_CONFIG_DIR isolation is working."
-            ),
-        }
-
-    # Successful verification — stop tracking this session so the registry
-    # does not keep a pointer to a now-durable account dir.
-    _active_login_sessions.pop(session_id, None)
-    return {"success": True, "email": email, "config_dir": config_dir}
-
-
-def cleanup_login_session(session_id: str) -> None:
-    """Remove a login session's config dir (called on cancel or expiry)."""
-    _active_login_sessions.pop(session_id, None)
-    config_dir = os.path.join(accounts_base(), f"account-{session_id}")
-    real = os.path.realpath(config_dir)
-    base = os.path.realpath(accounts_base())
-    if os.path.isdir(real) and real.startswith(base + os.sep):
-        shutil.rmtree(real, ignore_errors=True)
+# ── Login session lifecycle ────────────────────────────────────────────────────
+# Extracted to login_session_service.py; re-exported here for backward compat.
+from .login_session_service import (  # noqa: F401
+    _active_login_sessions,
+    _SESSION_TIMEOUT,
+    _cleanup_expired_sessions,
+    start_login_session,
+    verify_login_session,
+    cleanup_login_session,
+)
 
 
 # ── Query helpers ──────────────────────────────────────────────────────────────

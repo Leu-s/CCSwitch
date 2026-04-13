@@ -189,10 +189,18 @@ def save_refreshed_token(config_dir: str, access_token: str, expires_at: int | N
                 data["expiresAt"] = expires_at
         else:
             continue
-        tmp_path = path + ".tmp"
-        with open(tmp_path, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp_path, path)
+        tmp_path = f"{path}.{os.getpid()}.tmp"
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+            raise
         break
 
     # Update the macOS Keychain so Claude Code picks up the refreshed token

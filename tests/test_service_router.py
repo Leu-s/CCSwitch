@@ -2,44 +2,17 @@
 import asyncio
 import json
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from unittest.mock import patch, MagicMock, AsyncMock
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_service.db"
-_engine = None  # set by the test_app fixture
 
 
 @pytest.fixture(scope="module")
-def test_app():
-    global _engine
-    from backend.database import Base, get_db
+def client(make_test_app):
     from backend.routers.service import router
-
-    _engine = create_async_engine(TEST_DB_URL, echo=False)
-    TestSessionLocal = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
-
-    async def _init():
-        async with _engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.run_sync(Base.metadata.create_all)
-
-    asyncio.run(_init())
-
-    async def override_get_db():
-        async with TestSessionLocal() as session:
-            yield session
-
-    app = FastAPI()
-    app.include_router(router)
-    app.dependency_overrides[get_db] = override_get_db
-    return app
-
-
-@pytest.fixture(scope="module")
-def client(test_app):
-    return TestClient(test_app)
+    _, c = make_test_app(router, db_name="service")
+    return c
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -53,7 +26,8 @@ def _seed_account(client, email="test@example.com", config_dir="/tmp/test_config
     """
     from backend.models import Account
 
-    SessionLocal = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+    engine = create_async_engine(TEST_DB_URL, echo=False)
+    SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async def _insert():
         async with SessionLocal() as session:
@@ -70,7 +44,8 @@ def _set_setting_direct(key, value):
     """Write a Setting row directly into the test DB."""
     from backend.models import Setting
 
-    SessionLocal = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+    engine = create_async_engine(TEST_DB_URL, echo=False)
+    SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async def _write():
         async with SessionLocal() as session:

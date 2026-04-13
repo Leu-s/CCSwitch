@@ -23,6 +23,7 @@ async def get_next_account(current_email: str, db: AsyncSession) -> Account | No
     result = await db.execute(
         select(Account)
         .where(Account.enabled == True)
+        .where(Account.stale_reason == None)
         .where(Account.email != current_email)
         .order_by(Account.priority.asc(), Account.id.asc())
     )

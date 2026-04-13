@@ -231,10 +231,7 @@ def test_accounts_update(client):
         list_resp = client.get("/api/accounts")
     account_id = list_resp.json()[0]["id"]
 
-    # display_name is accepted by PATCH (AccountUpdate) but is not returned in
-    # AccountOut (removed as unused by the frontend); only enabled is checked.
     resp = client.patch(f"/api/accounts/{account_id}", json={
-        "display_name": "Smoke Test Account",
         "enabled": False,
     })
     assert resp.status_code == 200

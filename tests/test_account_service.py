@@ -1,8 +1,9 @@
 """
-Tests for backend.services.account_service.
+Tests for the login-session lifecycle helpers.
 
-Focuses on the login-session lifecycle helpers:
-  _cleanup_expired_sessions, cleanup_login_session
+The implementation now lives in backend.services.login_session_service;
+account_service re-exports everything for backward compatibility.  Patches
+must target the module where the code actually runs.
 """
 import pytest
 from unittest.mock import patch
@@ -12,7 +13,7 @@ from unittest.mock import patch
 
 def test_cleanup_removes_expired_sessions():
     """Sessions created more than _SESSION_TIMEOUT seconds ago are cleaned up."""
-    import backend.services.account_service as svc
+    import backend.services.login_session_service as svc
 
     session_id = "expired1"
     creation_time = 0.0  # far in the past
@@ -23,9 +24,9 @@ def test_cleanup_removes_expired_sessions():
     # time.time() returns SESSION_TIMEOUT + 1 beyond the creation time → expired
     fake_now = creation_time + svc._SESSION_TIMEOUT + 1
 
-    with patch("backend.services.account_service.time") as mock_time, \
-         patch("backend.services.account_service.shutil.rmtree") as mock_rmtree, \
-         patch("backend.services.account_service.os.path.isdir", return_value=True):
+    with patch("backend.services.login_session_service.time") as mock_time, \
+         patch("backend.services.login_session_service.shutil.rmtree") as mock_rmtree, \
+         patch("backend.services.login_session_service.os.path.isdir", return_value=True):
         mock_time.time.return_value = fake_now
 
         svc._cleanup_expired_sessions()
@@ -41,7 +42,7 @@ def test_cleanup_removes_expired_sessions():
 
 def test_cleanup_keeps_fresh_sessions():
     """Sessions created 0 seconds ago (just now) must not be cleaned up."""
-    import backend.services.account_service as svc
+    import backend.services.login_session_service as svc
 
     session_id = "fresh1"
     creation_time = 1000.0
@@ -51,9 +52,9 @@ def test_cleanup_keeps_fresh_sessions():
     # time.time() is exactly at creation — 0 seconds elapsed → still fresh
     fake_now = creation_time
 
-    with patch("backend.services.account_service.time") as mock_time, \
-         patch("backend.services.account_service.shutil.rmtree") as mock_rmtree, \
-         patch("backend.services.account_service.os.path.isdir", return_value=True):
+    with patch("backend.services.login_session_service.time") as mock_time, \
+         patch("backend.services.login_session_service.shutil.rmtree") as mock_rmtree, \
+         patch("backend.services.login_session_service.os.path.isdir", return_value=True):
         mock_time.time.return_value = fake_now
 
         svc._cleanup_expired_sessions()

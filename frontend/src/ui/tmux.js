@@ -97,6 +97,8 @@ export function renderSessions() {
 }
 
 export async function loadMonitors() {
+  // Don't wipe an in-progress edit row — the user would lose their changes.
+  if (document.querySelector(".monitor-row.editing")) return;
   qs("#monitors-list").innerHTML = `<div class="empty-state" style="margin:10px;color:var(--text-mute)">Loading…</div>`;
   try {
     const data = await api("/api/tmux/monitors");

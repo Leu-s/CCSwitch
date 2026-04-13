@@ -17,7 +17,6 @@ class AccountOut(BaseModel):
 
 
 class AccountUpdate(BaseModel):
-    display_name: Optional[str] = None
     enabled: Optional[bool] = None
     priority: Optional[int] = None
     threshold_pct: Optional[float] = Field(None, ge=0.0, le=100.0)

@@ -1,33 +1,11 @@
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from unittest.mock import patch
 
-TEST_DB_URL = "sqlite+aiosqlite:///./test_tmux.db"
-
 @pytest.fixture(scope="module")
-def test_app():
-    from backend.database import Base, get_db
+def client(make_test_app):
     from backend.routers.tmux import router
-
-    engine = create_async_engine(TEST_DB_URL, echo=False)
-    TestSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    async def override_get_db():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        async with TestSessionLocal() as session:
-            yield session
-
-    app = FastAPI()
-    app.include_router(router)
-    app.dependency_overrides[get_db] = override_get_db
-    return app
-
-@pytest.fixture(scope="module")
-def client(test_app):
-    return TestClient(test_app)
+    _, c = make_test_app(router, db_name="tmux")
+    return c
 
 def test_list_sessions(client):
     panes = [{"target": "main:0.0", "command": "claude"}]

@@ -9,14 +9,14 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-def make_account(id, email, priority, enabled=True, config_dir=None):
+def make_account(id, email, priority, enabled=True, config_dir=None, stale_reason=None):
     a = MagicMock()
     a.id = id
     a.email = email
     a.priority = priority
     a.enabled = enabled
     a.config_dir = config_dir or f"/tmp/fake-account-{id}"
-    a.display_name = None
+    a.stale_reason = stale_reason
     return a
 
 
@@ -40,6 +40,20 @@ async def test_get_next_account_returns_none_when_no_others():
     mock_db = AsyncMock()
     mock_db.execute.return_value = mock_result
     result = await get_next_account("only@x.com", mock_db)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_next_account_skips_stale():
+    """get_next_account must not return an account that has stale_reason set."""
+    from backend.services.switcher import get_next_account
+    # The DB query with the stale_reason == None filter returns nothing
+    # because the only other account is stale.
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.first.return_value = None
+    mock_db = AsyncMock()
+    mock_db.execute.return_value = mock_result
+    result = await get_next_account("current@x.com", mock_db)
     assert result is None
 
 

@@ -9,7 +9,6 @@ class Account(Base):
     __tablename__ = "accounts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    display_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     # Isolated Claude config directory for this account (CLAUDE_CONFIG_DIR)
     config_dir: Mapped[str] = mapped_column(String(512), nullable=False)
     # Per-account rate-limit threshold (0–100 %)

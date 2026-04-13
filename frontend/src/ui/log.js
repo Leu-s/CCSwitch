@@ -92,13 +92,17 @@ export function renderSwitchLog() {
   }).join("");
 }
 
+let _switchLogGen = 0; // incremented on every call; stale responses are discarded
+
 export async function loadSwitchLog(page) {
   if (page !== undefined) state.logPage = page;
+  const gen = ++_switchLogGen;
   try {
     const [countData, data] = await Promise.all([
       api("/api/accounts/log/count"),
       api(`/api/accounts/log?limit=${LOG_PER_PAGE}&offset=${state.logPage * LOG_PER_PAGE}`)
     ]);
+    if (gen !== _switchLogGen) return; // a newer call superseded this one — discard
     state.logTotal = countData.total;
     state.switchLog = data;
     renderSwitchLog();
