@@ -1,10 +1,38 @@
 # Claude Code Multi-Account Manager
 
-A local dashboard for managing multiple Claude.ai subscription accounts, each in its own isolated `CLAUDE_CONFIG_DIR`. The app polls Anthropic's API to track usage per account and automatically switches credentials when the active account approaches its rate-limit threshold — so `claude` picks up a fresh account without any manual intervention.
+**Seamless auto-switching between Claude.ai accounts when you hit rate limits.**
 
-> **macOS only** for the full credential-switching path (Keychain via `security` CLI).
-> On Linux, credentials are switched at the file level only (no Keychain sync).
+![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)
+![Tests](https://img.shields.io/badge/tests-147%20passing-brightgreen)
+![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
+![No build step](https://img.shields.io/badge/frontend-no%20build%20step-orange)
+
+A local dashboard that monitors usage across multiple Claude.ai subscription accounts and automatically switches credentials before you hit the rate-limit ceiling. Each account lives in its own isolated `CLAUDE_CONFIG_DIR`; the switch is transparent — `claude` picks up the new account without any manual intervention.
+
+<!-- To add a screenshot: place it in docs/screenshot.png and uncomment below -->
+<!-- ![Dashboard](docs/screenshot.png) -->
+
+> **macOS only** for the full credential-switching path (Keychain via `security` CLI). Linux falls back to file-only credentials.
 > **tmux required** for the login flow and monitor features.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Quick Start](#quick-start)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Running](#running)
+- [Shell Integration](#shell-integration)
+- [Architecture](#architecture)
+- [Project Structure](#project-structure)
+- [CLI Reference](#cli-reference)
+- [API](#api)
+- [Testing](#testing)
+- [Security](#security)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
