@@ -162,15 +162,6 @@
   .tab-panel.active { display: block; }
   @keyframes fadein { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
 
-  .section-title {
-    font-size: 11px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.08em; color: var(--text-mute);
-    margin: 32px 0 14px;
-    display: flex; align-items: center; gap: 10px;
-  }
-  .section-title:first-child { margin-top: 0; }
-  .section-title::after { content: ""; flex: 1; height: 1px; background: linear-gradient(to right, var(--border), transparent); }
-
   /* ── Accounts toolbar ───────────────────────────────────────────────────── */
   .accounts-toolbar {
     display: flex; align-items: center; justify-content: space-between;
@@ -401,18 +392,6 @@
   .btn.loading::after { content: ""; position: absolute; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* Switch log table */
-  .log-table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; font-size: 13px; }
-  .log-table th, .log-table td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
-  .log-table th { background: var(--card-2); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-mute); }
-  .log-table tr:last-child td { border-bottom: 0; }
-  .log-table td { color: var(--text-dim); }
-  .log-table td.email { color: var(--text); font-weight: 500; }
-  .log-table .reason-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; background: rgba(124,58,237,0.15); color: #c4b5fd; }
-  .log-table .reason-pill.manual { background: rgba(59,130,246,0.15); color: #93c5fd; }
-  .log-table .reason-pill.threshold { background: rgba(245,158,11,0.15); color: #fcd34d; }
-  .log-table .reason-pill.api_error { background: rgba(239,68,68,0.15); color: #fca5a5; }
-
   /* ── Switch Log sidebar ─────────────────────────────────────────────────── */
   .sl-header { padding: 2px 0 14px; }
   .sl-title-row { display: flex; align-items: center; gap: 8px; }
@@ -446,7 +425,6 @@
   .sl-email--none { color: var(--text-mute); }
   .sl-email--to { color: var(--text); font-weight: 600; }
   .sl-route-sep { display: none; }
-  .sl-item-foot { display: flex; }
   .sl-pill {
     display: inline-flex; align-items: center; gap: 4px;
     padding: 2px 7px 2px 5px; border-radius: 999px;
@@ -497,10 +475,6 @@
   .modal-close { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; padding: 6px; border-radius: 6px; transition: background var(--t), color var(--t); }
   .modal-close:hover { background: var(--card-hover); color: var(--text); }
 
-  /* Form groups */
-  .form-group { margin-bottom: 18px; }
-  .form-group > label { display: block; font-size: 12px; font-weight: 600; color: var(--text-dim); margin-bottom: 6px; letter-spacing: 0.02em; }
-  .form-group > small { display: block; font-size: 11px; color: var(--text-mute); margin-top: 5px; line-height: 1.5; }
   .input, .select { padding: 8px 12px; background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-sm); font-size: 13px; transition: border var(--t), background var(--t); outline: none; }
   .input:focus, .select:focus { border-color: var(--accent); background: var(--card-hover); box-shadow: 0 0 0 3px rgba(124,58,237,0.18); }
   .input::placeholder { color: var(--text-mute); }
@@ -739,10 +713,6 @@
   [data-theme="light"] .badge.success { color: #065f46; background: rgba(16,185,129,0.1); }
   [data-theme="light"] .badge.failed { color: #991b1b; background: rgba(239,68,68,0.1); }
   [data-theme="light"] .badge.uncertain { color: #92400e; background: rgba(245,158,11,0.1); }
-  [data-theme="light"] .log-table .reason-pill { color: #6d28d9; background: rgba(124,58,237,0.1); }
-  [data-theme="light"] .log-table .reason-pill.manual { color: #1d4ed8; background: rgba(59,130,246,0.1); }
-  [data-theme="light"] .log-table .reason-pill.threshold { color: #92400e; background: rgba(245,158,11,0.1); }
-  [data-theme="light"] .log-table .reason-pill.api_error { color: #991b1b; background: rgba(239,68,68,0.1); }
   [data-theme="light"] .sl-badge { background: rgba(124,58,237,0.1); color: #6d28d9; }
   [data-theme="light"] .sl-pill { background: rgba(124,58,237,0.08); color: #6d28d9; }
   [data-theme="light"] .sl-pill--manual { background: rgba(59,130,246,0.08); color: #1d4ed8; }

@@ -9,7 +9,7 @@ import { toast } from "../toast.js";
 function reloadAccounts() { document.dispatchEvent(new CustomEvent("app:reload-accounts")); }
 function reloadService()  { document.dispatchEvent(new CustomEvent("app:reload-service")); }
 
-export function updateSliderFill(slider) {
+function updateSliderFill(slider) {
   const min = Number(slider.min) || 0;
   const max = Number(slider.max) || 100;
   const pct = Math.round(((Number(slider.value) - min) / (max - min)) * 100);
@@ -47,7 +47,7 @@ export function renderAccounts() {
   attachCardEvents();
 }
 
-export function usageBlockHtml(acc) {
+function usageBlockHtml(acc) {
   const usage = acc.usage || {};
   const threshold = acc.threshold_pct ?? 95;
   const fiveH = usage.five_hour_pct;
@@ -92,7 +92,7 @@ export function usageBlockHtml(acc) {
   return `<div class="usage-block">${fiveBlock}${sevenBlock}${divider}${errBlock}${usageEmpty}${footer}</div>`;
 }
 
-export function accountCardHtml(acc, index) {
+function accountCardHtml(acc, index) {
   const isActive  = !!acc.is_active;
   const disabled  = !acc.enabled;
   const isStale   = !!acc.stale_reason;
@@ -153,7 +153,7 @@ export function accountCardHtml(acc, index) {
     </article>`;
 }
 
-export function attachCardEvents() {
+function attachCardEvents() {
   qsa(".account-card").forEach(card => attachDragHandlers(card));
 
   qsa(".enabled-toggle").forEach(cb => {

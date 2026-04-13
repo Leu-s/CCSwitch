@@ -165,3 +165,29 @@ class TmuxMonitorOut(BaseModel):
 class TmuxPane(BaseModel):
     target: str
     command: str
+
+
+class CaptureResult(BaseModel):
+    target: str
+    output: str
+
+
+class OkResult(BaseModel):
+    ok: bool
+
+
+# ── Settings (response) ──────────────────────────────────────────────────────
+
+class ShellStatus(BaseModel):
+    active_file_exists: bool
+    shell_configured: bool
+
+
+class SetupShellResult(BaseModel):
+    results: dict[str, str]
+
+
+# ── Switch log (count) ────────────────────────────────────────────────────────
+
+class LogCount(BaseModel):
+    total: int

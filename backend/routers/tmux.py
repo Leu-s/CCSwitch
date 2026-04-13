@@ -7,7 +7,7 @@ from pydantic import BaseModel, field_validator
 
 from ..database import get_db
 from ..models import TmuxMonitor
-from ..schemas import TmuxMonitorCreate, TmuxMonitorOut, TmuxMonitorUpdate, TmuxPane
+from ..schemas import TmuxMonitorCreate, TmuxMonitorOut, TmuxMonitorUpdate, TmuxPane, CaptureResult, OkResult
 from ..services import tmux_service
 
 router = APIRouter(prefix="/api/tmux", tags=["tmux"])
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/tmux", tags=["tmux"])
 async def list_sessions():
     return await tmux_service.list_panes()
 
-@router.get("/capture")
+@router.get("/capture", response_model=CaptureResult)
 async def capture_session(target: str, lines: int = Query(50, ge=1, le=500)):
     if not re.match(r"^[A-Za-z0-9_\-:.]+$", target):
         raise HTTPException(400, f"Invalid tmux target format: {target!r}")
@@ -38,7 +38,7 @@ class SendKeysPayload(BaseModel):
             raise ValueError(f"Invalid tmux target format: {v!r}")
         return v
 
-@router.post("/send")
+@router.post("/send", response_model=OkResult)
 async def send_keys(payload: SendKeysPayload):
     try:
         await tmux_service.send_keys(payload.target, payload.text, payload.press_enter)

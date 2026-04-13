@@ -39,7 +39,7 @@ function getReasonMeta(reason) {
   return REASON_META[reason] || { icon: "", label: reason || "—", cls: "" };
 }
 
-export function renderSwitchLog() {
+function renderSwitchLog() {
   const list = qs("#switch-log-list");
   const empty = qs("#switch-log-empty");
   const pagination = qs("#switch-log-pagination");

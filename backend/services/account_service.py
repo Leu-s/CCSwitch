@@ -43,8 +43,10 @@ from ..config import settings
 from ..models import Account
 from ..schemas import UsageData
 from .credential_provider import (
+    _load_json_safe as _load_json,
     _read_keychain_credentials,
     _write_keychain_credentials,
+    active_dir_pointer_path,
     get_access_token_from_config_dir,
     get_refresh_token_from_config_dir,
     get_token_info,
@@ -100,22 +102,6 @@ def active_config_file() -> str:
     inside active_claude_dir()."""
     return os.path.join(os.path.expanduser("~"), ".claude.json")
 
-
-def active_dir_pointer_path() -> str:
-    """Path of the file that records which isolated account dir is active.
-    Derived from settings.state_dir so users who override CLAUDE_MULTI_STATE_DIR
-    get a single, consistent location everywhere in the codebase."""
-    return os.path.join(os.path.expanduser(settings.state_dir), "active")
-
-
-# ── Reading credentials / email from a config dir ─────────────────────────────
-
-def _load_json(path: str) -> dict:
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return {}
 
 
 # ── Active (system) config helpers ────────────────────────────────────────────

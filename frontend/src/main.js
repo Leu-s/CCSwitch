@@ -7,7 +7,7 @@ import { api } from "./api.js";
 import { loadAccounts, renderAccounts } from "./ui/accounts.js";
 import { loadServiceStatus, updateServiceUI, loadAutoSwitchSetting, initServiceListeners } from "./ui/service.js";
 import { loadSwitchLog, initLogListeners } from "./ui/log.js";
-import { openAddModal, closeAddModal, initLoginListeners } from "./ui/login.js";
+import { closeAddModal, initLoginListeners } from "./ui/login.js";
 import { loadTmuxData, initTmuxListeners, clearCaptureInterval } from "./ui/tmux.js";
 import { clearAddTermInterval } from "./ui/login.js";
 import { connectWs } from "./ws.js";

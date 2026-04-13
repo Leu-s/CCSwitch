@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from ..database import get_db
 from ..models import Setting
-from ..schemas import SettingOut, SettingUpdate
+from ..schemas import SettingOut, SettingUpdate, ShellStatus, SetupShellResult
 from ..services.settings_service import ensure_defaults
 from ..services import account_service as ac
 from ..config import settings as cfg
@@ -32,7 +32,7 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Setting).where(Setting.key.notin_(INTERNAL_KEYS)))
     return result.scalars().all()
 
-@router.get("/shell-status")
+@router.get("/shell-status", response_model=ShellStatus)
 async def shell_status():
     """
     Check whether the shell is configured to use the active-dir pointer and
@@ -57,7 +57,7 @@ async def shell_status():
     return await asyncio.to_thread(_check)
 
 
-@router.post("/setup-shell")
+@router.post("/setup-shell", response_model=SetupShellResult)
 async def setup_shell():
     """
     Append the CLAUDE_CONFIG_DIR one-liner to ~/.zshrc and/or ~/.bashrc

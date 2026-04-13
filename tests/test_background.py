@@ -638,3 +638,121 @@ async def test_auto_switch_disabled_skips_check():
 
     # get_active_email should NOT have been called because auto_switch is disabled
     mock_get_active.assert_not_called()
+
+
+# ── Regression: stale accounts must NOT trigger refresh_access_token ─────────
+
+
+@pytest.mark.asyncio
+async def test_stale_account_skips_token_refresh():
+    """
+    Regression guard for backend/background.py::_process_single_account.
+
+    When an account already has a non-null ``stale_reason``, its refresh token
+    is known to be revoked. Calling ``refresh_access_token`` on it again would
+    just produce a 401 on every poll cycle, flooding logs and wasting API calls.
+    The ``if not account.stale_reason:`` guard around the refresh block prevents
+    this — if that guard is accidentally removed in a future refactor, this
+    test should fail.
+    """
+    import httpx
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
+
+    email = "already-stale@example.com"
+    await cache.invalidate(email)
+
+    account = _make_account(email)
+    account.stale_reason = "Refresh token revoked — re-login required"  # already stale
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_one_account(account)
+    mock_db.commit = AsyncMock()
+
+    # Token info would normally trigger a refresh (expires in 60 s — inside
+    # the 5-minute buffer). We want to prove the guard skips the refresh
+    # anyway because the account is already stale.
+    future_expires = int(time.time() * 1000) + 60_000
+
+    # Probe raises 401 (account stays stale), so the control flow lands in
+    # the exception handler without ever needing a real probe response.
+    probe_resp = MagicMock()
+    probe_resp.status_code = 401
+    probe_resp.json = MagicMock(return_value={"error": {"message": "invalid token"}})
+    probe_401 = httpx.HTTPStatusError("401", request=MagicMock(), response=probe_resp)
+
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_access_token_from_config_dir",
+               return_value="old-access-token"), \
+         patch("backend.background.ac.get_token_info",
+               return_value={"token_expires_at": future_expires}), \
+         patch("backend.background.ac.get_refresh_token_from_config_dir",
+               return_value="old-refresh-token"), \
+         patch("backend.background.ac.save_refreshed_token"), \
+         patch("backend.background.anthropic_api.refresh_access_token",
+               new_callable=AsyncMock) as mock_refresh, \
+         patch("backend.background.anthropic_api.probe_usage",
+               new_callable=AsyncMock, side_effect=probe_401):
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await poll_usage_and_switch(mock_ws)
+
+    # The guard must have skipped the refresh call entirely.
+    mock_refresh.assert_not_called()
+
+    await cache.invalidate(email)
+
+
+@pytest.mark.asyncio
+async def test_non_stale_account_triggers_token_refresh():
+    """
+    Control case for the stale-skip guard: when ``stale_reason is None`` and
+    the token is about to expire, ``refresh_access_token`` MUST be called.
+    This makes the companion ``test_stale_account_skips_token_refresh``
+    meaningful — without this pair, a bug that disables refresh entirely
+    would still pass the negative assertion.
+    """
+    import httpx
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
+
+    email = "healthy@example.com"
+    await cache.invalidate(email)
+
+    account = _make_account(email)
+    account.stale_reason = None  # healthy
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_one_account(account)
+    mock_db.commit = AsyncMock()
+
+    future_expires = int(time.time() * 1000) + 60_000  # expires in 60 s
+
+    # A 401 from the probe keeps the test footprint small — the refresh
+    # path still executes before the probe is attempted.
+    probe_resp = MagicMock()
+    probe_resp.status_code = 401
+    probe_resp.json = MagicMock(return_value={"error": {"message": "invalid token"}})
+    probe_401 = httpx.HTTPStatusError("401", request=MagicMock(), response=probe_resp)
+
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_access_token_from_config_dir",
+               return_value="old-access-token"), \
+         patch("backend.background.ac.get_token_info",
+               return_value={"token_expires_at": future_expires}), \
+         patch("backend.background.ac.get_refresh_token_from_config_dir",
+               return_value="old-refresh-token"), \
+         patch("backend.background.ac.save_refreshed_token"), \
+         patch("backend.background.anthropic_api.refresh_access_token",
+               new_callable=AsyncMock,
+               return_value={"access_token": "new-token", "expires_in": 3600}) as mock_refresh, \
+         patch("backend.background.anthropic_api.probe_usage",
+               new_callable=AsyncMock, side_effect=probe_401):
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await poll_usage_and_switch(mock_ws)
+
+    # The healthy account must have attempted a refresh with its stored token.
+    mock_refresh.assert_called_once_with("old-refresh-token")
+
+    await cache.invalidate(email)

@@ -33,9 +33,13 @@ logger = logging.getLogger(__name__)
 _credential_lock = threading.RLock()
 
 
-def _active_dir_pointer_path() -> str:
-    """Same path as account_service.active_dir_pointer_path(); inlined here
-    to avoid a circular import (account_service imports this module)."""
+def active_dir_pointer_path() -> str:
+    """Path of the file that records which isolated account dir is active.
+    Derived from settings.state_dir so users who override CLAUDE_MULTI_STATE_DIR
+    get a single, consistent location everywhere in the codebase.
+
+    Canonical definition lives here (not in account_service) because
+    account_service imports this module, not the other way around."""
     return os.path.join(os.path.expanduser(settings.state_dir), "active")
 
 
@@ -252,7 +256,7 @@ def _save_refreshed_token_locked(
             # credentials in the shared "Claude Code-credentials" entry.
             active_dir = ""
             try:
-                with open(_active_dir_pointer_path()) as f:
+                with open(active_dir_pointer_path()) as f:
                     active_dir = f.read().strip()
             except Exception:
                 pass

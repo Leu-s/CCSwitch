@@ -6,9 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from ..database import get_db
-from ..models import Account, SwitchLog, Setting
+from ..models import Account, SwitchLog
 from ..schemas import AccountUpdate, AccountOut, AccountWithUsage, SwitchLogOut, UsageData
-from ..schemas import LoginSessionOut, LoginVerifyResult
+from ..schemas import LoginSessionOut, LoginVerifyResult, OkResult, LogCount
 from ..config import settings
 from ..services import account_service as ac
 from ..services import account_queries as aq
@@ -96,7 +96,7 @@ async def cancel_login(session_id: str):
 
 # ── Switch log ─────────────────────────────────────────────────────────────────
 
-@router.get("/log/count")
+@router.get("/log/count", response_model=LogCount)
 async def switch_log_count(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(func.count()).select_from(SwitchLog))
     return {"total": result.scalar()}
@@ -165,16 +165,8 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
                     logger.warning("Failed to broadcast service_disabled after last-account delete")
 
     # Clear the default_account_id setting if this was the default
-    setting_result = await db.execute(
-        select(Setting).where(Setting.key == "default_account_id")
-    )
-    default_setting = setting_result.scalars().first()
-    try:
-        stored_id = int(default_setting.value) if default_setting else None
-    except (ValueError, TypeError):
-        stored_id = None
-    if default_setting and stored_id == account_id:
-        default_setting.value = ""
+    if await ss.get_int_or_none("default_account_id", db) == account_id:
+        await ss.set_setting("default_account_id", "", db)
 
     await db.delete(account)
     await db.commit()

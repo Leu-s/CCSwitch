@@ -7,7 +7,7 @@ import { toast } from "../toast.js";
 let terminalTarget = null;
 let captureInterval = null;
 
-export function openTerminal(target) {
+function openTerminal(target) {
   terminalTarget = target;
   qs("#terminal-target").textContent = target;
   const session = target.split(":")[0];
@@ -23,7 +23,7 @@ export function openTerminal(target) {
   captureInterval = setInterval(refreshCapture, TERMINAL_REFRESH_MS);
 }
 
-export function closeTerminal() {
+function closeTerminal() {
   terminalTarget = null;
   if (captureInterval) { clearInterval(captureInterval); captureInterval = null; }
   qs("#terminal-panel").classList.remove("visible");
@@ -67,7 +67,7 @@ function updatePatternTypeHint() {
 
 export async function loadTmuxData() { await Promise.all([loadSessions(), loadMonitors()]); }
 
-export async function loadSessions() {
+async function loadSessions() {
   qs("#sessions-count").textContent = "…";
   qs("#sessions-list").innerHTML = `<div class="empty-state" style="margin:10px;color:var(--text-mute)">Loading…</div>`;
   try {
@@ -81,7 +81,7 @@ export async function loadSessions() {
   }
 }
 
-export function renderSessions() {
+function renderSessions() {
   const list = qs("#sessions-list");
   qs("#sessions-count").textContent = state.sessions.length;
   if (!state.sessions.length) { list.innerHTML = `<div class="empty-state" style="margin:10px;">No tmux sessions discovered.</div>`; return; }
@@ -95,7 +95,7 @@ export function renderSessions() {
     </div>`).join("");
 }
 
-export async function loadMonitors() {
+async function loadMonitors() {
   // Don't wipe an in-progress edit row — the user would lose their changes.
   if (document.querySelector(".monitor-row.editing")) return;
   qs("#monitors-list").innerHTML = `<div class="empty-state" style="margin:10px;color:var(--text-mute)">Loading…</div>`;
@@ -109,7 +109,7 @@ export async function loadMonitors() {
   }
 }
 
-export function renderMonitors() {
+function renderMonitors() {
   const list = qs("#monitors-list");
   qs("#monitors-count").textContent = state.monitors.length;
   if (!state.monitors.length) { list.innerHTML = `<div class="empty-state" style="margin:10px;">No monitors configured.</div>`; return; }
