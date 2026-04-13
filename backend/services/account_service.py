@@ -9,6 +9,7 @@ an empty (fresh) directory it will run a new OAuth flow, storing all credentials
 and config in that directory without touching ~/.claude/.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -58,34 +59,78 @@ def _load_json_safe(path: str) -> dict:
         return {}
 
 
+def _keychain_service_name(config_dir: str) -> str:
+    """Claude Code uses sha256(config_dir)[:8] as the Keychain service suffix."""
+    h = hashlib.sha256(config_dir.encode()).hexdigest()[:8]
+    return f"Claude Code-credentials-{h}"
+
+
+def _read_keychain_credentials(config_dir: str) -> dict:
+    """
+    On macOS, Claude Code stores OAuth tokens in the Keychain under a service
+    name derived from sha256(CLAUDE_CONFIG_DIR)[:8].  Returns the parsed JSON
+    or {} on any failure.
+    """
+    service = _keychain_service_name(config_dir)
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return json.loads(result.stdout.strip())
+    except Exception as e:
+        logger.debug("Keychain lookup failed for %s: %s", service, e)
+    return {}
+
+
 def get_access_token_from_config_dir(config_dir: str) -> str | None:
     """
     Try several locations Claude Code may use to persist the OAuth access token
     when CLAUDE_CONFIG_DIR is set to a custom path.
+
+    On macOS (native build) Claude Code stores tokens in the Keychain.
+    On other platforms it writes credential files to the config directory.
     """
+    # 1. macOS Keychain (primary location for native Claude Code)
+    kc = _read_keychain_credentials(config_dir)
+    if kc:
+        token = kc.get("claudeAiOauth", {}).get("accessToken")
+        if token:
+            return token
+        if kc.get("accessToken"):
+            return kc["accessToken"]
+
+    # 2. Fall back to credential files (Linux / older versions)
     candidates = [
-        # Claude Code ≥ 1.x stores a local credentials file
         os.path.join(config_dir, ".credentials.json"),
         os.path.join(config_dir, "credentials.json"),
-        # Older versions may embed it inside .claude.json
         os.path.join(config_dir, ".claude.json"),
     ]
     for path in candidates:
         if not os.path.exists(path):
             continue
         data = _load_json_safe(path)
-        # Top-level format: {"claudeAiOauth": {"accessToken": ...}}
         if "claudeAiOauth" in data:
             token = data["claudeAiOauth"].get("accessToken")
             if token:
                 return token
-        # Flat format: {"accessToken": ...}
         if "accessToken" in data:
             return data["accessToken"]
     return None
 
 
 def get_refresh_token_from_config_dir(config_dir: str) -> str | None:
+    # 1. macOS Keychain
+    kc = _read_keychain_credentials(config_dir)
+    if kc:
+        token = kc.get("claudeAiOauth", {}).get("refreshToken")
+        if token:
+            return token
+        if kc.get("refreshToken"):
+            return kc["refreshToken"]
+
+    # 2. Credential files
     candidates = [
         os.path.join(config_dir, ".credentials.json"),
         os.path.join(config_dir, "credentials.json"),
