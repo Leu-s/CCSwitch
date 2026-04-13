@@ -14,23 +14,24 @@
     --card: #1a1a2e;
     --card-2: #20203a;
     --card-hover: #23233f;
-    --border: rgba(255, 255, 255, 0.08);
-    --border-strong: rgba(255, 255, 255, 0.15);
+    --card-border: rgba(255,255,255,0.08);
+    --border: rgba(255,255,255,0.08);
+    --border-strong: rgba(255,255,255,0.15);
     --text: #e2e8f0;
     --text-dim: #94a3b8;
     --text-mute: #64748b;
     --accent: #7c3aed;
     --accent-2: #a855f7;
-    --accent-glow: rgba(124, 58, 237, 0.45);
+    --accent-glow: rgba(124,58,237,0.45);
     --success: #10b981;
     --warning: #f59e0b;
     --danger: #ef4444;
     --info: #3b82f6;
     --radius: 12px;
     --radius-sm: 8px;
-    --shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-    --shadow-lg: 0 20px 50px rgba(0, 0, 0, 0.6);
-    --t: 180ms cubic-bezier(0.4, 0, 0.2, 1);
+    --shadow: 0 10px 30px rgba(0,0,0,0.4);
+    --shadow-lg: 0 20px 50px rgba(0,0,0,0.6);
+    --t: 180ms cubic-bezier(0.4,0,0.2,1);
   }
 
   * { box-sizing: border-box; }
@@ -44,8 +45,8 @@
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     background-image:
-      radial-gradient(circle at 15% -10%, rgba(124, 58, 237, 0.12), transparent 40%),
-      radial-gradient(circle at 85% 110%, rgba(168, 85, 247, 0.08), transparent 40%);
+      radial-gradient(circle at 15% -10%, rgba(124,58,237,0.12), transparent 40%),
+      radial-gradient(circle at 85% 110%, rgba(168,85,247,0.08), transparent 40%);
     background-attachment: fixed;
   }
 
@@ -56,871 +57,398 @@
 
   button, input, select, textarea { font-family: inherit; color: inherit; }
 
-  /* Header */
+  /* ── Header ─────────────────────────────────────────────────────────────── */
   .header {
-    position: sticky;
-    top: 0;
-    z-index: 100;
-    background: rgba(10, 10, 15, 0.85);
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(10,10,15,0.85);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
     border-bottom: 1px solid var(--border);
     padding: 14px 28px;
   }
-
   .header-inner {
-    max-width: 1400px;
-    margin: 0 auto;
-    display: flex;
-    align-items: center;
-    gap: 20px;
-    flex-wrap: wrap;
+    max-width: 1400px; margin: 0 auto;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
   }
-
   .title {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 18px;
-    font-weight: 700;
-    letter-spacing: -0.01em;
+    display: flex; align-items: center; gap: 10px;
+    font-size: 18px; font-weight: 700; letter-spacing: -0.01em;
   }
-  .title .bolt {
-    width: 22px; height: 22px;
-    color: var(--accent-2);
-    filter: drop-shadow(0 0 8px var(--accent-glow));
-  }
-
+  .title .bolt { width: 22px; height: 22px; color: var(--accent-2); filter: drop-shadow(0 0 8px var(--accent-glow)); }
   .spacer { flex: 1; }
 
-  .active-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
+  /* Service status button */
+  .service-btn {
+    display: inline-flex; align-items: center; gap: 8px;
     padding: 6px 14px;
-    background: rgba(16, 185, 129, 0.12);
-    border: 1px solid rgba(16, 185, 129, 0.35);
-    color: #34d399;
     border-radius: 999px;
-    font-size: 12px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    transition: background var(--t);
+    font-size: 12px; font-weight: 700;
+    border: 1px solid;
+    cursor: pointer;
+    transition: all var(--t);
   }
-  .active-badge::before {
-    content: "";
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: #34d399;
-    box-shadow: 0 0 8px #34d399;
+  .service-btn[data-on="false"] {
+    background: rgba(239,68,68,0.1);
+    border-color: rgba(239,68,68,0.3);
+    color: #fca5a5;
+  }
+  .service-btn[data-on="false"]:hover { background: rgba(239,68,68,0.2); }
+  .service-btn[data-on="true"] {
+    background: rgba(16,185,129,0.12);
+    border-color: rgba(16,185,129,0.35);
+    color: #34d399;
+  }
+  .service-btn[data-on="true"]:hover { background: rgba(16,185,129,0.22); }
+  .service-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    transition: background var(--t), box-shadow var(--t);
+  }
+  .service-btn[data-on="false"] .service-dot { background: #ef4444; }
+  .service-btn[data-on="true"] .service-dot {
+    background: #10b981;
+    box-shadow: 0 0 6px #10b981;
     animation: pulse 2s ease-in-out infinite;
   }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.6; transform: scale(0.85); }
-  }
+  @keyframes pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:0.6; transform:scale(0.85); } }
 
   /* Toggle switch */
   .toggle {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    cursor: pointer;
-    user-select: none;
-    font-size: 13px;
-    color: var(--text-dim);
+    position: relative; display: inline-flex; align-items: center;
+    gap: 8px; cursor: pointer; user-select: none;
+    font-size: 13px; color: var(--text-dim);
   }
   .toggle input { appearance: none; position: absolute; opacity: 0; pointer-events: none; }
   .toggle .track {
-    position: relative;
-    width: 36px; height: 20px;
-    background: #2a2a45;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    transition: background var(--t), border var(--t);
+    position: relative; width: 36px; height: 20px;
+    background: #2a2a45; border: 1px solid var(--border);
+    border-radius: 999px; transition: background var(--t), border var(--t);
   }
   .toggle .track::after {
-    content: "";
-    position: absolute;
-    top: 2px; left: 2px;
-    width: 14px; height: 14px;
-    background: #fff;
-    border-radius: 50%;
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px; background: #fff; border-radius: 50%;
     transition: transform var(--t);
   }
-  .toggle input:checked + .track {
-    background: var(--accent);
-    border-color: var(--accent);
-    box-shadow: 0 0 12px var(--accent-glow);
-  }
+  .toggle input:checked + .track { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 12px var(--accent-glow); }
   .toggle input:checked + .track::after { transform: translateX(16px); }
 
-  /* Slider */
-  .slider-group {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 13px;
-    color: var(--text-dim);
-  }
-  .slider-group label { font-weight: 500; }
-  .slider-group input[type="range"] {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 140px;
-    height: 4px;
-    background: #2a2a45;
-    border-radius: 999px;
-    outline: none;
-  }
-  .slider-group input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 16px; height: 16px;
-    background: var(--accent);
-    border-radius: 50%;
-    cursor: pointer;
-    box-shadow: 0 0 10px var(--accent-glow);
-    transition: transform var(--t);
-  }
-  .slider-group input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); }
-  .slider-group input[type="range"]::-moz-range-thumb {
-    width: 16px; height: 16px;
-    background: var(--accent);
-    border-radius: 50%;
-    border: 0;
-    cursor: pointer;
-  }
-  .slider-value {
-    min-width: 40px;
-    font-variant-numeric: tabular-nums;
-    color: var(--text);
-    font-weight: 600;
-  }
-
   /* Tabs */
-  .tabs {
-    display: flex;
-    gap: 4px;
-    padding: 4px;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-  }
+  .tabs { display: flex; gap: 4px; padding: 4px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
   .tab-btn {
-    padding: 8px 16px;
-    background: transparent;
-    border: 0;
-    color: var(--text-dim);
-    font-size: 13px;
-    font-weight: 600;
-    border-radius: 7px;
-    cursor: pointer;
+    padding: 8px 16px; background: transparent; border: 0;
+    color: var(--text-dim); font-size: 13px; font-weight: 600;
+    border-radius: 7px; cursor: pointer;
     transition: background var(--t), color var(--t);
   }
-  .tab-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.04); }
-  .tab-btn.active {
-    background: var(--accent);
-    color: #fff;
-    box-shadow: 0 2px 10px var(--accent-glow);
-  }
+  .tab-btn:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+  .tab-btn.active { background: var(--accent); color: #fff; box-shadow: 0 2px 10px var(--accent-glow); }
 
-  /* Main layout */
-  .container {
-    max-width: 1400px;
-    margin: 0 auto;
-    padding: 28px;
+  .ws-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--success); box-shadow: 0 0 6px var(--success); display: inline-block;
   }
+  .ws-dot.disconnected { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
 
+  /* ── Layout ─────────────────────────────────────────────────────────────── */
+  .container { max-width: 1400px; margin: 0 auto; padding: 28px; }
   .tab-panel { display: none; animation: fadein 0.3s ease; }
   .tab-panel.active { display: block; }
-  @keyframes fadein {
-    from { opacity: 0; transform: translateY(4px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
+  @keyframes fadein { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
 
-  /* Section heading */
   .section-title {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-mute);
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--text-mute);
     margin: 32px 0 14px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
+    display: flex; align-items: center; gap: 10px;
   }
   .section-title:first-child { margin-top: 0; }
-  .section-title::after {
-    content: "";
-    flex: 1;
-    height: 1px;
-    background: linear-gradient(to right, var(--border), transparent);
-  }
+  .section-title::after { content: ""; flex: 1; height: 1px; background: linear-gradient(to right, var(--border), transparent); }
 
-  /* Account grid */
-  .accounts-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-    gap: 18px;
+  /* ── Service banner ─────────────────────────────────────────────────────── */
+  .service-banner {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 20px; border-radius: var(--radius);
+    margin-bottom: 24px; border: 1px solid;
+    flex-wrap: wrap;
   }
+  .service-banner.off {
+    background: rgba(239,68,68,0.06);
+    border-color: rgba(239,68,68,0.2);
+  }
+  .service-banner.on {
+    background: rgba(16,185,129,0.06);
+    border-color: rgba(16,185,129,0.2);
+  }
+  .service-banner-info { flex: 1; min-width: 0; }
+  .service-banner-title { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+  .service-banner.off .service-banner-title { color: #fca5a5; }
+  .service-banner.on .service-banner-title { color: #34d399; }
+  .service-banner-sub { font-size: 12px; color: var(--text-dim); }
+
+  /* ── Account cards ──────────────────────────────────────────────────────── */
+  .accounts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 18px; }
 
   .account-card {
-    position: relative;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 18px;
+    position: relative; background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px;
     transition: transform var(--t), border-color var(--t), box-shadow var(--t), background var(--t);
     cursor: grab;
   }
   .account-card:active { cursor: grabbing; }
-  .account-card:hover {
-    transform: translateY(-2px);
-    border-color: var(--border-strong);
-    background: var(--card-hover);
-    box-shadow: var(--shadow);
-  }
+  .account-card:hover { transform: translateY(-2px); border-color: var(--border-strong); background: var(--card-hover); box-shadow: var(--shadow); }
   .account-card.dragging { opacity: 0.45; transform: rotate(1.5deg); }
-  .account-card.drop-above {
-    box-shadow: 0 -4px 0 0 var(--accent);
-  }
-  .account-card.drop-below {
-    box-shadow: 0 4px 0 0 var(--accent);
-  }
-
+  .account-card.drop-above { box-shadow: 0 -4px 0 0 var(--accent); }
+  .account-card.drop-below { box-shadow: 0 4px 0 0 var(--accent); }
   .account-card.active {
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent), 0 0 26px var(--accent-glow);
-    background: linear-gradient(155deg, var(--card) 0%, rgba(124, 58, 237, 0.08) 100%);
+    background: linear-gradient(155deg, var(--card) 0%, rgba(124,58,237,0.08) 100%);
   }
   .account-card.active::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: var(--radius);
+    content: ""; position: absolute; inset: 0; border-radius: var(--radius);
     padding: 1px;
     background: linear-gradient(135deg, var(--accent), transparent 60%);
-    -webkit-mask: linear-gradient(#000, #000) content-box, linear-gradient(#000, #000);
-    -webkit-mask-composite: xor;
-    mask-composite: exclude;
-    pointer-events: none;
+    -webkit-mask: linear-gradient(#000,#000) content-box, linear-gradient(#000,#000);
+    -webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none;
   }
   .account-card.disabled { opacity: 0.55; }
 
-  .card-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 10px;
-    margin-bottom: 10px;
-  }
-  .card-head-left {
-    min-width: 0;
-    flex: 1;
-  }
-  .email {
-    font-weight: 700;
-    font-size: 15px;
-    letter-spacing: -0.01em;
-    color: var(--text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+  .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+  .card-head-left { min-width: 0; flex: 1; }
+  .email { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .display-name {
-    display: inline-block;
-    margin-top: 3px;
-    font-size: 12px;
-    color: var(--text-dim);
-    padding: 2px 6px;
-    border-radius: 4px;
-    min-width: 60px;
-    border: 1px dashed transparent;
-    cursor: text;
-    transition: background var(--t), border var(--t);
-    outline: none;
+    display: inline-block; margin-top: 3px; font-size: 12px; color: var(--text-dim);
+    padding: 2px 6px; border-radius: 4px; min-width: 60px;
+    border: 1px dashed transparent; cursor: text;
+    transition: background var(--t), border var(--t); outline: none;
   }
-  .display-name:hover,
-  .display-name:focus {
-    background: rgba(255, 255, 255, 0.04);
-    border-color: var(--border);
-  }
-  .display-name:empty::before {
-    content: "Add name...";
-    color: var(--text-mute);
-  }
+  .display-name:hover, .display-name:focus { background: rgba(255,255,255,0.04); border-color: var(--border); }
+  .display-name:empty::before { content: "Add name…"; color: var(--text-mute); }
 
-  .card-head-right {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-  }
+  .card-head-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
   .active-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 9px;
-    background: rgba(124, 58, 237, 0.2);
-    border: 1px solid rgba(124, 58, 237, 0.5);
-    color: #c4b5fd;
-    border-radius: 999px;
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 0.08em;
+    display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px;
+    background: rgba(124,58,237,0.2); border: 1px solid rgba(124,58,237,0.5);
+    color: #c4b5fd; border-radius: 999px; font-size: 10px; font-weight: 800; letter-spacing: 0.08em;
   }
-  .active-pill::before {
-    content: "";
-    width: 6px; height: 6px;
-    background: var(--accent-2);
-    border-radius: 50%;
-    box-shadow: 0 0 6px var(--accent-2);
+  .active-pill::before { content: ""; width: 6px; height: 6px; background: var(--accent-2); border-radius: 50%; box-shadow: 0 0 6px var(--accent-2); }
+
+  .default-pill {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px;
+    background: rgba(245,158,11,0.15); border: 1px solid rgba(245,158,11,0.3);
+    color: #fcd34d; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
   }
 
+  /* Usage */
   .usage-block { margin-top: 12px; }
-  .usage-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 11px;
-    color: var(--text-dim);
-    margin-bottom: 4px;
-    font-variant-numeric: tabular-nums;
-  }
+  .usage-row { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
   .usage-row .label { font-weight: 600; color: var(--text-mute); letter-spacing: 0.04em; }
   .usage-row .value { color: var(--text); font-weight: 600; }
-
-  .usage-bar {
-    height: 6px;
-    background: rgba(255, 255, 255, 0.06);
-    border-radius: 999px;
-    overflow: hidden;
-    margin-bottom: 10px;
-  }
-  .usage-fill {
-    height: 100%;
-    border-radius: 999px;
-    transition: width 0.5s ease, background 0.3s ease;
-    background: var(--success);
-  }
+  .usage-bar { height: 6px; background: rgba(255,255,255,0.06); border-radius: 999px; overflow: hidden; margin-bottom: 10px; }
+  .usage-fill { height: 100%; border-radius: 999px; transition: width 0.5s ease, background 0.3s ease; background: var(--success); }
   .usage-fill.warn { background: var(--warning); }
   .usage-fill.crit { background: var(--danger); }
+  .usage-error { color: var(--warning); font-size: 12px; padding: 8px; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.2); border-radius: var(--radius-sm); margin-top: 8px; }
 
-  .usage-error {
-    color: var(--warning);
-    font-size: 12px;
-    padding: 8px;
-    background: rgba(245, 158, 11, 0.08);
-    border: 1px solid rgba(245, 158, 11, 0.2);
-    border-radius: var(--radius-sm);
-    margin-top: 8px;
-  }
-
-  .card-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 14px;
-    padding-top: 14px;
+  /* Threshold row */
+  .threshold-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-top: 12px; padding-top: 12px;
     border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-dim);
   }
+  .threshold-row .label { font-weight: 600; color: var(--text-mute); letter-spacing: 0.04em; flex-shrink: 0; }
+  .threshold-slider {
+    -webkit-appearance: none; appearance: none;
+    flex: 1; height: 4px; background: #2a2a45; border-radius: 999px; outline: none;
+  }
+  .threshold-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px;
+    background: var(--accent); border-radius: 50%; cursor: pointer;
+    box-shadow: 0 0 8px var(--accent-glow); transition: transform var(--t);
+  }
+  .threshold-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
+  .threshold-value { font-weight: 700; color: var(--text); min-width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* Card actions */
+  .card-actions { display: flex; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 
   /* Buttons */
   .btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 8px 14px;
-    font-size: 13px;
-    font-weight: 600;
-    border: 1px solid var(--border);
-    background: var(--card-2);
-    color: var(--text);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 8px 14px; font-size: 13px; font-weight: 600;
+    border: 1px solid var(--border); background: var(--card-2); color: var(--text);
+    border-radius: var(--radius-sm); cursor: pointer;
     transition: background var(--t), border var(--t), transform var(--t), opacity var(--t);
     white-space: nowrap;
   }
-  .btn:hover:not(:disabled) {
-    background: var(--card-hover);
-    border-color: var(--border-strong);
-    transform: translateY(-1px);
-  }
+  .btn:hover:not(:disabled) { background: var(--card-hover); border-color: var(--border-strong); transform: translateY(-1px); }
   .btn:active:not(:disabled) { transform: translateY(0); }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-    flex: 1;
-    box-shadow: 0 2px 10px var(--accent-glow);
-  }
-  .btn.primary:hover:not(:disabled) {
-    background: var(--accent-2);
-    border-color: var(--accent-2);
-  }
-  .btn.primary.outlined {
-    background: transparent;
-    color: var(--accent-2);
-    box-shadow: none;
-  }
-  .btn.primary.outlined:hover:not(:disabled) {
-    background: rgba(124, 58, 237, 0.08);
-  }
-  .btn.icon {
-    padding: 8px;
-    width: 34px;
-    height: 34px;
-  }
-  .btn.danger {
-    color: var(--danger);
-    border-color: rgba(239, 68, 68, 0.25);
-  }
-  .btn.danger:hover:not(:disabled) {
-    background: rgba(239, 68, 68, 0.12);
-    border-color: var(--danger);
-  }
-  .btn.loading {
-    position: relative;
-    pointer-events: none;
-    color: transparent;
-  }
-  .btn.loading::after {
-    content: "";
-    position: absolute;
-    width: 14px; height: 14px;
-    border: 2px solid rgba(255, 255, 255, 0.3);
-    border-top-color: #fff;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-  }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; flex: 1; box-shadow: 0 2px 10px var(--accent-glow); }
+  .btn.primary:hover:not(:disabled) { background: var(--accent-2); border-color: var(--accent-2); }
+  .btn.primary.outlined { background: transparent; color: var(--accent-2); box-shadow: none; }
+  .btn.primary.outlined:hover:not(:disabled) { background: rgba(124,58,237,0.08); }
+  .btn.icon { padding: 8px; width: 34px; height: 34px; }
+  .btn.danger { color: var(--danger); border-color: rgba(239,68,68,0.25); }
+  .btn.danger:hover:not(:disabled) { background: rgba(239,68,68,0.12); border-color: var(--danger); }
+  .btn.star { color: var(--warning); border-color: rgba(245,158,11,0.25); }
+  .btn.star:hover:not(:disabled) { background: rgba(245,158,11,0.1); border-color: var(--warning); }
+  .btn.star.active { background: rgba(245,158,11,0.15); border-color: var(--warning); }
+  .btn.loading { position: relative; pointer-events: none; color: transparent; }
+  .btn.loading::after { content: ""; position: absolute; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* Footer actions + log */
-  .footer-actions {
-    display: flex;
-    gap: 10px;
-    margin: 24px 0 16px;
-    flex-wrap: wrap;
-  }
+  /* Footer actions */
+  .footer-actions { display: flex; gap: 10px; margin: 24px 0 16px; flex-wrap: wrap; }
 
-  .log-table {
-    width: 100%;
-    border-collapse: collapse;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-    font-size: 13px;
-  }
-  .log-table th,
-  .log-table td {
-    padding: 10px 14px;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-  }
-  .log-table th {
-    background: var(--card-2);
-    font-weight: 600;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-mute);
-  }
+  /* Switch log table */
+  .log-table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; font-size: 13px; }
+  .log-table th, .log-table td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+  .log-table th { background: var(--card-2); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-mute); }
   .log-table tr:last-child td { border-bottom: 0; }
   .log-table td { color: var(--text-dim); }
   .log-table td.email { color: var(--text); font-weight: 500; }
-  .log-table .reason-pill {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 999px;
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    background: rgba(124, 58, 237, 0.15);
-    color: #c4b5fd;
-  }
-  .log-table .reason-pill.manual { background: rgba(59, 130, 246, 0.15); color: #93c5fd; }
-  .log-table .reason-pill.threshold { background: rgba(245, 158, 11, 0.15); color: #fcd34d; }
-  .log-table .reason-pill.api_error { background: rgba(239, 68, 68, 0.15); color: #fca5a5; }
+  .log-table .reason-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; background: rgba(124,58,237,0.15); color: #c4b5fd; }
+  .log-table .reason-pill.manual { background: rgba(59,130,246,0.15); color: #93c5fd; }
+  .log-table .reason-pill.threshold { background: rgba(245,158,11,0.15); color: #fcd34d; }
+  .log-table .reason-pill.api_error { background: rgba(239,68,68,0.15); color: #fca5a5; }
 
-  .empty-state {
-    padding: 40px 20px;
-    text-align: center;
-    color: var(--text-mute);
-    font-size: 13px;
-    background: var(--card);
-    border: 1px dashed var(--border-strong);
-    border-radius: var(--radius);
-  }
+  .empty-state { padding: 40px 20px; text-align: center; color: var(--text-mute); font-size: 13px; background: var(--card); border: 1px dashed var(--border-strong); border-radius: var(--radius); }
 
-  /* Modal */
+  /* ── Modal ──────────────────────────────────────────────────────────────── */
   .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-    padding: 20px;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity var(--t);
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000; padding: 20px;
+    opacity: 0; pointer-events: none; transition: opacity var(--t);
   }
-  .modal-backdrop.open {
-    opacity: 1;
-    pointer-events: auto;
-  }
+  .modal-backdrop.open { opacity: 1; pointer-events: auto; }
   .modal {
-    background: var(--card);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-lg);
-    max-width: 680px;
-    width: 100%;
-    max-height: 80vh;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    transform: scale(0.95);
-    transition: transform var(--t);
+    background: var(--card); border: 1px solid var(--border-strong);
+    border-radius: var(--radius); box-shadow: var(--shadow-lg);
+    max-width: 780px; width: 100%; max-height: 88vh;
+    overflow: hidden; display: flex; flex-direction: column;
+    transform: scale(0.95); transition: transform var(--t);
   }
   .modal-backdrop.open .modal { transform: scale(1); }
-  .modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 18px 22px;
-    border-bottom: 1px solid var(--border);
-  }
-  .modal-title {
-    font-size: 16px;
-    font-weight: 700;
-  }
-  .modal-body {
-    padding: 20px 22px;
-    overflow: auto;
-    flex: 1;
-  }
-  .modal-close {
-    background: transparent;
-    border: 0;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 6px;
-    border-radius: 6px;
-    transition: background var(--t), color var(--t);
-  }
+  .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px; border-bottom: 1px solid var(--border); }
+  .modal-title { font-size: 16px; font-weight: 700; }
+  .modal-body { padding: 20px 22px; overflow: auto; flex: 1; }
+  .modal-close { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; padding: 6px; border-radius: 6px; transition: background var(--t), color var(--t); }
   .modal-close:hover { background: var(--card-hover); color: var(--text); }
 
-  /* tmux tab */
-  .tmux-grid {
-    display: grid;
-    grid-template-columns: 1fr 1.4fr;
-    gap: 20px;
-  }
-  @media (max-width: 900px) {
-    .tmux-grid { grid-template-columns: 1fr; }
-  }
-
-  .panel {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-  .panel-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--border);
-    background: var(--card-2);
-  }
-  .panel-header h3 {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-  }
-  .panel-header .count {
-    font-size: 11px;
-    color: var(--text-mute);
-    padding: 2px 8px;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 999px;
-  }
-  .panel-body { padding: 10px; max-height: 500px; overflow: auto; }
-
-  .pane-item {
-    padding: 10px 12px;
-    background: var(--card-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    margin-bottom: 8px;
-    transition: border var(--t), transform var(--t);
-  }
-  .pane-item:hover {
-    border-color: var(--border-strong);
-    transform: translateX(2px);
-  }
-  .pane-target {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--accent-2);
-    margin-bottom: 3px;
-  }
-  .pane-cmd {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 11px;
-    color: var(--text-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .monitor-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
-    background: var(--card-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    margin-bottom: 8px;
-    transition: border var(--t);
-  }
-  .monitor-row:hover { border-color: var(--border-strong); }
-  .monitor-info {
-    flex: 1;
-    min-width: 0;
-  }
-  .monitor-name {
-    font-weight: 600;
-    font-size: 13px;
-    margin-bottom: 2px;
-  }
-  .monitor-pattern {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 11px;
-    color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 999px;
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .badge.manual { background: rgba(59, 130, 246, 0.15); color: #93c5fd; }
-  .badge.regex { background: rgba(168, 85, 247, 0.15); color: #c4b5fd; }
-  .badge.success { background: rgba(16, 185, 129, 0.15); color: #34d399; }
-  .badge.failed { background: rgba(239, 68, 68, 0.15); color: #fca5a5; }
-  .badge.uncertain { background: rgba(245, 158, 11, 0.15); color: #fcd34d; }
-
-  .add-monitor-form {
-    display: grid;
-    grid-template-columns: 1fr 110px 1fr auto;
-    gap: 8px;
-    padding: 14px;
-    background: var(--card-2);
-    border-top: 1px solid var(--border);
-  }
-  @media (max-width: 700px) {
-    .add-monitor-form { grid-template-columns: 1fr; }
-  }
-  .input, .select {
-    padding: 8px 12px;
-    background: var(--card);
-    border: 1px solid var(--border);
-    color: var(--text);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    transition: border var(--t), background var(--t);
-    outline: none;
-  }
-  .input:focus, .select:focus {
-    border-color: var(--accent);
-    background: var(--card-hover);
-    box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.18);
-  }
+  /* Form groups */
+  .form-group { margin-bottom: 18px; }
+  .form-group > label { display: block; font-size: 12px; font-weight: 600; color: var(--text-dim); margin-bottom: 6px; letter-spacing: 0.02em; }
+  .form-group > small { display: block; font-size: 11px; color: var(--text-mute); margin-top: 5px; line-height: 1.5; }
+  .input, .select { padding: 8px 12px; background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-sm); font-size: 13px; transition: border var(--t), background var(--t); outline: none; }
+  .input:focus, .select:focus { border-color: var(--accent); background: var(--card-hover); box-shadow: 0 0 0 3px rgba(124,58,237,0.18); }
   .input::placeholder { color: var(--text-mute); }
 
-  /* Event feed */
-  .event-feed {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    max-height: 600px;
-    overflow: auto;
-    padding-right: 4px;
-  }
+  /* Add-account modal steps */
+  .add-step { animation: fadein 0.25s ease; }
+  .add-step-intro { text-align: center; padding: 10px 0 20px; }
+  .add-step-intro p { color: var(--text-dim); margin: 0 0 8px; font-size: 14px; }
+  .add-step-intro .step-icon { font-size: 40px; margin-bottom: 14px; line-height: 1; }
 
-  .event-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 14px 16px;
-    animation: slidein 0.35s ease;
+  /* Embedded terminal in modal */
+  .add-terminal-wrap { background: #0d1117; border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; overflow: hidden; margin-bottom: 12px; }
+  .add-terminal-bar { display: flex; align-items: center; gap: 10px; padding: 7px 14px; background: #161b22; border-bottom: 1px solid rgba(255,255,255,0.07); }
+  .add-terminal-target { font-family: "JetBrains Mono", monospace; font-size: 12px; font-weight: 600; color: #58a6ff; }
+  .add-terminal-live { font-size: 11px; color: #3fb950; display: flex; align-items: center; gap: 5px; }
+  .add-terminal-live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #3fb950; animation: pulse 2s infinite; }
+  .add-terminal-output { height: 280px; overflow-y: auto; overflow-x: auto; padding: 10px 16px; font-family: "JetBrains Mono", monospace; font-size: 12px; line-height: 1.6; color: #e6edf3; white-space: pre; }
+  .add-terminal-send { display: flex; gap: 0; border-top: 1px solid rgba(255,255,255,0.07); }
+  .add-terminal-send .prompt { font-family: "JetBrains Mono", monospace; font-size: 12px; color: #3fb950; padding: 0 10px; line-height: 36px; background: #0d1117; flex-shrink: 0; }
+  .add-terminal-send input { flex: 1; background: #0d1117; border: 0; outline: 0; color: #e6edf3; font-family: "JetBrains Mono", monospace; font-size: 12px; padding: 0 6px; }
+  .add-terminal-send button { background: rgba(124,58,237,0.15); border: 0; border-left: 1px solid rgba(255,255,255,0.07); color: #a855f7; font-size: 12px; padding: 0 14px; cursor: pointer; font-family: "JetBrains Mono", monospace; transition: background 180ms; }
+  .add-terminal-send button:hover { background: rgba(124,58,237,0.3); }
+
+  .add-step-actions { display: flex; gap: 8px; justify-content: flex-end; padding-top: 12px; }
+  .add-success { text-align: center; padding: 20px 0; }
+  .add-success .check { font-size: 48px; color: var(--success); margin-bottom: 12px; }
+  .add-success p { color: var(--text-dim); margin: 4px 0 20px; }
+
+  /* ── tmux tab ───────────────────────────────────────────────────────────── */
+  .tmux-grid { display: grid; grid-template-columns: 1fr 1.4fr; gap: 20px; }
+  @media (max-width: 900px) { .tmux-grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .panel-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border); background: var(--card-2); }
+  .panel-header h3 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: 0.02em; }
+  .panel-header .count { font-size: 11px; color: var(--text-mute); padding: 2px 8px; background: rgba(255,255,255,0.05); border-radius: 999px; }
+  .panel-body { padding: 10px; max-height: 500px; overflow: auto; }
+
+  .pane-item { padding: 10px 12px; background: var(--card-2); border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 8px; cursor: pointer; transition: border var(--t), transform var(--t), background var(--t); }
+  .pane-item:hover { border-color: var(--border-strong); transform: translateX(2px); }
+  .pane-item.selected { border-color: var(--accent); background: rgba(124,58,237,0.12); transform: translateX(2px); }
+  .pane-target { font-family: "JetBrains Mono", monospace; font-size: 12px; font-weight: 600; color: var(--accent-2); margin-bottom: 3px; }
+  .pane-cmd { font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .monitor-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--card-2); border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 8px; transition: border var(--t); }
+  .monitor-row:hover { border-color: var(--border-strong); }
+  .monitor-info { flex: 1; min-width: 0; }
+  .monitor-name { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+  .monitor-pattern { font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+  .badge.manual { background: rgba(59,130,246,0.15); color: #93c5fd; }
+  .badge.regex { background: rgba(168,85,247,0.15); color: #c4b5fd; }
+  .badge.success { background: rgba(16,185,129,0.15); color: #34d399; }
+  .badge.failed { background: rgba(239,68,68,0.15); color: #fca5a5; }
+  .badge.uncertain { background: rgba(245,158,11,0.15); color: #fcd34d; }
+
+  .add-monitor-form { display: grid; grid-template-columns: 1fr 110px 1fr auto; gap: 8px; padding: 14px; background: var(--card-2); border-top: 1px solid var(--border); }
+  @media (max-width: 700px) { .add-monitor-form { grid-template-columns: 1fr; } }
+
+  /* ── Terminal panel (bottom) ────────────────────────────────────────────── */
+  .terminal-panel {
+    position: fixed; bottom: 0; left: 0; right: 0; height: 300px;
+    background: #0d1117; border-top: 1px solid rgba(255,255,255,0.12);
+    display: flex; flex-direction: column; z-index: 200;
+    box-shadow: 0 -8px 32px rgba(0,0,0,0.6);
   }
-  @keyframes slidein {
-    from { opacity: 0; transform: translateY(-6px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  .event-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 6px;
-    flex-wrap: wrap;
-  }
-  .event-target {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--accent-2);
-  }
-  .event-time {
-    margin-left: auto;
-    font-size: 11px;
-    color: var(--text-mute);
-    font-variant-numeric: tabular-nums;
-  }
-  .event-explanation {
-    font-size: 13px;
-    color: var(--text-dim);
-    margin-bottom: 8px;
-  }
-  .event-toggle {
-    font-size: 11px;
-    color: var(--accent-2);
-    cursor: pointer;
-    background: transparent;
-    border: 0;
-    padding: 2px 0;
-    font-weight: 600;
-    font-family: inherit;
-  }
+  .terminal-panel.hidden { display: none; }
+  .terminal-header { display: flex; align-items: center; gap: 10px; padding: 7px 14px; background: #161b22; border-bottom: 1px solid rgba(255,255,255,0.07); flex-shrink: 0; }
+  .terminal-target { font-family: "JetBrains Mono", monospace; font-size: 12px; font-weight: 600; color: #58a6ff; }
+  .terminal-live { font-size: 11px; color: #3fb950; display: flex; align-items: center; gap: 5px; }
+  .terminal-live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #3fb950; animation: pulse 2s infinite; }
+  .terminal-live.error { color: #f85149; }
+  .terminal-live.error::before { background: #f85149; animation: none; }
+  .terminal-close { margin-left: auto; background: transparent; border: 0; color: #8b949e; cursor: pointer; padding: 4px 8px; border-radius: 4px; font-size: 16px; line-height: 1; transition: background var(--t), color var(--t); }
+  .terminal-close:hover { background: rgba(255,255,255,0.07); color: #e6edf3; }
+  .terminal-output { flex: 1; overflow-y: auto; overflow-x: auto; padding: 10px 16px; font-family: "JetBrains Mono", monospace; font-size: 12px; line-height: 1.6; color: #e6edf3; white-space: pre; }
+
+  /* ── Event feed ─────────────────────────────────────────────────────────── */
+  .event-feed { display: flex; flex-direction: column; gap: 10px; max-height: 600px; overflow: auto; padding-right: 4px; }
+  .event-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; animation: slidein 0.35s ease; }
+  @keyframes slidein { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:translateY(0); } }
+  .event-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
+  .event-target { font-family: "JetBrains Mono", monospace; font-size: 12px; font-weight: 700; color: var(--accent-2); }
+  .event-time { margin-left: auto; font-size: 11px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
+  .event-explanation { font-size: 13px; color: var(--text-dim); margin-bottom: 8px; }
+  .event-toggle { font-size: 11px; color: var(--accent-2); cursor: pointer; background: transparent; border: 0; padding: 2px 0; font-weight: 600; font-family: inherit; }
   .event-toggle:hover { text-decoration: underline; }
-  .event-capture {
-    display: none;
-    margin-top: 8px;
-    padding: 10px;
-    background: #0d0d18;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    font-family: "JetBrains Mono", monospace;
-    font-size: 11px;
-    color: var(--text-dim);
-    white-space: pre-wrap;
-    max-height: 240px;
-    overflow: auto;
-  }
+  .event-capture { display: none; margin-top: 8px; padding: 10px; background: #0d0d18; border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--text-dim); white-space: pre-wrap; max-height: 240px; overflow: auto; }
   .event-capture.open { display: block; }
 
-  /* Scan table */
-  .scan-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  }
-  .scan-table th, .scan-table td {
-    padding: 10px;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-  }
-  .scan-table th {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-mute);
-    font-weight: 600;
-  }
-  .scan-table tr:last-child td { border-bottom: 0; }
-  .scan-table .imported-tag {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 999px;
-    font-size: 10px;
-    font-weight: 700;
-    background: rgba(16, 185, 129, 0.15);
-    color: #34d399;
-  }
-
-  /* Toasts */
-  .toast-container {
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    z-index: 2000;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    pointer-events: none;
-  }
-  .toast {
-    background: var(--card);
-    border: 1px solid var(--border-strong);
-    border-left: 3px solid var(--info);
-    border-radius: var(--radius-sm);
-    padding: 12px 16px;
-    min-width: 260px;
-    max-width: 420px;
-    box-shadow: var(--shadow-lg);
-    pointer-events: auto;
-    animation: toast-in 0.3s ease;
-    font-size: 13px;
-  }
+  /* ── Toasts ─────────────────────────────────────────────────────────────── */
+  .toast-container { position: fixed; top: 20px; right: 20px; z-index: 2000; display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
+  .toast { background: var(--card); border: 1px solid var(--border-strong); border-left: 3px solid var(--info); border-radius: var(--radius-sm); padding: 12px 16px; min-width: 260px; max-width: 420px; box-shadow: var(--shadow-lg); pointer-events: auto; animation: toast-in 0.3s ease; font-size: 13px; }
   .toast.success { border-left-color: var(--success); }
   .toast.error { border-left-color: var(--danger); }
   .toast.warning { border-left-color: var(--warning); }
   .toast.fade-out { animation: toast-out 0.3s ease forwards; }
-  @keyframes toast-in {
-    from { opacity: 0; transform: translateX(20px); }
-    to { opacity: 1; transform: translateX(0); }
-  }
-  @keyframes toast-out {
-    to { opacity: 0; transform: translateX(20px); }
-  }
-
-  .toast-title {
-    font-weight: 700;
-    margin-bottom: 2px;
-  }
+  @keyframes toast-in { from { opacity:0; transform:translateX(20px); } to { opacity:1; transform:translateX(0); } }
+  @keyframes toast-out { to { opacity:0; transform:translateX(20px); } }
+  .toast-title { font-weight: 700; margin-bottom: 2px; }
   .toast-body { color: var(--text-dim); font-size: 12px; }
-
-  /* Connection dot */
-  .ws-dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--success);
-    box-shadow: 0 0 6px var(--success);
-    display: inline-block;
-    margin-right: 4px;
-  }
-  .ws-dot.disconnected { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
 
   @media (max-width: 720px) {
     .container { padding: 18px; }
     .header { padding: 12px 16px; }
-    .slider-group input[type="range"] { width: 90px; }
-    .header-inner { gap: 12px; }
+    .header-inner { gap: 10px; }
+    .accounts-grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -929,15 +457,14 @@
 <header class="header">
   <div class="header-inner">
     <div class="title">
-      <svg class="bolt" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-        <path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/>
-      </svg>
-      <span>Claude Accounts</span>
+      <svg class="bolt" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/></svg>
+      Claude Accounts
     </div>
 
-    <span class="active-badge" id="active-badge" title="Currently active account">
-      <span id="active-badge-text">No active account</span>
-    </span>
+    <button class="service-btn" id="service-toggle-btn" data-on="false">
+      <span class="service-dot"></span>
+      <span id="service-btn-label">Service OFF</span>
+    </button>
 
     <div class="spacer"></div>
 
@@ -952,29 +479,34 @@
       <span>Auto-switch</span>
     </label>
 
-    <div class="slider-group" title="Usage percentage that triggers an auto-switch">
-      <label for="threshold-slider">Threshold:</label>
-      <input type="range" id="threshold-slider" min="0" max="100" value="90" />
-      <span class="slider-value"><span id="threshold-value">90</span>%</span>
-    </div>
-
     <span class="ws-dot" id="ws-dot" title="WebSocket connection"></span>
   </div>
 </header>
 
 <main class="container">
-  <!-- Accounts Tab -->
+  <!-- ── Accounts Tab ───────────────────────────────────────────────────── -->
   <section class="tab-panel active" id="tab-accounts" role="tabpanel">
-    <div class="section-title">Accounts</div>
+
+    <!-- Service banner -->
+    <div class="service-banner off" id="service-banner">
+      <div class="service-banner-info">
+        <div class="service-banner-title" id="service-banner-title">Service is OFF</div>
+        <div class="service-banner-sub" id="service-banner-sub">
+          Account switching is disabled. Click to enable management.
+        </div>
+      </div>
+    </div>
+
+    <div class="section-title" id="accounts-section-title">Accounts</div>
     <div id="accounts-grid" class="accounts-grid"></div>
     <div id="accounts-empty" class="empty-state" style="display:none;">
-      No accounts yet. Use "Scan Keychain" below to discover and import them.
+      No accounts yet. Click "+ Add Account" to authenticate and add one.
     </div>
 
     <div class="footer-actions">
-      <button class="btn primary" id="scan-btn">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-        Scan Keychain
+      <button class="btn primary" id="add-account-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        Add Account
       </button>
       <button class="btn" id="refresh-accounts-btn" title="Reload accounts list">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
@@ -985,23 +517,14 @@
     <div class="section-title">Switch Log</div>
     <div id="switch-log-wrapper">
       <table class="log-table">
-        <thead>
-          <tr>
-            <th style="width: 160px;">Time</th>
-            <th>From</th>
-            <th>To</th>
-            <th style="width: 120px;">Reason</th>
-          </tr>
-        </thead>
+        <thead><tr><th style="width:160px;">Time</th><th>From</th><th>To</th><th style="width:120px;">Reason</th></tr></thead>
         <tbody id="switch-log-body"></tbody>
       </table>
-      <div id="switch-log-empty" class="empty-state" style="display:none; margin-top: 10px;">
-        No switch events yet.
-      </div>
+      <div id="switch-log-empty" class="empty-state" style="display:none;margin-top:10px;">No switch events yet.</div>
     </div>
   </section>
 
-  <!-- tmux Tab -->
+  <!-- ── tmux Tab ──────────────────────────────────────────────────────── -->
   <section class="tab-panel" id="tab-tmux" role="tabpanel">
     <div class="footer-actions" style="margin-top:0;">
       <button class="btn primary" id="refresh-sessions-btn">
@@ -1017,9 +540,7 @@
           <span class="count" id="sessions-count">0</span>
         </div>
         <div class="panel-body" id="sessions-list">
-          <div class="empty-state" style="margin: 10px;">
-            Click "Refresh Sessions" to discover tmux panes.
-          </div>
+          <div class="empty-state" style="margin:10px;">Click "Refresh Sessions" to discover tmux panes.</div>
         </div>
       </div>
 
@@ -1046,37 +567,102 @@
 
     <div class="section-title">Event Feed</div>
     <div id="event-feed" class="event-feed"></div>
-    <div id="event-feed-empty" class="empty-state">
-      No events yet. Events appear here when monitors trigger.
-    </div>
+    <div id="event-feed-empty" class="empty-state">No events yet. Events appear here when monitors trigger.</div>
   </section>
 </main>
 
-<!-- Scan modal -->
-<div class="modal-backdrop" id="scan-modal">
+<!-- ── Add Account modal ─────────────────────────────────────────────────── -->
+<div class="modal-backdrop" id="add-modal">
   <div class="modal">
     <div class="modal-header">
-      <div class="modal-title">Keychain Scan Results</div>
-      <button class="modal-close" aria-label="Close" data-close-modal>
+      <div class="modal-title">Add Account</div>
+      <button class="modal-close" id="add-modal-close" aria-label="Close">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
       </button>
     </div>
-    <div class="modal-body" id="scan-modal-body">
-      <div class="empty-state">Loading...</div>
+    <div class="modal-body">
+      <!-- Step 1: Intro -->
+      <div id="add-step-1" class="add-step">
+        <div class="add-step-intro">
+          <div class="step-icon">🔑</div>
+          <p>A new terminal will open with a fresh isolated Claude session.</p>
+          <p style="color:var(--text-mute);font-size:13px;">Log in with your Claude account there, then click <strong>Verify &amp; Save</strong>.</p>
+        </div>
+        <div style="display:flex;justify-content:center;padding-top:8px;">
+          <button class="btn primary" id="open-terminal-btn" style="flex:none;padding:10px 28px;font-size:14px;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+            Open Login Terminal
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 2: Terminal -->
+      <div id="add-step-2" class="add-step" style="display:none;">
+        <div class="add-terminal-wrap">
+          <div class="add-terminal-bar">
+            <span class="add-terminal-target" id="add-term-target">—</span>
+            <span class="add-terminal-live">live</span>
+          </div>
+          <div class="add-terminal-output" id="add-term-output">(waiting for output…)</div>
+          <form class="add-terminal-send" id="add-term-send-form">
+            <span class="prompt">❯</span>
+            <input id="add-term-input" type="text" autocomplete="off" spellcheck="false" placeholder="send keys to terminal…" />
+            <button type="submit">Send ↵</button>
+          </form>
+        </div>
+        <div class="add-step-actions">
+          <button class="btn" id="add-cancel-btn">Cancel</button>
+          <button class="btn primary" id="add-verify-btn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+            Verify &amp; Save
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 3: Success -->
+      <div id="add-step-3" class="add-step" style="display:none;">
+        <div class="add-success">
+          <div class="check">✓</div>
+          <p>Account added successfully</p>
+          <p style="font-size:15px;font-weight:700;color:var(--text);" id="add-result-email"></p>
+          <button class="btn primary" id="add-done-btn" style="flex:none;padding:10px 28px;">Done</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
 
 <div class="toast-container" id="toast-container"></div>
 
+<!-- ── Bottom terminal panel ─────────────────────────────────────────────── -->
+<div class="terminal-panel hidden" id="terminal-panel">
+  <div class="terminal-header">
+    <div class="terminal-target" id="terminal-target">—</div>
+    <div class="terminal-live" id="terminal-live">live</div>
+    <code id="terminal-attach-cmd" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#8b949e;background:rgba(255,255,255,0.05);padding:2px 8px;border-radius:4px;user-select:all;cursor:text;"></code>
+    <button class="terminal-close" id="terminal-close-btn" title="Close (Esc)">✕</button>
+  </div>
+  <div class="terminal-output" id="terminal-output"></div>
+  <form id="terminal-send-form" style="display:flex;gap:0;border-top:1px solid rgba(255,255,255,0.07);flex-shrink:0;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#3fb950;padding:0 10px;line-height:36px;background:#0d1117;flex-shrink:0;">❯</span>
+    <input id="terminal-input" type="text" autocomplete="off" spellcheck="false"
+      style="flex:1;background:#0d1117;border:0;outline:0;color:#e6edf3;font-family:'JetBrains Mono',monospace;font-size:12px;padding:0 6px;"
+      placeholder="send text to pane…" />
+    <button type="submit"
+      style="background:rgba(124,58,237,0.15);border:0;border-left:1px solid rgba(255,255,255,0.07);color:#a855f7;font-size:12px;padding:0 14px;cursor:pointer;font-family:'JetBrains Mono',monospace;transition:background 180ms;">
+      Send ↵
+    </button>
+  </form>
+</div>
+
 <script>
 // =============================================================
-// State + utilities
+// State
 // =============================================================
 const state = {
   accounts: [],
-  settings: { auto_switch_enabled: true, switch_threshold_percent: 90 },
-  activeEmail: null,
+  settings: { auto_switch_enabled: true },
+  service: { enabled: false, active_email: null, default_account_id: null },
   switchLog: [],
   sessions: [],
   monitors: [],
@@ -1088,13 +674,10 @@ function qs(sel, root = document) { return root.querySelector(sel); }
 function qsa(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
 
 function escapeHtml(s) {
-  if (s === null || s === undefined) return "";
+  if (s == null) return "";
   return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
 
 function fmtTime(iso) {
@@ -1102,7 +685,7 @@ function fmtTime(iso) {
   try {
     const d = new Date(iso);
     if (isNaN(d)) return iso;
-    return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    return d.toLocaleString([], { month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" });
   } catch { return iso; }
 }
 
@@ -1110,8 +693,7 @@ function fmtReset(ts) {
   if (!ts) return "—";
   try {
     const ms = ts > 1e12 ? ts : ts * 1000;
-    const d = new Date(ms);
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return new Date(ms).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" });
   } catch { return "—"; }
 }
 
@@ -1123,41 +705,26 @@ function usageClass(pct) {
 }
 
 // =============================================================
-// Toast system
+// Toast
 // =============================================================
 function toast(title, body = "", kind = "info", ttl = 4000) {
-  const container = qs("#toast-container");
   const el = document.createElement("div");
   el.className = "toast " + kind;
-  el.innerHTML = `
-    <div class="toast-title">${escapeHtml(title)}</div>
-    ${body ? `<div class="toast-body">${escapeHtml(body)}</div>` : ""}
-  `;
-  container.appendChild(el);
-  setTimeout(() => {
-    el.classList.add("fade-out");
-    setTimeout(() => el.remove(), 300);
-  }, ttl);
+  el.innerHTML = `<div class="toast-title">${escapeHtml(title)}</div>${body ? `<div class="toast-body">${escapeHtml(body)}</div>` : ""}`;
+  qs("#toast-container").appendChild(el);
+  setTimeout(() => { el.classList.add("fade-out"); setTimeout(() => el.remove(), 300); }, ttl);
 }
 
 // =============================================================
 // API helpers
 // =============================================================
 async function api(path, opts = {}) {
-  const init = {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  };
-  if (opts.body && typeof opts.body === "object") {
-    init.body = JSON.stringify(opts.body);
-  }
+  const init = { headers: { "Content-Type": "application/json" }, ...opts };
+  if (opts.body && typeof opts.body === "object") init.body = JSON.stringify(opts.body);
   const res = await fetch(path, init);
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;
-    try {
-      const j = await res.json();
-      if (j.detail) msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
-    } catch {}
+    try { const j = await res.json(); if (j.detail) msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail); } catch {}
     throw new Error(msg);
   }
   if (res.status === 204) return null;
@@ -1166,13 +733,9 @@ async function api(path, opts = {}) {
 }
 
 async function withLoading(btn, fn) {
-  btn.classList.add("loading");
-  btn.disabled = true;
+  btn.classList.add("loading"); btn.disabled = true;
   try { return await fn(); }
-  finally {
-    btn.classList.remove("loading");
-    btn.disabled = false;
-  }
+  finally { btn.classList.remove("loading"); btn.disabled = false; }
 }
 
 // =============================================================
@@ -1182,15 +745,66 @@ qsa(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     const tab = btn.dataset.tab;
     state.currentTab = tab;
-    qsa(".tab-btn").forEach(b => {
-      const active = b.dataset.tab === tab;
-      b.classList.toggle("active", active);
-      b.setAttribute("aria-selected", active ? "true" : "false");
-    });
-    qsa(".tab-panel").forEach(p => {
-      p.classList.toggle("active", p.id === "tab-" + tab);
-    });
+    qsa(".tab-btn").forEach(b => { const a = b.dataset.tab === tab; b.classList.toggle("active", a); b.setAttribute("aria-selected", a ? "true" : "false"); });
+    qsa(".tab-panel").forEach(p => p.classList.toggle("active", p.id === "tab-" + tab));
     if (tab === "tmux") loadTmuxData();
+  });
+});
+
+// =============================================================
+// Service status
+// =============================================================
+async function loadServiceStatus() {
+  try {
+    const s = await api("/api/service");
+    state.service = s;
+    updateServiceUI(s);
+  } catch (e) {
+    console.warn("service status:", e);
+  }
+}
+
+function updateServiceUI(s) {
+  const btn = qs("#service-toggle-btn");
+  const label = qs("#service-btn-label");
+  const banner = qs("#service-banner");
+  const bannerTitle = qs("#service-banner-title");
+  const bannerSub = qs("#service-banner-sub");
+
+  if (s.enabled) {
+    btn.dataset.on = "true";
+    label.textContent = "Service ON";
+    banner.className = "service-banner on";
+    bannerTitle.textContent = "Service is ON";
+    bannerSub.textContent = s.active_email
+      ? `Active account: ${s.active_email} — auto-switching enabled`
+      : "Managing credentials — auto-switching enabled";
+  } else {
+    btn.dataset.on = "false";
+    label.textContent = "Service OFF";
+    banner.className = "service-banner off";
+    bannerTitle.textContent = "Service is OFF";
+    bannerSub.textContent = "Account switching is disabled. Enable to manage credentials.";
+  }
+}
+
+qs("#service-toggle-btn").addEventListener("click", async () => {
+  const btn = qs("#service-toggle-btn");
+  const isOn = btn.dataset.on === "true";
+  await withLoading(btn, async () => {
+    try {
+      if (isOn) {
+        const r = await api("/api/service/disable", { method: "POST" });
+        toast("Service disabled", r.restored_email ? `Restored: ${r.restored_email}` : "Original credentials restored", "success");
+      } else {
+        const r = await api("/api/service/enable", { method: "POST" });
+        toast("Service enabled", `Active: ${r.active_email}`, "success");
+      }
+      await loadServiceStatus();
+      await loadAccounts();
+    } catch (e) {
+      toast(isOn ? "Disable failed" : "Enable failed", e.message, "error");
+    }
   });
 });
 
@@ -1206,7 +820,6 @@ function renderAccounts() {
     return;
   }
   empty.style.display = "none";
-
   grid.innerHTML = state.accounts.map(acc => accountCardHtml(acc)).join("");
   attachCardEvents();
 }
@@ -1214,107 +827,130 @@ function renderAccounts() {
 function accountCardHtml(acc) {
   const isActive = !!acc.is_active;
   const disabled = !acc.enabled;
+  const isDefault = acc.id === state.service.default_account_id;
   const usage = acc.usage || {};
   const fiveH = usage.five_hour_pct;
   const sevenD = usage.seven_day_pct;
   const err = usage.error;
+  const threshold = acc.threshold_pct ?? 95;
 
-  const fiveBar = fiveH != null
-    ? `
-      <div class="usage-row">
-        <span class="label">5h</span>
-        <span class="value">${fiveH.toFixed(0)}% • resets ${fmtReset(usage.five_hour_resets_at)}</span>
-      </div>
-      <div class="usage-bar"><div class="usage-fill ${usageClass(fiveH)}" style="width:${Math.min(100, fiveH)}%"></div></div>
-    ` : "";
-  const sevenBar = sevenD != null
-    ? `
-      <div class="usage-row">
-        <span class="label">7d</span>
-        <span class="value">${sevenD.toFixed(0)}% • resets ${fmtReset(usage.seven_day_resets_at)}</span>
-      </div>
-      <div class="usage-bar"><div class="usage-fill ${usageClass(sevenD)}" style="width:${Math.min(100, sevenD)}%"></div></div>
-    ` : "";
-  const errBlock = err
-    ? `<div class="usage-error">⚠ ${escapeHtml(err)}</div>`
-    : "";
+  const fiveBar = fiveH != null ? `
+    <div class="usage-row">
+      <span class="label">5h</span>
+      <span class="value">${fiveH.toFixed(0)}% · resets ${fmtReset(usage.five_hour_resets_at)}</span>
+    </div>
+    <div class="usage-bar"><div class="usage-fill ${usageClass(fiveH)}" style="width:${Math.min(100,fiveH)}%"></div></div>` : "";
+
+  const sevenBar = sevenD != null ? `
+    <div class="usage-row">
+      <span class="label">7d</span>
+      <span class="value">${sevenD.toFixed(0)}% · resets ${fmtReset(usage.seven_day_resets_at)}</span>
+    </div>
+    <div class="usage-bar"><div class="usage-fill ${usageClass(sevenD)}" style="width:${Math.min(100,sevenD)}%"></div></div>` : "";
+
+  const errBlock = err ? `<div class="usage-error">⚠ ${escapeHtml(err)}</div>` : "";
   const usageEmpty = (!fiveBar && !sevenBar && !err)
-    ? `<div class="usage-error" style="color: var(--text-mute); background: rgba(255,255,255,0.02); border-color: var(--border);">No usage data yet.</div>` : "";
+    ? `<div class="usage-error" style="color:var(--text-mute);background:rgba(255,255,255,0.02);border-color:var(--border);">No usage data yet.</div>` : "";
 
   return `
-    <article class="account-card ${isActive ? "active" : ""} ${disabled ? "disabled" : ""}"
-             draggable="true"
-             data-id="${acc.id}"
-             data-email="${escapeHtml(acc.email)}">
+    <article class="account-card ${isActive?"active":""} ${disabled?"disabled":""}"
+             draggable="true" data-id="${acc.id}" data-email="${escapeHtml(acc.email)}">
       <div class="card-head">
         <div class="card-head-left">
           <div class="email" title="${escapeHtml(acc.email)}">${escapeHtml(acc.email)}</div>
-          <span class="display-name" contenteditable="true" spellcheck="false"
-                data-id="${acc.id}">${escapeHtml(acc.display_name || "")}</span>
+          <span class="display-name" contenteditable="true" spellcheck="false" data-id="${acc.id}">${escapeHtml(acc.display_name||"")}</span>
         </div>
         <div class="card-head-right">
+          ${isDefault ? `<span class="default-pill">Default</span>` : ""}
           ${isActive ? `<span class="active-pill">Active</span>` : ""}
           <label class="toggle" title="Include in auto-switch pool">
-            <input type="checkbox" class="enabled-toggle" data-id="${acc.id}" ${acc.enabled ? "checked" : ""} />
+            <input type="checkbox" class="enabled-toggle" data-id="${acc.id}" ${acc.enabled?"checked":""} />
             <span class="track"></span>
           </label>
         </div>
       </div>
-      <div class="usage-block">
-        ${fiveBar}${sevenBar}${errBlock}${usageEmpty}
+      <div class="usage-block">${fiveBar}${sevenBar}${errBlock}${usageEmpty}</div>
+      <div class="threshold-row">
+        <span class="label">Threshold</span>
+        <input type="range" class="threshold-slider" data-id="${acc.id}" min="50" max="100" step="1" value="${threshold}" />
+        <span class="threshold-value" id="tval-${acc.id}">${threshold.toFixed(0)}%</span>
       </div>
       <div class="card-actions">
-        <button class="btn primary ${isActive ? "outlined" : ""} switch-btn"
-                data-id="${acc.id}" ${isActive ? "disabled" : ""}>
-          ${isActive ? "Currently active" : "Switch"}
+        <button class="btn primary ${isActive?"outlined":""} switch-btn" data-id="${acc.id}" ${isActive?"disabled":""}>
+          ${isActive ? "Currently active" : "Switch to"}
+        </button>
+        <button class="btn icon star set-default-btn ${isDefault?"active":""}" data-id="${acc.id}" title="${isDefault?"Current default":"Set as default"}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="${isDefault?"currentColor":"none"}" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
         </button>
         <button class="btn icon danger delete-btn" data-id="${acc.id}" title="Delete account">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4h6v2"></path></svg>
         </button>
       </div>
-    </article>
-  `;
+    </article>`;
 }
 
 function attachCardEvents() {
   qsa(".account-card").forEach(card => attachDragHandlers(card));
 
   qsa(".display-name").forEach(span => {
-    span.addEventListener("keydown", e => {
-      if (e.key === "Enter") { e.preventDefault(); span.blur(); }
-      if (e.key === "Escape") { span.blur(); }
-    });
+    span.addEventListener("keydown", e => { if (e.key==="Enter"){e.preventDefault();span.blur();} if(e.key==="Escape") span.blur(); });
     span.addEventListener("blur", async () => {
       const id = span.dataset.id;
-      const acc = state.accounts.find(a => String(a.id) === id);
+      const acc = state.accounts.find(a => String(a.id)===id);
       const newVal = span.textContent.trim();
-      if (acc && newVal !== (acc.display_name || "")) {
+      if (acc && newVal !== (acc.display_name||"")) {
         try {
-          await api(`/api/accounts/${id}`, { method: "PATCH", body: { display_name: newVal || null } });
+          await api(`/api/accounts/${id}`, {method:"PATCH", body:{display_name:newVal||null}});
           acc.display_name = newVal;
-          toast("Updated", `Display name saved`, "success");
-        } catch (e) {
-          span.textContent = acc.display_name || "";
-          toast("Update failed", e.message, "error");
-        }
+          toast("Updated","Display name saved","success",2000);
+        } catch(e) { span.textContent = acc.display_name||""; toast("Update failed",e.message,"error"); }
       }
     });
   });
 
   qsa(".enabled-toggle").forEach(cb => {
     cb.addEventListener("change", async () => {
-      const id = cb.dataset.id;
-      const enabled = cb.checked;
+      const id = cb.dataset.id; const enabled = cb.checked;
       try {
-        await api(`/api/accounts/${id}`, { method: "PATCH", body: { enabled } });
-        const acc = state.accounts.find(a => String(a.id) === id);
+        await api(`/api/accounts/${id}`, {method:"PATCH", body:{enabled}});
+        const acc = state.accounts.find(a => String(a.id)===id);
         if (acc) acc.enabled = enabled;
         cb.closest(".account-card").classList.toggle("disabled", !enabled);
-        toast(enabled ? "Enabled" : "Disabled", null, "success", 2000);
-      } catch (e) {
-        cb.checked = !enabled;
-        toast("Update failed", e.message, "error");
-      }
+        toast(enabled?"Enabled":"Disabled",null,"success",2000);
+      } catch(e) { cb.checked = !enabled; toast("Update failed",e.message,"error"); }
+    });
+  });
+
+  qsa(".threshold-slider").forEach(slider => {
+    const id = slider.dataset.id;
+    const valEl = qs(`#tval-${id}`);
+    slider.addEventListener("input", () => { if(valEl) valEl.textContent = slider.value + "%"; });
+    let tDebounce;
+    slider.addEventListener("change", () => {
+      const val = Number(slider.value);
+      clearTimeout(tDebounce);
+      tDebounce = setTimeout(async () => {
+        try {
+          await api(`/api/accounts/${id}`, {method:"PATCH", body:{threshold_pct:val}});
+          const acc = state.accounts.find(a => String(a.id)===id);
+          if (acc) acc.threshold_pct = val;
+          toast("Threshold saved",`${val}%`,"success",1800);
+        } catch(e) { toast("Update failed",e.message,"error"); }
+      }, 400);
+    });
+  });
+
+  qsa(".set-default-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = Number(btn.dataset.id);
+      await withLoading(btn, async () => {
+        try {
+          const r = await api(`/api/service/default-account?account_id=${id}`, {method:"PATCH"});
+          state.service.default_account_id = id;
+          toast("Default set", r.email, "success", 2500);
+          renderAccounts(); // re-render to update star icons
+        } catch(e) { toast("Failed",e.message,"error"); }
+      });
     });
   });
 
@@ -1324,12 +960,10 @@ function attachCardEvents() {
       const id = btn.dataset.id;
       await withLoading(btn, async () => {
         try {
-          await api(`/api/accounts/${id}/switch`, { method: "POST" });
-          toast("Switch requested", "Waiting for server confirmation...", "success");
+          await api(`/api/accounts/${id}/switch`, {method:"POST"});
+          toast("Switch requested","Waiting for confirmation…","success");
           await loadAccounts();
-        } catch (e) {
-          toast("Switch failed", e.message, "error");
-        }
+        } catch(e) { toast("Switch failed",e.message,"error"); }
       });
     });
   });
@@ -1337,17 +971,14 @@ function attachCardEvents() {
   qsa(".delete-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       const id = btn.dataset.id;
-      const acc = state.accounts.find(a => String(a.id) === id);
-      if (!acc) return;
-      if (!confirm(`Delete account ${acc.email}?\n\nThis will not remove the Keychain entry.`)) return;
+      const acc = state.accounts.find(a => String(a.id)===id);
+      if (!acc || !confirm(`Delete account ${acc.email}?\n\nThe isolated config directory will remain on disk.`)) return;
       await withLoading(btn, async () => {
         try {
-          await api(`/api/accounts/${id}`, { method: "DELETE" });
-          toast("Deleted", acc.email, "success");
+          await api(`/api/accounts/${id}`, {method:"DELETE"});
+          toast("Deleted",acc.email,"success");
           await loadAccounts();
-        } catch (e) {
-          toast("Delete failed", e.message, "error");
-        }
+        } catch(e) { toast("Delete failed",e.message,"error"); }
       });
     });
   });
@@ -1360,66 +991,43 @@ let dragSrc = null;
 
 function attachDragHandlers(card) {
   card.addEventListener("dragstart", e => {
-    // Don't start a drag from inside an editable element
-    if (e.target.closest("[contenteditable]") || e.target.closest("button") || e.target.closest("input")) {
-      e.preventDefault();
-      return;
-    }
-    dragSrc = card;
-    card.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "move";
+    if (e.target.closest("[contenteditable]")||e.target.closest("button")||e.target.closest("input")){e.preventDefault();return;}
+    dragSrc = card; card.classList.add("dragging"); e.dataTransfer.effectAllowed = "move";
     try { e.dataTransfer.setData("text/plain", card.dataset.id); } catch {}
   });
-
   card.addEventListener("dragend", () => {
     card.classList.remove("dragging");
-    qsa(".account-card").forEach(c => c.classList.remove("drop-above", "drop-below"));
+    qsa(".account-card").forEach(c => c.classList.remove("drop-above","drop-below"));
     dragSrc = null;
   });
-
   card.addEventListener("dragover", e => {
-    if (!dragSrc || dragSrc === card) return;
-    e.preventDefault();
+    if (!dragSrc||dragSrc===card) return; e.preventDefault();
     const rect = card.getBoundingClientRect();
-    const isAbove = e.clientY < rect.top + rect.height / 2;
-    qsa(".account-card").forEach(c => c.classList.remove("drop-above", "drop-below"));
-    card.classList.add(isAbove ? "drop-above" : "drop-below");
+    const isAbove = e.clientY < rect.top + rect.height/2;
+    qsa(".account-card").forEach(c => c.classList.remove("drop-above","drop-below"));
+    card.classList.add(isAbove?"drop-above":"drop-below");
   });
-
-  card.addEventListener("dragleave", () => {
-    card.classList.remove("drop-above", "drop-below");
-  });
-
+  card.addEventListener("dragleave", () => card.classList.remove("drop-above","drop-below"));
   card.addEventListener("drop", async e => {
     e.preventDefault();
-    if (!dragSrc || dragSrc === card) return;
+    if (!dragSrc||dragSrc===card) return;
     const rect = card.getBoundingClientRect();
-    const dropBefore = e.clientY < rect.top + rect.height / 2;
+    const dropBefore = e.clientY < rect.top + rect.height/2;
     const grid = qs("#accounts-grid");
     if (dropBefore) grid.insertBefore(dragSrc, card);
     else grid.insertBefore(dragSrc, card.nextSibling);
-
-    qsa(".account-card").forEach(c => c.classList.remove("drop-above", "drop-below"));
-
-    // Persist new priorities
+    qsa(".account-card").forEach(c => c.classList.remove("drop-above","drop-below"));
     const newOrder = qsa(".account-card").map(c => Number(c.dataset.id));
-    const promises = newOrder.map((id, i) => {
-      const acc = state.accounts.find(a => a.id === id);
-      if (acc && acc.priority !== i) {
-        return api(`/api/accounts/${id}`, { method: "PATCH", body: { priority: i } })
-          .then(() => { acc.priority = i; });
-      }
+    const promises = newOrder.map((id,i) => {
+      const acc = state.accounts.find(a=>a.id===id);
+      if (acc&&acc.priority!==i) return api(`/api/accounts/${id}`,{method:"PATCH",body:{priority:i}}).then(()=>{acc.priority=i;});
       return null;
     }).filter(Boolean);
     try {
       await Promise.all(promises);
-      // Reorder local state to match
-      state.accounts.sort((a, b) => a.priority - b.priority);
-      toast("Reordered", "New priority saved", "success", 1800);
-    } catch (err) {
-      toast("Reorder failed", err.message, "error");
-      await loadAccounts();
-    }
+      state.accounts.sort((a,b)=>a.priority-b.priority);
+      toast("Reordered","Priority saved","success",1800);
+    } catch(err) { toast("Reorder failed",err.message,"error"); await loadAccounts(); }
   });
 }
 
@@ -1430,44 +1038,19 @@ async function loadAccounts() {
   try {
     const data = await api("/api/accounts");
     state.accounts = data;
-    const active = data.find(a => a.is_active);
-    state.activeEmail = active ? active.email : null;
     renderAccounts();
-    updateActiveBadge();
-  } catch (e) {
-    toast("Load accounts failed", e.message, "error");
-  }
-}
-
-function updateActiveBadge(fromEmail) {
-  const badge = qs("#active-badge");
-  const text = qs("#active-badge-text");
-  if (state.activeEmail) {
-    text.textContent = `Active: ${state.activeEmail}`;
-    badge.style.display = "inline-flex";
-  } else {
-    text.textContent = "No active account";
-  }
+  } catch(e) { toast("Load accounts failed",e.message,"error"); }
 }
 
 async function loadSettings() {
   try {
     const data = await api("/api/settings");
     data.forEach(s => {
-      try {
-        const v = JSON.parse(s.value);
-        state.settings[s.key] = v;
-      } catch {
-        state.settings[s.key] = s.value;
-      }
+      try { const v = JSON.parse(s.value); state.settings[s.key] = v; }
+      catch { state.settings[s.key] = s.value; }
     });
     qs("#auto-switch-toggle").checked = !!state.settings.auto_switch_enabled;
-    const th = Number(state.settings.switch_threshold_percent || 90);
-    qs("#threshold-slider").value = th;
-    qs("#threshold-value").textContent = th;
-  } catch (e) {
-    toast("Load settings failed", e.message, "error");
-  }
+  } catch(e) { toast("Load settings failed",e.message,"error"); }
 }
 
 async function loadSwitchLog() {
@@ -1475,123 +1058,31 @@ async function loadSwitchLog() {
     const data = await api("/api/accounts/log?limit=20");
     state.switchLog = data;
     renderSwitchLog();
-  } catch (e) {
-    console.warn("switch log:", e);
-  }
+  } catch(e) { console.warn("switch log:",e); }
 }
 
 function renderSwitchLog() {
   const body = qs("#switch-log-body");
   const empty = qs("#switch-log-empty");
-  if (!state.switchLog.length) {
-    body.innerHTML = "";
-    empty.style.display = "block";
-    return;
-  }
+  if (!state.switchLog.length) { body.innerHTML = ""; empty.style.display = "block"; return; }
   empty.style.display = "none";
-  const byId = new Map(state.accounts.map(a => [a.id, a.email]));
+  const byId = new Map(state.accounts.map(a=>[a.id, a.email]));
   body.innerHTML = state.switchLog.map(row => {
-    const from = row.from_account_id ? (byId.get(row.from_account_id) || `#${row.from_account_id}`) : "—";
-    const to = byId.get(row.to_account_id) || `#${row.to_account_id}`;
-    const reason = String(row.reason || "").toLowerCase();
-    return `
-      <tr>
-        <td>${escapeHtml(fmtTime(row.triggered_at))}</td>
-        <td class="email">${escapeHtml(from)}</td>
-        <td class="email">${escapeHtml(to)}</td>
-        <td><span class="reason-pill ${reason}">${escapeHtml(reason)}</span></td>
-      </tr>
-    `;
+    const from = row.from_account_id ? (byId.get(row.from_account_id)||`#${row.from_account_id}`) : "—";
+    const to = byId.get(row.to_account_id)||`#${row.to_account_id}`;
+    const reason = String(row.reason||"").toLowerCase();
+    return `<tr><td>${escapeHtml(fmtTime(row.triggered_at))}</td><td class="email">${escapeHtml(from)}</td><td class="email">${escapeHtml(to)}</td><td><span class="reason-pill ${reason}">${escapeHtml(reason)}</span></td></tr>`;
   }).join("");
 }
 
 function prependSwitchLogRow(msg) {
-  // When a live switch happens, we optimistically add a row and also refresh
   const tbody = qs("#switch-log-body");
   const row = document.createElement("tr");
-  const reason = String(msg.reason || "").toLowerCase();
-  row.innerHTML = `
-    <td>${escapeHtml(fmtTime(new Date().toISOString()))}</td>
-    <td class="email">${escapeHtml(msg.from || "—")}</td>
-    <td class="email">${escapeHtml(msg.to || "—")}</td>
-    <td><span class="reason-pill ${reason}">${escapeHtml(reason)}</span></td>
-  `;
+  const reason = String(msg.reason||"").toLowerCase();
+  row.innerHTML = `<td>${escapeHtml(fmtTime(new Date().toISOString()))}</td><td class="email">${escapeHtml(msg.from||"—")}</td><td class="email">${escapeHtml(msg.to||"—")}</td><td><span class="reason-pill ${reason}">${escapeHtml(reason)}</span></td>`;
   tbody.prepend(row);
   qs("#switch-log-empty").style.display = "none";
-  // trim to 20
   while (tbody.children.length > 20) tbody.removeChild(tbody.lastChild);
-}
-
-// =============================================================
-// Scan modal
-// =============================================================
-const scanModal = qs("#scan-modal");
-function openModal() { scanModal.classList.add("open"); }
-function closeModal() { scanModal.classList.remove("open"); }
-qsa("[data-close-modal]").forEach(b => b.addEventListener("click", closeModal));
-scanModal.addEventListener("click", e => { if (e.target === scanModal) closeModal(); });
-
-qs("#scan-btn").addEventListener("click", async () => {
-  const btn = qs("#scan-btn");
-  await withLoading(btn, async () => {
-    try {
-      qs("#scan-modal-body").innerHTML = `<div class="empty-state">Scanning Keychain...</div>`;
-      openModal();
-      const results = await api("/api/accounts/scan", { method: "POST" });
-      renderScanResults(results);
-    } catch (e) {
-      qs("#scan-modal-body").innerHTML = `<div class="empty-state" style="color:var(--danger);">${escapeHtml(e.message)}</div>`;
-    }
-  });
-});
-
-function renderScanResults(results) {
-  if (!results.length) {
-    qs("#scan-modal-body").innerHTML = `<div class="empty-state">No Claude Keychain entries found.</div>`;
-    return;
-  }
-  const rows = results.map(r => `
-    <tr data-suffix="${escapeHtml(r.suffix)}">
-      <td><code style="color: var(--accent-2);">${escapeHtml(r.suffix)}</code></td>
-      <td>${escapeHtml(r.email || "—")}</td>
-      <td>
-        ${r.already_imported
-          ? `<span class="imported-tag">Imported</span>`
-          : `<button class="btn primary import-btn" data-suffix="${escapeHtml(r.suffix)}">Import</button>`
-        }
-      </td>
-    </tr>
-  `).join("");
-  qs("#scan-modal-body").innerHTML = `
-    <p style="color: var(--text-dim); margin-top: 0;">
-      Found <strong style="color: var(--text);">${results.length}</strong> Keychain entries.
-    </p>
-    <table class="scan-table">
-      <thead><tr><th>Suffix</th><th>Email</th><th style="width: 110px;">Action</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
-  qsa(".import-btn", scanModal).forEach(btn => {
-    btn.addEventListener("click", async () => {
-      const suffix = btn.dataset.suffix;
-      const email = prompt(`Email for suffix "${suffix}"?`);
-      if (!email) return;
-      await withLoading(btn, async () => {
-        try {
-          await api("/api/accounts", { method: "POST", body: { email, keychain_suffix: suffix } });
-          toast("Imported", email, "success");
-          const row = btn.closest("tr");
-          if (row) {
-            row.querySelector("td:last-child").innerHTML = `<span class="imported-tag">Imported</span>`;
-            row.querySelector("td:nth-child(2)").textContent = email;
-          }
-          await loadAccounts();
-        } catch (e) {
-          toast("Import failed", e.message, "error");
-        }
-      });
-    });
-  });
 }
 
 // =============================================================
@@ -1600,90 +1091,191 @@ function renderScanResults(results) {
 qs("#auto-switch-toggle").addEventListener("change", async e => {
   const val = e.target.checked;
   try {
-    await api("/api/settings/auto_switch_enabled", { method: "PATCH", body: { value: JSON.stringify(val) } });
+    await api("/api/settings/auto_switch_enabled", {method:"PATCH", body:{value:JSON.stringify(val)}});
     state.settings.auto_switch_enabled = val;
-    toast(val ? "Auto-switch enabled" : "Auto-switch disabled", null, "success", 2000);
-  } catch (err) {
-    e.target.checked = !val;
-    toast("Update failed", err.message, "error");
-  }
-});
-
-let thresholdDebounce;
-qs("#threshold-slider").addEventListener("input", e => {
-  qs("#threshold-value").textContent = e.target.value;
-});
-qs("#threshold-slider").addEventListener("change", e => {
-  const val = Number(e.target.value);
-  clearTimeout(thresholdDebounce);
-  thresholdDebounce = setTimeout(async () => {
-    try {
-      await api("/api/settings/switch_threshold_percent", { method: "PATCH", body: { value: JSON.stringify(val) } });
-      state.settings.switch_threshold_percent = val;
-      toast("Threshold saved", `${val}%`, "success", 1800);
-    } catch (err) {
-      toast("Update failed", err.message, "error");
-    }
-  }, 150);
+    toast(val?"Auto-switch enabled":"Auto-switch disabled",null,"success",2000);
+  } catch(err) { e.target.checked = !val; toast("Update failed",err.message,"error"); }
 });
 
 qs("#refresh-accounts-btn").addEventListener("click", async () => {
   const btn = qs("#refresh-accounts-btn");
+  await withLoading(btn, async () => { await loadAccounts(); await loadSwitchLog(); });
+});
+
+// =============================================================
+// Add Account modal (multi-step login flow)
+// =============================================================
+const addModal = qs("#add-modal");
+let loginSession = null;
+let addTermInterval = null;
+
+function openAddModal() {
+  addModal.classList.add("open");
+  // Reset to step 1
+  qs("#add-step-1").style.display = "";
+  qs("#add-step-2").style.display = "none";
+  qs("#add-step-3").style.display = "none";
+}
+
+function closeAddModal() {
+  addModal.classList.remove("open");
+  if (addTermInterval) { clearInterval(addTermInterval); addTermInterval = null; }
+  // Cancel dangling session
+  if (loginSession) {
+    api(`/api/accounts/cancel-login?session_id=${loginSession.session_id}`, {method:"DELETE"}).catch(()=>{});
+    loginSession = null;
+  }
+}
+
+qs("#add-account-btn").addEventListener("click", openAddModal);
+qs("#add-modal-close").addEventListener("click", closeAddModal);
+addModal.addEventListener("click", e => { if (e.target===addModal) closeAddModal(); });
+
+qs("#open-terminal-btn").addEventListener("click", async () => {
+  const btn = qs("#open-terminal-btn");
   await withLoading(btn, async () => {
-    await loadAccounts();
-    await loadSwitchLog();
+    try {
+      const result = await api("/api/accounts/start-login", {method:"POST"});
+      loginSession = result;
+      qs("#add-term-target").textContent = result.pane_target;
+      qs("#add-step-1").style.display = "none";
+      qs("#add-step-2").style.display = "";
+      // Poll terminal output
+      refreshAddTerminal();
+      addTermInterval = setInterval(refreshAddTerminal, 2000);
+    } catch(e) { toast("Failed to open terminal", e.message, "error"); }
   });
 });
+
+async function refreshAddTerminal() {
+  if (!loginSession) return;
+  try {
+    const data = await api(`/api/tmux/capture?target=${encodeURIComponent(loginSession.pane_target)}`);
+    const out = qs("#add-term-output");
+    out.textContent = data.output || "(empty)";
+    out.scrollTop = out.scrollHeight;
+  } catch {}
+}
+
+qs("#add-term-send-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const input = qs("#add-term-input");
+  const text = input.value; if (!text || !loginSession) return;
+  input.value = "";
+  try {
+    await api("/api/tmux/send", {method:"POST", body:{target:loginSession.pane_target, text}});
+    setTimeout(refreshAddTerminal, 300);
+  } catch(err) { toast("Send failed", err.message, "error"); }
+});
+
+qs("#add-cancel-btn").addEventListener("click", closeAddModal);
+
+qs("#add-verify-btn").addEventListener("click", async () => {
+  if (!loginSession) return;
+  const btn = qs("#add-verify-btn");
+  await withLoading(btn, async () => {
+    try {
+      const result = await api(`/api/accounts/verify-login?session_id=${encodeURIComponent(loginSession.session_id)}`, {method:"POST"});
+      if (result.success) {
+        clearInterval(addTermInterval); addTermInterval = null;
+        qs("#add-result-email").textContent = result.email || "Unknown email";
+        qs("#add-step-2").style.display = "none";
+        qs("#add-step-3").style.display = "";
+        loginSession = null;
+        await loadAccounts();
+        await loadServiceStatus();
+      } else {
+        toast("Verification failed", result.error, "error", 6000);
+      }
+    } catch(e) { toast("Verification failed", e.message, "error"); }
+  });
+});
+
+qs("#add-done-btn").addEventListener("click", () => { addModal.classList.remove("open"); });
 
 // =============================================================
 // tmux
 // =============================================================
-async function loadTmuxData() {
-  await Promise.all([loadSessions(), loadMonitors()]);
-}
+async function loadTmuxData() { await Promise.all([loadSessions(), loadMonitors()]); }
 
 async function loadSessions() {
   try {
     const data = await api("/api/tmux/sessions");
     state.sessions = data || [];
     renderSessions();
-  } catch (e) {
-    toast("Load sessions failed", e.message, "error");
-  }
+  } catch(e) { toast("Load sessions failed",e.message,"error"); }
 }
 
 function renderSessions() {
   const list = qs("#sessions-list");
   qs("#sessions-count").textContent = state.sessions.length;
-  if (!state.sessions.length) {
-    list.innerHTML = `<div class="empty-state" style="margin: 10px;">No tmux sessions discovered.</div>`;
-    return;
-  }
+  if (!state.sessions.length) { list.innerHTML = `<div class="empty-state" style="margin:10px;">No tmux sessions discovered.</div>`; return; }
   list.innerHTML = state.sessions.map(p => `
-    <div class="pane-item">
+    <div class="pane-item${terminalTarget===p.target?" selected":""}" data-target="${escapeHtml(p.target)}" title="Click to preview">
       <div class="pane-target">${escapeHtml(p.target)}</div>
-      <div class="pane-cmd" title="${escapeHtml(p.command || "")}">${escapeHtml(p.command || "—")}</div>
-    </div>
-  `).join("");
+      <div class="pane-cmd" title="${escapeHtml(p.command||"")}">${escapeHtml(p.command||"—")}</div>
+    </div>`).join("");
+  qsa(".pane-item[data-target]").forEach(el => el.addEventListener("click", () => openTerminal(el.dataset.target)));
 }
 
-async function loadMonitors() {
+// ── Bottom terminal panel ──────────────────────────────────────────────────
+let terminalTarget = null;
+let captureInterval = null;
+
+function openTerminal(target) {
+  terminalTarget = target;
+  qs("#terminal-target").textContent = target;
+  const session = target.split(":")[0];
+  qs("#terminal-attach-cmd").textContent = `tmux attach -t ${session}`;
+  qs("#terminal-panel").classList.remove("hidden");
+  qs("main").style.paddingBottom = "320px";
+  qsa(".pane-item").forEach(el => el.classList.toggle("selected", el.dataset.target===target));
+  qs("#terminal-input").focus();
+  refreshCapture();
+  if (captureInterval) clearInterval(captureInterval);
+  captureInterval = setInterval(refreshCapture, 2000);
+}
+
+function closeTerminal() {
+  terminalTarget = null;
+  if (captureInterval) { clearInterval(captureInterval); captureInterval = null; }
+  qs("#terminal-panel").classList.add("hidden");
+  qs("main").style.paddingBottom = "";
+  qsa(".pane-item.selected").forEach(el => el.classList.remove("selected"));
+}
+
+async function refreshCapture() {
+  if (!terminalTarget) return;
   try {
-    const data = await api("/api/tmux/monitors");
-    state.monitors = data || [];
-    renderMonitors();
-  } catch (e) {
-    toast("Load monitors failed", e.message, "error");
-  }
+    const data = await api(`/api/tmux/capture?target=${encodeURIComponent(terminalTarget)}`);
+    const out = qs("#terminal-output");
+    const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 30;
+    out.textContent = data.output || "(empty)";
+    if (atBottom) out.scrollTop = out.scrollHeight;
+    const liveEl = qs("#terminal-live");
+    liveEl.textContent = "live"; liveEl.className = "terminal-live";
+  } catch { const liveEl = qs("#terminal-live"); liveEl.textContent = "error"; liveEl.className = "terminal-live error"; }
+}
+
+qs("#terminal-close-btn").addEventListener("click", closeTerminal);
+qs("#terminal-send-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const input = qs("#terminal-input");
+  const text = input.value; if (!text||!terminalTarget) return;
+  input.value = "";
+  try { await api("/api/tmux/send",{method:"POST",body:{target:terminalTarget,text}}); setTimeout(refreshCapture,300); }
+  catch(err) { toast("Send failed",err.message,"error"); }
+});
+
+async function loadMonitors() {
+  try { const data = await api("/api/tmux/monitors"); state.monitors = data||[]; renderMonitors(); }
+  catch(e) { toast("Load monitors failed",e.message,"error"); }
 }
 
 function renderMonitors() {
   const list = qs("#monitors-list");
   qs("#monitors-count").textContent = state.monitors.length;
-  if (!state.monitors.length) {
-    list.innerHTML = `<div class="empty-state" style="margin: 10px;">No monitors configured. Add one below.</div>`;
-    return;
-  }
+  if (!state.monitors.length) { list.innerHTML = `<div class="empty-state" style="margin:10px;">No monitors configured.</div>`; return; }
   list.innerHTML = state.monitors.map(m => `
     <div class="monitor-row" data-id="${m.id}">
       <div class="monitor-info">
@@ -1691,77 +1283,45 @@ function renderMonitors() {
         <div class="monitor-pattern" title="${escapeHtml(m.pattern)}">${escapeHtml(m.pattern)}</div>
       </div>
       <span class="badge ${m.pattern_type}">${escapeHtml(m.pattern_type)}</span>
-      <label class="toggle">
-        <input type="checkbox" class="monitor-enabled" data-id="${m.id}" ${m.enabled ? "checked" : ""} />
-        <span class="track"></span>
-      </label>
+      <label class="toggle"><input type="checkbox" class="monitor-enabled" data-id="${m.id}" ${m.enabled?"checked":""}/><span class="track"></span></label>
       <button class="btn icon danger monitor-del" data-id="${m.id}" title="Delete monitor">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6"></path></svg>
       </button>
-    </div>
-  `).join("");
+    </div>`).join("");
 
   qsa(".monitor-enabled").forEach(cb => {
     cb.addEventListener("change", async () => {
-      const id = cb.dataset.id;
-      const m = state.monitors.find(x => String(x.id) === id);
-      if (!m) return;
+      const id = cb.dataset.id; const m = state.monitors.find(x=>String(x.id)===id); if (!m) return;
       try {
-        await api(`/api/tmux/monitors/${id}`, { method: "PATCH", body: {
-          name: m.name, pattern_type: m.pattern_type, pattern: m.pattern, enabled: cb.checked,
-        }});
+        await api(`/api/tmux/monitors/${id}`,{method:"PATCH",body:{name:m.name,pattern_type:m.pattern_type,pattern:m.pattern,enabled:cb.checked}});
         m.enabled = cb.checked;
-      } catch (e) {
-        cb.checked = !cb.checked;
-        toast("Update failed", e.message, "error");
-      }
+      } catch(e) { cb.checked = !cb.checked; toast("Update failed",e.message,"error"); }
     });
   });
 
   qsa(".monitor-del").forEach(btn => {
     btn.addEventListener("click", async () => {
-      const id = btn.dataset.id;
-      const m = state.monitors.find(x => String(x.id) === id);
-      if (!m || !confirm(`Delete monitor "${m.name}"?`)) return;
+      const id = btn.dataset.id; const m = state.monitors.find(x=>String(x.id)===id);
+      if (!m||!confirm(`Delete monitor "${m.name}"?`)) return;
       await withLoading(btn, async () => {
-        try {
-          await api(`/api/tmux/monitors/${id}`, { method: "DELETE" });
-          toast("Deleted", m.name, "success", 2000);
-          await loadMonitors();
-        } catch (e) {
-          toast("Delete failed", e.message, "error");
-        }
+        try { await api(`/api/tmux/monitors/${id}`,{method:"DELETE"}); toast("Deleted",m.name,"success",2000); await loadMonitors(); }
+        catch(e) { toast("Delete failed",e.message,"error"); }
       });
     });
   });
 }
 
-qs("#refresh-sessions-btn").addEventListener("click", async () => {
-  const btn = qs("#refresh-sessions-btn");
-  await withLoading(btn, loadSessions);
-});
+qs("#refresh-sessions-btn").addEventListener("click", async () => await withLoading(qs("#refresh-sessions-btn"), loadSessions));
 
 qs("#add-monitor-form").addEventListener("submit", async e => {
   e.preventDefault();
-  const form = e.currentTarget;
-  const fd = new FormData(form);
-  const payload = {
-    name: fd.get("name").trim(),
-    pattern_type: fd.get("pattern_type"),
-    pattern: fd.get("pattern").trim(),
-    enabled: true,
-  };
-  if (!payload.name || !payload.pattern) return;
+  const form = e.currentTarget; const fd = new FormData(form);
+  const payload = { name:fd.get("name").trim(), pattern_type:fd.get("pattern_type"), pattern:fd.get("pattern").trim(), enabled:true };
+  if (!payload.name||!payload.pattern) return;
   const btn = form.querySelector("button[type=submit]");
   await withLoading(btn, async () => {
-    try {
-      await api("/api/tmux/monitors", { method: "POST", body: payload });
-      form.reset();
-      toast("Monitor added", payload.name, "success");
-      await loadMonitors();
-    } catch (err) {
-      toast("Add failed", err.message, "error");
-    }
+    try { await api("/api/tmux/monitors",{method:"POST",body:payload}); form.reset(); toast("Monitor added",payload.name,"success"); await loadMonitors(); }
+    catch(err) { toast("Add failed",err.message,"error"); }
   });
 });
 
@@ -1771,30 +1331,26 @@ qs("#add-monitor-form").addEventListener("submit", async e => {
 function prependEvent(msg) {
   const feed = qs("#event-feed");
   qs("#event-feed-empty").style.display = "none";
-  const status = String(msg.status || "").toLowerCase();
-  const badgeClass = ["success", "failed", "uncertain"].includes(status) ? status : "uncertain";
-
+  const status = String(msg.status||"").toLowerCase();
+  const badgeClass = ["success","failed","uncertain"].includes(status)?status:"uncertain";
   const card = document.createElement("div");
   card.className = "event-card";
-  const capId = "cap-" + Math.random().toString(36).slice(2, 9);
+  const capId = "cap-" + Math.random().toString(36).slice(2,9);
   card.innerHTML = `
     <div class="event-head">
-      <span class="event-target">${escapeHtml(msg.target || "—")}</span>
-      <span class="badge ${badgeClass}">${escapeHtml(msg.status || "—")}</span>
+      <span class="event-target">${escapeHtml(msg.target||"—")}</span>
+      <span class="badge ${badgeClass}">${escapeHtml(msg.status||"—")}</span>
       <span class="event-time">${escapeHtml(fmtTime(new Date().toISOString()))}</span>
     </div>
-    <div class="event-explanation">${escapeHtml(msg.explanation || "")}</div>
+    <div class="event-explanation">${escapeHtml(msg.explanation||"")}</div>
     <button class="event-toggle" data-target="${capId}">Show raw capture ▾</button>
-    <pre class="event-capture" id="${capId}">${escapeHtml(msg.capture || "")}</pre>
-  `;
+    <pre class="event-capture" id="${capId}">${escapeHtml(msg.capture||"")}</pre>`;
   feed.prepend(card);
-
   card.querySelector(".event-toggle").addEventListener("click", e => {
     const pre = card.querySelector(".event-capture");
     const open = pre.classList.toggle("open");
-    e.currentTarget.textContent = open ? "Hide raw capture ▴" : "Show raw capture ▾";
+    e.currentTarget.textContent = open?"Hide raw capture ▴":"Show raw capture ▾";
   });
-
   while (feed.children.length > 20) feed.removeChild(feed.lastChild);
 }
 
@@ -1805,134 +1361,71 @@ let ws = null;
 let wsReconnectAttempts = 0;
 
 function connectWs() {
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const proto = location.protocol==="https:"?"wss:":"ws:";
   const url = `${proto}//${location.host}/ws`;
-  try {
-    ws = new WebSocket(url);
-  } catch (e) {
-    console.error("WS construct failed:", e);
-    scheduleReconnect();
-    return;
-  }
-  ws.onopen = () => {
-    qs("#ws-dot").classList.remove("disconnected");
-    wsReconnectAttempts = 0;
-  };
-  ws.onclose = () => {
-    qs("#ws-dot").classList.add("disconnected");
-    scheduleReconnect();
-  };
-  ws.onerror = () => {
-    qs("#ws-dot").classList.add("disconnected");
-  };
+  try { ws = new WebSocket(url); } catch(e) { scheduleReconnect(); return; }
+  ws.onopen = () => { qs("#ws-dot").classList.remove("disconnected"); wsReconnectAttempts = 0; };
+  ws.onclose = () => { qs("#ws-dot").classList.add("disconnected"); scheduleReconnect(); };
+  ws.onerror = () => qs("#ws-dot").classList.add("disconnected");
   ws.onmessage = evt => {
-    let msg;
-    try { msg = JSON.parse(evt.data); } catch { return; }
-    handleWsMessage(msg);
+    let msg; try { msg = JSON.parse(evt.data); } catch { return; }
+    switch(msg.type) {
+      case "account_switched":
+        state.service.active_email = msg.to;
+        updateServiceUI(state.service);
+        prependSwitchLogRow(msg);
+        loadAccounts();
+        toast("Account switched", `→ ${msg.to} (${msg.reason})`, "success");
+        break;
+      case "usage_updated": updateUsageLive(msg.accounts||[]); break;
+      case "tmux_result": prependEvent(msg); break;
+      case "error": toast("Server error", msg.message, "error", 6000); break;
+    }
   };
 }
 
 function scheduleReconnect() {
   wsReconnectAttempts++;
-  const delay = Math.min(15000, 1000 * Math.pow(1.5, wsReconnectAttempts));
-  setTimeout(connectWs, delay);
-}
-
-function handleWsMessage(msg) {
-  switch (msg.type) {
-    case "account_switched": {
-      state.activeEmail = msg.to;
-      updateActiveBadge();
-      prependSwitchLogRow(msg);
-      loadAccounts(); // refresh cards
-      toast("Account switched", `→ ${msg.to} (${msg.reason})`, "success");
-      break;
-    }
-    case "usage_updated": {
-      updateUsageLive(msg.accounts || []);
-      break;
-    }
-    case "tmux_result": {
-      prependEvent(msg);
-      break;
-    }
-    case "error": {
-      toast("Server error", msg.message, "error", 6000);
-      break;
-    }
-    default:
-      // no-op
-      break;
-  }
+  setTimeout(connectWs, Math.min(15000, 1000 * Math.pow(1.5, wsReconnectAttempts)));
 }
 
 function updateUsageLive(updates) {
   for (const u of updates) {
-    const acc = state.accounts.find(a => a.id === u.id || a.email === u.email);
+    const acc = state.accounts.find(a=>a.id===u.id||a.email===u.email);
     if (!acc) continue;
-    if (u.error) {
-      acc.usage = { error: u.error };
-    } else if (u.usage) {
-      const fh = u.usage.five_hour || {};
-      const sd = u.usage.seven_day || {};
-      acc.usage = {
-        five_hour_pct: fh.used_percentage,
-        five_hour_resets_at: fh.resets_at,
-        seven_day_pct: sd.used_percentage,
-        seven_day_resets_at: sd.resets_at,
-      };
+    if (u.error) { acc.usage = {error:u.error}; }
+    else if (u.usage) {
+      const fh = u.usage.five_hour||{};
+      const sd = u.usage.seven_day||{};
+      acc.usage = { five_hour_pct:fh.used_percentage, five_hour_resets_at:fh.resets_at, seven_day_pct:sd.used_percentage, seven_day_resets_at:sd.resets_at };
     }
     const card = qs(`.account-card[data-id="${acc.id}"]`);
     if (card) {
-      // Replace just the usage block + error without full re-render
-      const block = card.querySelector(".usage-block");
-      if (block) block.outerHTML = renderUsageBlock(acc.usage);
+      const tmp = document.createElement("div");
+      tmp.innerHTML = accountCardHtml(acc);
+      const newCard = tmp.firstElementChild;
+      card.replaceWith(newCard);
+      attachDragHandlers(newCard);
     }
   }
 }
 
-function renderUsageBlock(usage) {
-  usage = usage || {};
-  const fiveH = usage.five_hour_pct;
-  const sevenD = usage.seven_day_pct;
-  const err = usage.error;
-  const fiveBar = fiveH != null
-    ? `
-      <div class="usage-row">
-        <span class="label">5h</span>
-        <span class="value">${fiveH.toFixed(0)}% • resets ${fmtReset(usage.five_hour_resets_at)}</span>
-      </div>
-      <div class="usage-bar"><div class="usage-fill ${usageClass(fiveH)}" style="width:${Math.min(100, fiveH)}%"></div></div>
-    ` : "";
-  const sevenBar = sevenD != null
-    ? `
-      <div class="usage-row">
-        <span class="label">7d</span>
-        <span class="value">${sevenD.toFixed(0)}% • resets ${fmtReset(usage.seven_day_resets_at)}</span>
-      </div>
-      <div class="usage-bar"><div class="usage-fill ${usageClass(sevenD)}" style="width:${Math.min(100, sevenD)}%"></div></div>
-    ` : "";
-  const errBlock = err ? `<div class="usage-error">⚠ ${escapeHtml(err)}</div>` : "";
-  const usageEmpty = (!fiveBar && !sevenBar && !err)
-    ? `<div class="usage-error" style="color: var(--text-mute); background: rgba(255,255,255,0.02); border-color: var(--border);">No usage data yet.</div>` : "";
-  return `<div class="usage-block">${fiveBar}${sevenBar}${errBlock}${usageEmpty}</div>`;
-}
+// ── Keyboard shortcuts ──────────────────────────────────────────────────────
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") {
+    if (addModal.classList.contains("open")) { closeAddModal(); return; }
+    if (terminalTarget) closeTerminal();
+  }
+});
 
 // =============================================================
 // Init
 // =============================================================
-async function init() {
-  await Promise.all([loadSettings(), loadAccounts()]);
+(async () => {
+  await Promise.all([loadAccounts(), loadSettings(), loadServiceStatus()]);
   await loadSwitchLog();
   connectWs();
-}
-
-document.addEventListener("keydown", e => {
-  if (e.key === "Escape" && scanModal.classList.contains("open")) closeModal();
-});
-
-init();
+})();
 </script>
-
 </body>
 </html>

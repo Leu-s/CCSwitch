@@ -9,8 +9,9 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 DEFAULTS = {
     "auto_switch_enabled": "true",
-    "switch_threshold_percent": "90",
     "usage_poll_interval_seconds": "60",
+    # service_enabled / default_account_id / original_credentials_backup
+    # are managed by the /api/service router — not initialised here.
 }
 
 async def ensure_defaults(db: AsyncSession):

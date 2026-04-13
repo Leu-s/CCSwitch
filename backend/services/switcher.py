@@ -1,10 +1,13 @@
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 from datetime import datetime, timezone
-from ..models import Account, SwitchLog, SwitchReason
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..models import Account, SwitchLog
 from ..ws import WebSocketManager
 from ..config import settings
-from . import keychain as kc
+from . import account_service as ac
+
 
 async def get_next_account(current_email: str, db: AsyncSession) -> Account | None:
     result = await db.execute(
@@ -15,32 +18,19 @@ async def get_next_account(current_email: str, db: AsyncSession) -> Account | No
     )
     return result.scalars().first()
 
+
 async def perform_switch(
     target: Account,
     reason: str,
     db: AsyncSession,
-    ws: WebSocketManager
+    ws: WebSocketManager,
 ) -> None:
-    current_email = kc.get_active_email(settings.claude_config_dir)
+    current_email = ac.get_active_email()
 
-    # Read target credentials from their dedicated Keychain entry
-    creds = kc.read_credentials(target.keychain_suffix)
+    # Copy the target account's config dir to ~/.claude/
+    ac.activate_account_config(target.config_dir)
 
-    # Overwrite the active Keychain slot
-    kc.write_active_credentials(creds)
-
-    # Surgically update oauthAccount in .claude.json
-    oauth = {
-        "emailAddress": target.email,
-        "accountUuid": target.account_uuid or "",
-        "organizationUuid": target.org_uuid or "",
-        "organizationName": target.display_name or target.email,
-        "hasExtraUsageEnabled": False,
-        "billingType": "stripe_subscription",
-    }
-    kc.update_oauth_account(settings.claude_config_dir, oauth)
-
-    # Find current account id for the log
+    # Log the switch
     from_acc = None
     if current_email:
         result = await db.execute(select(Account).where(Account.email == current_email))
@@ -49,8 +39,8 @@ async def perform_switch(
     log = SwitchLog(
         from_account_id=from_acc.id if from_acc else None,
         to_account_id=target.id,
-        reason=SwitchReason(reason),
-        triggered_at=datetime.now(timezone.utc)
+        reason=reason,
+        triggered_at=datetime.now(timezone.utc),
     )
     db.add(log)
     await db.commit()
@@ -59,5 +49,5 @@ async def perform_switch(
         "type": "account_switched",
         "from": current_email,
         "to": target.email,
-        "reason": reason
+        "reason": reason,
     })

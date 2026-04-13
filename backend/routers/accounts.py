@@ -1,23 +1,29 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import Optional
+
 from ..database import get_db
 from ..models import Account, SwitchLog
-from ..schemas import AccountCreate, AccountUpdate, AccountOut, AccountWithUsage, ScanResult, SwitchLogOut, UsageData
-from ..services import keychain as kc
+from ..schemas import AccountUpdate, AccountOut, AccountWithUsage, SwitchLogOut, UsageData
+from ..schemas import LoginSessionOut, LoginVerifyResult
+from ..services import account_service as ac
 from ..services import switcher as sw
 from ..background import usage_cache
 from ..ws import ws_manager
-from ..config import settings
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
+
+# ── List accounts ──────────────────────────────────────────────────────────────
+
 @router.get("", response_model=list[AccountWithUsage])
 async def list_accounts(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Account).order_by(Account.priority.asc(), Account.id.asc()))
+    result = await db.execute(
+        select(Account).order_by(Account.priority.asc(), Account.id.asc())
+    )
     accounts = result.scalars().all()
-    active_email = kc.get_active_email(settings.claude_config_dir)
+    active_email = ac.get_active_email()
+
     out = []
     for acc in accounts:
         usage_raw = usage_cache.get(acc.email, {})
@@ -34,37 +40,69 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
             )
         else:
             usage = None
+
         out.append(AccountWithUsage(
             **AccountOut.model_validate(acc).model_dump(),
             usage=usage,
-            is_active=acc.email == active_email
+            is_active=(acc.email == active_email),
         ))
     return out
 
-@router.post("", response_model=AccountOut, status_code=201)
-async def create_account(payload: AccountCreate, db: AsyncSession = Depends(get_db)):
-    existing = await db.execute(select(Account).where(Account.email == payload.email))
+
+# ── Login flow ─────────────────────────────────────────────────────────────────
+
+@router.post("/start-login", response_model=LoginSessionOut)
+async def start_login():
+    """Create an isolated tmux window for authenticating a new Claude account."""
+    try:
+        info = ac.start_login_session()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return LoginSessionOut(**info)
+
+
+@router.post("/verify-login", response_model=LoginVerifyResult)
+async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    Verify that a login session completed and save the account to the database.
+    """
+    result = ac.verify_login_session(session_id)
+    if not result["success"]:
+        return LoginVerifyResult(success=False, error=result["error"])
+
+    email = result["email"]
+    config_dir = result["config_dir"]
+
+    # Check for duplicate
+    existing = await db.execute(select(Account).where(Account.email == email))
     if existing.scalars().first():
-        raise HTTPException(400, "Account with this email already exists")
-    account = Account(**payload.model_dump())
+        # Don't error — just return success so the UI can surface it
+        return LoginVerifyResult(success=True, email=email)
+
+    # Assign next available priority
+    count_result = await db.execute(select(Account))
+    count = len(count_result.scalars().all())
+
+    account = Account(
+        email=email,
+        config_dir=config_dir,
+        threshold_pct=95.0,
+        priority=count,
+    )
     db.add(account)
     await db.commit()
-    await db.refresh(account)
-    return account
 
-@router.post("/scan", response_model=list[ScanResult])
-async def scan_accounts(db: AsyncSession = Depends(get_db)):
-    suffixes = kc.scan_keychain()
-    existing_result = await db.execute(select(Account.keychain_suffix))
-    existing_suffixes = {row[0] for row in existing_result.all()}
-    results = []
-    for suffix in suffixes:
-        results.append(ScanResult(
-            suffix=suffix,
-            email=None,
-            already_imported=suffix in existing_suffixes
-        ))
-    return results
+    return LoginVerifyResult(success=True, email=email)
+
+
+@router.delete("/cancel-login")
+async def cancel_login(session_id: str):
+    """Clean up a login session that was abandoned."""
+    ac.cleanup_login_session(session_id)
+    return {"ok": True}
+
+
+# ── Switch log ─────────────────────────────────────────────────────────────────
 
 @router.get("/log", response_model=list[SwitchLogOut])
 async def switch_log(limit: int = 20, db: AsyncSession = Depends(get_db)):
@@ -73,8 +111,13 @@ async def switch_log(limit: int = 20, db: AsyncSession = Depends(get_db)):
     )
     return result.scalars().all()
 
+
+# ── Per-account CRUD ───────────────────────────────────────────────────────────
+
 @router.patch("/{account_id}", response_model=AccountOut)
-async def update_account(account_id: int, payload: AccountUpdate, db: AsyncSession = Depends(get_db)):
+async def update_account(
+    account_id: int, payload: AccountUpdate, db: AsyncSession = Depends(get_db)
+):
     result = await db.execute(select(Account).where(Account.id == account_id))
     account = result.scalars().first()
     if not account:
@@ -85,6 +128,7 @@ async def update_account(account_id: int, payload: AccountUpdate, db: AsyncSessi
     await db.refresh(account)
     return account
 
+
 @router.delete("/{account_id}", status_code=204)
 async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Account).where(Account.id == account_id))
@@ -93,6 +137,7 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Account not found")
     await db.delete(account)
     await db.commit()
+
 
 @router.post("/{account_id}/switch", status_code=200)
 async def manual_switch(account_id: int, db: AsyncSession = Depends(get_db)):

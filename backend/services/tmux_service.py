@@ -1,5 +1,4 @@
 import subprocess
-import asyncio
 
 def list_panes() -> list[dict]:
     try:
@@ -21,11 +20,14 @@ def list_panes() -> list[dict]:
     except FileNotFoundError:
         return []
 
+def send_keys(target: str, text: str, press_enter: bool = True) -> None:
+    cmd = ["tmux", "send-keys", "-t", target, text]
+    if press_enter:
+        cmd.append("Enter")
+    subprocess.run(cmd, check=True, capture_output=True)
+
 def send_continue(target: str) -> None:
-    subprocess.run(
-        ["tmux", "send-keys", "-t", target, "continue", "Enter"],
-        check=True, capture_output=True
-    )
+    send_keys(target, "continue")
 
 def capture_pane(target: str, lines: int = 20) -> str:
     result = subprocess.run(

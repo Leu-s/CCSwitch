@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from ..database import get_db
 from ..models import TmuxMonitor
+from pydantic import BaseModel
 from ..schemas import TmuxMonitorCreate, TmuxMonitorOut, TmuxPane
 from ..services import tmux_service
 
@@ -11,6 +12,27 @@ router = APIRouter(prefix="/api/tmux", tags=["tmux"])
 @router.get("/sessions", response_model=list[TmuxPane])
 async def list_sessions():
     return tmux_service.list_panes()
+
+@router.get("/capture")
+async def capture_session(target: str, lines: int = 50):
+    try:
+        output = tmux_service.capture_pane(target, lines)
+        return {"target": target, "output": output}
+    except Exception as e:
+        return {"target": target, "output": f"(error: {e})"}
+
+class SendKeysPayload(BaseModel):
+    target: str
+    text: str
+    press_enter: bool = True
+
+@router.post("/send")
+async def send_keys(payload: SendKeysPayload):
+    try:
+        tmux_service.send_keys(payload.target, payload.text, payload.press_enter)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
 @router.get("/monitors", response_model=list[TmuxMonitorOut])
 async def list_monitors(db: AsyncSession = Depends(get_db)):

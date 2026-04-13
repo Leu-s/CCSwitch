@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -13,9 +14,14 @@ def test_app():
     engine = create_async_engine(TEST_DB_URL, echo=False)
     TestSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    async def override_get_db():
+    async def _init():
         async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
+
+    asyncio.run(_init())
+
+    async def override_get_db():
         async with TestSessionLocal() as session:
             yield session
 
@@ -34,13 +40,14 @@ def test_get_settings_returns_defaults(client):
     data = resp.json()
     keys = {s["key"] for s in data}
     assert "auto_switch_enabled" in keys
-    assert "switch_threshold_percent" in keys
     assert "usage_poll_interval_seconds" in keys
+    # switch_threshold_percent removed — threshold is now per-account
+    assert "switch_threshold_percent" not in keys
 
 def test_patch_setting(client):
-    resp = client.patch("/api/settings/switch_threshold_percent", json={"value": "80"})
+    resp = client.patch("/api/settings/auto_switch_enabled", json={"value": "false"})
     assert resp.status_code == 200
-    assert resp.json()["value"] == "80"
+    assert resp.json()["value"] == "false"
 
 def test_patch_custom_key(client):
     resp = client.patch("/api/settings/custom_key", json={"value": "hello"})
