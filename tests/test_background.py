@@ -13,10 +13,21 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
+@pytest.fixture(autouse=True)
+def clear_backoff_state():
+    """Reset module-level 429 backoff state between tests."""
+    import backend.background as bg_mod
+    bg_mod._backoff_until.clear()
+    bg_mod._backoff_count.clear()
+    yield
+    bg_mod._backoff_until.clear()
+    bg_mod._backoff_count.clear()
+
+
 @pytest.mark.asyncio
 async def test_poll_broadcasts_usage_updated_when_service_enabled():
     """When service_enabled=true and no accounts exist, still broadcasts usage_updated."""
-    from backend.background import poll_usage_and_switch, usage_cache
+    from backend.background import poll_usage_and_switch
 
     mock_ws = AsyncMock()
     mock_db = AsyncMock()
@@ -165,7 +176,8 @@ async def test_rate_limited_error_preserves_previous_data():
     This verifies the race-condition fix: read + write happen inside one lock.
     """
     import httpx
-    from backend.background import poll_usage_and_switch, usage_cache, _cache_lock
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
 
     email = "rate-limited@example.com"
     previous_data = {
@@ -174,8 +186,7 @@ async def test_rate_limited_error_preserves_previous_data():
     }
 
     # Pre-populate the cache with a valid entry
-    async with _cache_lock:
-        usage_cache[email] = dict(previous_data)
+    await cache.set_usage(email, dict(previous_data))
 
     account = _make_account(email)
     mock_ws = AsyncMock()
@@ -194,8 +205,7 @@ async def test_rate_limited_error_preserves_previous_data():
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)
 
-    async with _cache_lock:
-        entry = usage_cache.get(email, {})
+    entry = await cache.get_usage_async(email)
 
     assert entry.get("rate_limited") is True, "cache entry must have rate_limited=True"
     # Original usage data must be preserved
@@ -204,8 +214,7 @@ async def test_rate_limited_error_preserves_previous_data():
     assert "error" not in entry, "error key must not be present when rate-limited with prev data"
 
     # Cleanup
-    async with _cache_lock:
-        usage_cache.pop(email, None)
+    await cache.invalidate(email)
 
 
 @pytest.mark.asyncio
@@ -213,11 +222,11 @@ async def test_probe_401_marks_account_stale():
     """A 401 from probe_usage should set account.stale_reason so the UI can
     show a re-login prompt, and db.commit should be called once."""
     import httpx
-    from backend.background import poll_usage_and_switch, usage_cache, _cache_lock
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
 
     email = "stale@example.com"
-    async with _cache_lock:
-        usage_cache.pop(email, None)
+    await cache.invalidate(email)
 
     account = _make_account(email)
     account.stale_reason = None
@@ -246,18 +255,17 @@ async def test_probe_401_marks_account_stale():
     assert "401" in account.stale_reason or "re-login" in account.stale_reason.lower()
     mock_db.commit.assert_called()
 
-    async with _cache_lock:
-        usage_cache.pop(email, None)
+    await cache.invalidate(email)
 
 
 @pytest.mark.asyncio
 async def test_successful_probe_clears_stale_flag():
     """When a previously-stale account's probe succeeds, the stale flag clears."""
-    from backend.background import poll_usage_and_switch, usage_cache, _cache_lock
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
 
     email = "recovered@example.com"
-    async with _cache_lock:
-        usage_cache.pop(email, None)
+    await cache.invalidate(email)
 
     account = _make_account(email)
     account.stale_reason = "Previously stale"  # seeded
@@ -279,8 +287,7 @@ async def test_successful_probe_clears_stale_flag():
     assert account.stale_reason is None
     mock_db.commit.assert_called()
 
-    async with _cache_lock:
-        usage_cache.pop(email, None)
+    await cache.invalidate(email)
 
 
 @pytest.mark.asyncio
@@ -289,13 +296,13 @@ async def test_generic_error_sets_error_entry():
     When probe_usage raises a generic (non-rate-limit) error and the cache is
     empty, the cache entry must have an 'error' field and no usage data.
     """
-    from backend.background import poll_usage_and_switch, usage_cache, _cache_lock
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
 
     email = "error-account@example.com"
 
     # Ensure the cache starts empty for this account
-    async with _cache_lock:
-        usage_cache.pop(email, None)
+    await cache.invalidate(email)
 
     account = _make_account(email)
     mock_ws = AsyncMock()
@@ -313,16 +320,14 @@ async def test_generic_error_sets_error_entry():
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)
 
-    async with _cache_lock:
-        entry = usage_cache.get(email, {})
+    entry = await cache.get_usage_async(email)
 
     assert "error" in entry, "cache entry must have an 'error' key after generic failure"
     assert entry["error"], "error message must be non-empty"
     assert "rate_limited" not in entry, "rate_limited must not appear on a generic error"
 
     # Cleanup
-    async with _cache_lock:
-        usage_cache.pop(email, None)
+    await cache.invalidate(email)
 
 
 @pytest.mark.asyncio

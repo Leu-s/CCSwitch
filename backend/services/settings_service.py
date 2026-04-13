@@ -67,3 +67,31 @@ async def get_int(key: str, default: int, db: AsyncSession) -> int:
         return int(raw)
     except (TypeError, ValueError):
         return default
+
+
+async def get_int_or_none(key: str, db: AsyncSession) -> int | None:
+    """Get an integer setting, returning None if missing or malformed.
+    Use this for nullable foreign-key-style settings (e.g. default_account_id)."""
+    raw = await get_setting(key, "", db)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+async def get_json(key: str, default, db: AsyncSession):
+    """Get a JSON-encoded setting. Returns `default` if missing or unparseable."""
+    raw = await get_setting(key, "", db)
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return default
+
+
+async def set_json(key: str, value, db: AsyncSession) -> None:
+    """Store any JSON-serializable value as a setting."""
+    await set_setting(key, json.dumps(value), db)

@@ -80,19 +80,3 @@ class _UsageCache:
 
 
 cache = _UsageCache()
-
-# Backward-compatible aliases — prefer cache.* directly for new code.
-usage_cache = cache._usage
-token_info_cache = cache._token_info
-_cache_lock = cache._lock
-
-
-async def snapshot_usage_cache() -> dict[str, dict]:
-    """Shallow copy of usage_cache — backward-compatible wrapper."""
-    return await cache.snapshot()
-
-
-async def forget_account(email: str) -> None:
-    """Drop any cached usage and token-info entries for an account that has
-    been deleted. Delegates to cache.invalidate()."""
-    await cache.invalidate(email)

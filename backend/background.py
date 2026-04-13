@@ -15,16 +15,8 @@ from .services import switcher as sw
 from .services import tmux_service
 from .ws import WebSocketManager
 from .config import settings
-# `cache` is used directly throughout this module.  The remaining names are
-# re-exported here so callers that imported them from background keep working.
-from .cache import (  # noqa: F401
-    cache,
-    usage_cache,
-    token_info_cache,
-    _cache_lock,
-    snapshot_usage_cache,
-    forget_account,
-)
+from .cache import cache
+from .services import account_queries as aq
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +195,7 @@ async def _maybe_auto_switch(db, ws: WebSocketManager) -> None:
         return
 
     # Find the current account to get its per-account threshold
-    current_account = await ac.get_account_by_email(current_email, db)
+    current_account = await aq.get_account_by_email(current_email, db)
     if not current_account:
         return
 

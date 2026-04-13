@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import Account, SwitchLog
 from ..ws import WebSocketManager
 from . import account_service as ac
+from . import account_queries as aq
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ async def switch_if_active_disabled(
     """
     from . import settings_service as ss
 
-    if account.email != await asyncio.to_thread(ac.get_active_email):
+    if account.email != await ac.get_active_email_async():
         return
     service_enabled = await ss.get_bool("service_enabled", False, db)
     if not service_enabled:
@@ -58,7 +59,7 @@ async def perform_switch(
     ws: WebSocketManager,
 ) -> None:
     async with _switch_lock:
-        current_email = await asyncio.to_thread(ac.get_active_email)
+        current_email = await ac.get_active_email_async()
 
         # Copy the target account's config dir to ~/.claude/
         await asyncio.to_thread(ac.activate_account_config, target.config_dir)
@@ -66,7 +67,7 @@ async def perform_switch(
         # Log the switch
         from_acc = None
         if current_email:
-            from_acc = await ac.get_account_by_email(current_email, db)
+            from_acc = await aq.get_account_by_email(current_email, db)
 
         log = SwitchLog(
             from_account_id=from_acc.id if from_acc else None,

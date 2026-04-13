@@ -6,7 +6,6 @@ OFF — service_enabled flag is cleared; credentials are left untouched.
 """
 
 import asyncio
-import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -15,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..database import get_db
 from ..schemas import ServiceStatus
 from ..services import account_service as ac
+from ..services import account_queries as aq
 from ..services import settings_service as ss
 from ..services import switcher as sw
 from ..ws import ws_manager
@@ -28,18 +28,10 @@ router = APIRouter(prefix="/api/service", tags=["service"])
 
 @router.get("", response_model=ServiceStatus)
 async def get_service_status(db: AsyncSession = Depends(get_db)):
-    enabled = await ss.get_bool("service_enabled", False, db)
-
-    default_raw = await ss.get_setting("default_account_id", "", db)
-    try:
-        default_id = int(default_raw) if default_raw else None
-    except (ValueError, TypeError):
-        default_id = None
-
     return ServiceStatus(
-        enabled=bool(enabled),
-        active_email=await asyncio.to_thread(ac.get_active_email),
-        default_account_id=default_id,
+        enabled=await ss.get_bool("service_enabled", False, db),
+        active_email=await ac.get_active_email_async(),
+        default_account_id=await ss.get_int_or_none("default_account_id", db),
     )
 
 
@@ -49,23 +41,17 @@ async def get_service_status(db: AsyncSession = Depends(get_db)):
 async def enable_service(db: AsyncSession = Depends(get_db)):
     """Enable the service. Always activates the default or first enabled account."""
     # Idempotency: if already enabled, no-op
-    already_enabled = await ss.get_bool("service_enabled", False, db)
-    if already_enabled:
-        return {"ok": True, "active_email": await asyncio.to_thread(ac.get_active_email)}
+    if await ss.get_bool("service_enabled", False, db):
+        return {"ok": True, "active_email": await ac.get_active_email_async()}
 
-    enabled_accounts = await ac.get_enabled_accounts(db)
-
+    enabled_accounts = await aq.get_enabled_accounts(db)
     if not enabled_accounts:
         raise HTTPException(400, "No enabled accounts available")
 
     await ss.set_setting("service_enabled", "true", db)
 
     # Determine which account to activate (default or first)
-    default_raw = await ss.get_setting("default_account_id", "", db)
-    try:
-        default_id = int(default_raw) if default_raw else None
-    except (ValueError, TypeError):
-        default_id = None
+    default_id = await ss.get_int_or_none("default_account_id", db)
     target = None
     if default_id is not None:
         target = next((a for a in enabled_accounts if a.id == default_id), None)
@@ -85,14 +71,13 @@ async def enable_service(db: AsyncSession = Depends(get_db)):
             "exist yet (benign) or ~/.claude/.claude.json could not be read "
             "(disable will not restore original credentials)."
         )
-    await ss.set_setting("original_credentials_backup", json.dumps(backup), db)
+    await ss.set_json("original_credentials_backup", backup, db)
 
     # Activate the target account
     await sw.perform_switch(target, "manual", db, ws_manager)
-    active_email = target.email
 
-    logger.info("Service enabled — current active email: %s", active_email)
-    return {"ok": True, "active_email": active_email}
+    logger.info("Service enabled — current active email: %s", target.email)
+    return {"ok": True, "active_email": target.email}
 
 
 # ── Disable ────────────────────────────────────────────────────────────────────
@@ -102,11 +87,9 @@ async def disable_service(db: AsyncSession = Depends(get_db)):
     """Disable the service. Restore original credentials if backup exists."""
     await ss.set_setting("service_enabled", "false", db)
 
-    # Restore original credentials from backup if it exists
-    backup_raw = await ss.get_setting("original_credentials_backup", "", db)
-    if backup_raw:
+    backup = await ss.get_json("original_credentials_backup", None, db)
+    if backup:
         try:
-            backup = json.loads(backup_raw)
             await asyncio.to_thread(ac.restore_config_from_backup, backup)
         except Exception as e:
             logger.warning("Failed to restore credentials backup: %s", e)
@@ -123,7 +106,7 @@ async def set_default_account(
     db: AsyncSession = Depends(get_db),
 ):
     """Set the starting account activated when the service is enabled."""
-    account = await ac.get_account_by_id(account_id, db)
+    account = await aq.get_account_by_id(account_id, db)
     if not account:
         raise HTTPException(404, "Account not found")
 

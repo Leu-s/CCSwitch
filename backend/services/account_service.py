@@ -29,6 +29,7 @@ the legacy unhashed Keychain entry — not to $HOME/.claude/.claude.json, which
 Claude Code never reads for OAuth state.
 """
 
+import asyncio
 import getpass
 import json
 import logging
@@ -107,12 +108,6 @@ def active_dir_pointer_path() -> str:
     return os.path.join(os.path.expanduser(settings.state_dir), "active")
 
 
-def make_account_config_dir(session_id: str) -> str:
-    path = os.path.join(accounts_base(), f"account-{session_id}")
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
 # ── Reading credentials / email from a config dir ─────────────────────────────
 
 def _load_json(path: str) -> dict:
@@ -121,12 +116,6 @@ def _load_json(path: str) -> dict:
             return json.load(f)
     except Exception:
         return {}
-
-
-def get_email_from_config_dir(config_dir: str) -> str | None:
-    """Return the emailAddress stored in .claude.json inside config_dir."""
-    data = _load_json(os.path.join(config_dir, ".claude.json"))
-    return (data.get("oauthAccount") or {}).get("emailAddress")
 
 
 # ── Active (system) config helpers ────────────────────────────────────────────
@@ -142,6 +131,12 @@ def get_active_email() -> str | None:
         return email
     legacy = _load_json(os.path.join(active_claude_dir(), ".claude.json"))
     return (legacy.get("oauthAccount") or {}).get("emailAddress")
+
+
+async def get_active_email_async() -> str | None:
+    """Async wrapper for get_active_email — runs the blocking file reads in a
+    worker thread so the event loop stays responsive."""
+    return await asyncio.to_thread(get_active_email)
 
 
 def get_active_config_dir_pointer() -> str | None:
@@ -352,7 +347,19 @@ def activate_account_config(target_config_dir: str) -> None:
          as a plaintext fallback (used when the Keychain is unavailable).
       6. Update ~/.claude-multi/active so the shell-profile snippet picks up
          the new account in brand-new terminals that source it.
+
+    Acquires ``credential_provider._credential_lock`` for the full body so a
+    background token refresh running in another thread cannot interleave
+    between the legacy-Keychain write (step 3) and the pointer update
+    (step 6) — see the lock's docstring in credential_provider.py.
     """
+    from .credential_provider import _credential_lock  # local import avoids cycle
+
+    with _credential_lock:
+        _activate_account_config_locked(target_config_dir)
+
+
+def _activate_account_config_locked(target_config_dir: str) -> None:
     target_config_dir = os.path.abspath(os.path.expanduser(target_config_dir))
 
     # ── 1. Writeback: previous account → its own config dir ──────────────────
@@ -418,29 +425,6 @@ def activate_account_config(target_config_dir: str) -> None:
     # advanced to a target whose credentials were not fully installed.
     write_active_config_dir(target_config_dir)
 
-
-# ── Login session lifecycle ────────────────────────────────────────────────────
-# Extracted to login_session_service.py; re-exported here for backward compat.
-from .login_session_service import (  # noqa: F401
-    _active_login_sessions,
-    _SESSION_TIMEOUT,
-    _cleanup_expired_sessions,
-    start_login_session,
-    verify_login_session,
-    cleanup_login_session,
-)
-
-
-# ── Query helpers ──────────────────────────────────────────────────────────────
-# Extracted to account_queries.py; re-exported here for backward compatibility.
-from .account_queries import (  # noqa: F401
-    get_account_by_id,
-    get_account_by_email,
-    get_enabled_accounts,
-    get_all_accounts,
-    get_email_to_id_map,
-    save_verified_account,
-)
 
 
 # ── Usage helpers ──────────────────────────────────────────────────────────────

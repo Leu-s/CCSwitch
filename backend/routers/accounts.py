@@ -11,6 +11,8 @@ from ..schemas import AccountUpdate, AccountOut, AccountWithUsage, SwitchLogOut,
 from ..schemas import LoginSessionOut, LoginVerifyResult
 from ..config import settings
 from ..services import account_service as ac
+from ..services import account_queries as aq
+from ..services import login_session_service as ls
 from ..services import switcher as sw
 from ..background import cache
 from ..ws import ws_manager
@@ -25,8 +27,8 @@ router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
 @router.get("", response_model=list[AccountWithUsage])
 async def list_accounts(db: AsyncSession = Depends(get_db)):
-    accounts = await ac.get_all_accounts(db)
-    active_email = await asyncio.to_thread(ac.get_active_email)
+    accounts = await aq.get_all_accounts(db)
+    active_email = await ac.get_active_email_async()
 
     out = []
     for acc in accounts:
@@ -54,7 +56,7 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
 async def start_login():
     """Create an isolated tmux window for authenticating a new Claude account."""
     try:
-        info = await asyncio.to_thread(ac.start_login_session)
+        info = await asyncio.to_thread(ls.start_login_session)
     except Exception as e:
         logger.exception("start_login_session failed")
         raise HTTPException(503, "Could not start login terminal — is tmux running?")
@@ -66,16 +68,16 @@ async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
     """
     Verify that a login session completed and save the account to the database.
     """
-    result = await asyncio.to_thread(ac.verify_login_session, session_id)
+    result = await asyncio.to_thread(ls.verify_login_session, session_id)
     if not result["success"]:
         return LoginVerifyResult(success=False, error=result["error"])
 
     email = result["email"]
     config_dir = result["config_dir"]
 
-    saved = await ac.save_verified_account(email, config_dir, settings.default_account_threshold_pct, db)
+    saved = await aq.save_verified_account(email, config_dir, settings.default_account_threshold_pct, db)
     if saved is None:
-        await asyncio.to_thread(ac.cleanup_login_session, session_id)
+        await asyncio.to_thread(ls.cleanup_login_session, session_id)
         return LoginVerifyResult(success=True, email=email, already_exists=True)
 
     return LoginVerifyResult(success=True, email=email)
@@ -84,7 +86,7 @@ async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
 @router.delete("/cancel-login")
 async def cancel_login(session_id: str):
     """Clean up a login session that was abandoned."""
-    await asyncio.to_thread(ac.cleanup_login_session, session_id)
+    await asyncio.to_thread(ls.cleanup_login_session, session_id)
     return {"ok": True}
 
 
@@ -114,7 +116,7 @@ async def switch_log(
 async def update_account(
     account_id: int, payload: AccountUpdate, db: AsyncSession = Depends(get_db)
 ):
-    account = await ac.get_account_by_id(account_id, db)
+    account = await aq.get_account_by_id(account_id, db)
     if not account:
         raise HTTPException(404, "Account not found")
     for field, value in payload.model_dump(exclude_none=True).items():
@@ -130,7 +132,7 @@ async def update_account(
 
 @router.delete("/{account_id}", status_code=204)
 async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
-    account = await ac.get_account_by_id(account_id, db)
+    account = await aq.get_account_by_id(account_id, db)
     if not account:
         raise HTTPException(404, "Account not found")
 
@@ -139,7 +141,7 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     # If this is the currently active account, switch to another one first.
     # If there is no replacement, clear the active pointer so new shells do
     # not export CLAUDE_CONFIG_DIR to a directory that no longer exists.
-    if account.email == await asyncio.to_thread(ac.get_active_email):
+    if account.email == await ac.get_active_email_async():
         next_acc = await sw.get_next_account(account.email, db)
         if next_acc:
             await sw.perform_switch(next_acc, "manual", db, ws_manager)
@@ -176,7 +178,7 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{account_id}/switch", status_code=200)
 async def manual_switch(account_id: int, db: AsyncSession = Depends(get_db)):
-    account = await ac.get_account_by_id(account_id, db)
+    account = await aq.get_account_by_id(account_id, db)
     if not account:
         raise HTTPException(404, "Account not found")
     await sw.perform_switch(account, "manual", db, ws_manager)

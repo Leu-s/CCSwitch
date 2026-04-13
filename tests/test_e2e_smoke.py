@@ -89,7 +89,7 @@ def test_start_login(client):
         "config_dir": "/tmp/fake-account-abc12345",
         "instructions": "Authenticate in the terminal below. After login completes, click 'Verify & Save'.",
     }
-    with patch("backend.services.account_service.start_login_session", return_value=mock_info):
+    with patch("backend.services.login_session_service.start_login_session", return_value=mock_info):
         resp = client.post("/api/accounts/start-login")
     assert resp.status_code == 200
     data = resp.json()
@@ -104,7 +104,7 @@ def test_verify_login_saves_account(client):
         "email": "smoke@test.com",
         "config_dir": "/tmp/fake-account-abc12345",
     }
-    with patch("backend.services.account_service.verify_login_session", return_value=mock_result):
+    with patch("backend.services.login_session_service.verify_login_session", return_value=mock_result):
         resp = client.post("/api/accounts/verify-login?session_id=abc12345")
     assert resp.status_code == 200
     data = resp.json()
@@ -130,7 +130,7 @@ def test_verify_login_duplicate_returns_success(client):
         "email": "smoke@test.com",
         "config_dir": "/tmp/fake-account-abc12345",
     }
-    with patch("backend.services.account_service.verify_login_session", return_value=mock_result):
+    with patch("backend.services.login_session_service.verify_login_session", return_value=mock_result):
         resp = client.post("/api/accounts/verify-login?session_id=abc12345")
     assert resp.status_code == 200
     assert resp.json()["success"] is True
@@ -138,7 +138,7 @@ def test_verify_login_duplicate_returns_success(client):
 
 def test_cancel_login(client):
     """DELETE /api/accounts/cancel-login should succeed."""
-    with patch("backend.services.account_service.cleanup_login_session"):
+    with patch("backend.services.login_session_service.cleanup_login_session"):
         resp = client.delete("/api/accounts/cancel-login?session_id=doesnotmatter")
     assert resp.status_code == 200
     assert resp.json()["ok"] is True

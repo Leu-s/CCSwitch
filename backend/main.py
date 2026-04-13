@@ -14,6 +14,8 @@ from .config import settings as cfg
 from .database import init_db, AsyncSessionLocal
 from .routers import accounts, settings, tmux, service
 from .services import account_service as ac
+from .services import account_queries as aq
+from .services import login_session_service as ls
 from .services.account_service import build_usage
 from .services import settings_service as ss
 from .services.settings_service import ensure_defaults
@@ -79,7 +81,7 @@ async def lifespan(app: FastAPI):
     active_email = await asyncio.to_thread(ac.get_active_email)
     if active_email:
         async with AsyncSessionLocal() as db:
-            acc = await ac.get_account_by_email(active_email, db)
+            acc = await aq.get_account_by_email(active_email, db)
             if acc:
                 await asyncio.to_thread(ac.write_active_config_dir, acc.config_dir)
                 logger.info("Synced ~/.claude-multi/active → %s", acc.config_dir)
@@ -93,7 +95,7 @@ async def lifespan(app: FastAPI):
         run it in a worker thread to keep the event loop responsive."""
         while True:
             await asyncio.sleep(300)
-            await asyncio.to_thread(ac._cleanup_expired_sessions)
+            await asyncio.to_thread(ls._cleanup_expired_sessions)
 
     tasks = [
         asyncio.create_task(_poll_loop(idle_interval)),
@@ -154,10 +156,10 @@ async def websocket_endpoint(websocket: WebSocket, since: int = 0):
 
         # Send the full state snapshot on first connect or after a buffer gap.
         if since == 0:
-            cache_snapshot = await bg.snapshot_usage_cache()
+            cache_snapshot = await bg_cache.snapshot()
             if cache_snapshot:
                 async with AsyncSessionLocal() as db:
-                    id_map = await ac.get_email_to_id_map(db)
+                    id_map = await aq.get_email_to_id_map(db)
                 snapshot = []
                 for email, usage in cache_snapshot.items():
                     acct_id = id_map.get(email)

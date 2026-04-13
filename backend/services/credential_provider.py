@@ -8,10 +8,29 @@ import json
 import logging
 import os
 import subprocess
+import threading
 
 from ..config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# Serializes every mutation to the four shared credential artefacts:
+#   1. HOME .claude.json                            (written by activate_account_config)
+#   2. Legacy "Claude Code-credentials" Keychain   (written by activate_account_config and save_refreshed_token)
+#   3. Hashed per-dir Keychain                     (written by save_refreshed_token)
+#   4. ~/.claude-multi/active pointer              (written by activate_account_config)
+#
+# A switch (activate_account_config) acquires this lock for the full multi-step
+# dance, and a background token refresh (save_refreshed_token) acquires it for
+# its own Keychain writes.  Without this, a refresh's "is this dir the active
+# one?" check races with the switch's pointer update and can leave the legacy
+# Keychain holding one account's refreshed token while HOME .claude.json holds
+# another account's oauthAccount — exactly the "UI shows X, reality is Y" bug.
+#
+# Re-entrant so activate_account_config can call helpers that also want the
+# lock without deadlocking itself.
+_credential_lock = threading.RLock()
 
 
 def _active_dir_pointer_path() -> str:
@@ -171,7 +190,17 @@ def save_refreshed_token(config_dir: str, access_token: str, expires_at: int | N
     credentials.json, .claude.json) AND then updates the macOS Keychain
     entries so a freshly launched `claude` picks up the new token without
     needing CLAUDE_CONFIG_DIR.
+
+    Acquires ``_credential_lock`` for the full body so a background refresh
+    cannot clobber a concurrent account switch.  See the lock's docstring.
     """
+    with _credential_lock:
+        _save_refreshed_token_locked(config_dir, access_token, expires_at)
+
+
+def _save_refreshed_token_locked(
+    config_dir: str, access_token: str, expires_at: int | None
+) -> None:
     # Update the first applicable credentials file found.  `break` (not
     # `return`) so the Keychain update below still runs.
     for filename in [".credentials.json", "credentials.json", ".claude.json"]:
