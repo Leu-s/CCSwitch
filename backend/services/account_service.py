@@ -14,6 +14,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 import uuid
 
 from ..config import settings
@@ -38,7 +39,7 @@ def accounts_base() -> str:
 
 
 def active_claude_dir() -> str:
-    return os.path.expanduser(settings.claude_config_dir)
+    return os.path.expanduser(settings.active_claude_dir)
 
 
 def make_account_config_dir(session_id: str) -> str:
@@ -90,6 +91,12 @@ def restore_config_from_backup(backup: dict) -> None:
 
 # ── Activation ────────────────────────────────────────────────────────────────
 
+def _active_state_paths() -> tuple[str, str]:
+    """Return (state_dir, active_file_path)."""
+    state_dir = os.path.expanduser(settings.state_dir)
+    return state_dir, os.path.join(state_dir, "active")
+
+
 def _write_active_config_dir(config_dir: str) -> None:
     """
     Write the active account's isolated config_dir to ~/.claude-multi/active.
@@ -98,10 +105,8 @@ def _write_active_config_dir(config_dir: str) -> None:
     This ensures new terminal sessions use the correct account without Keychain gymnastics.
     File is written with mode 0o600 (owner-read/write only) since the path is sensitive.
     """
-    state_dir = os.path.expanduser("~/.claude-multi")
-    active_path = os.path.join(state_dir, "active")
-    import threading
-    tmp_path = f"{active_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    state_dir, active_path = _active_state_paths()
+    tmp_path = f"{active_path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
     try:
         os.makedirs(state_dir, exist_ok=True)
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -111,6 +116,18 @@ def _write_active_config_dir(config_dir: str) -> None:
         logger.debug("Active config dir written to %s", active_path)
     except Exception as e:
         logger.warning("Failed to write active config dir file: %s", e)
+
+
+def clear_active_config_dir() -> None:
+    """Remove ~/.claude-multi/active so new shells fall back to ~/.claude."""
+    _, active_path = _active_state_paths()
+    try:
+        os.remove(active_path)
+        logger.debug("Cleared active config dir file %s", active_path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.warning("Failed to clear active config dir file: %s", e)
 
 
 def activate_account_config(config_dir: str) -> None:
@@ -162,6 +179,22 @@ def activate_account_config(config_dir: str) -> None:
 
 # ── Login session ─────────────────────────────────────────────────────────────
 
+# Tracks in-flight login sessions so orphaned dirs are cleaned up automatically.
+# Maps session_id → creation timestamp (time.time()).
+_active_login_sessions: dict[str, float] = {}
+_SESSION_TIMEOUT = 1800  # 30 min — abandon any session not verified within this window
+
+
+def _cleanup_expired_sessions() -> None:
+    """Remove config dirs for login sessions that were never verified and have timed out."""
+    now = time.time()
+    expired = [sid for sid, ts in list(_active_login_sessions.items()) if now - ts > _SESSION_TIMEOUT]
+    for sid in expired:
+        _active_login_sessions.pop(sid, None)
+        cleanup_login_session(sid)
+        logger.info("Cleaned up orphaned login session dir: account-%s", sid)
+
+
 def start_login_session() -> dict:
     """
     Create a fresh isolated config directory and open a tmux window where the
@@ -169,8 +202,11 @@ def start_login_session() -> dict:
 
     Returns session metadata including the tmux pane target.
     """
+    _cleanup_expired_sessions()
+
     session_id = str(uuid.uuid4())[:8]
     config_dir = make_account_config_dir(session_id)
+    _active_login_sessions[session_id] = time.time()
 
     # Ensure at least one tmux server/session is running so new-window works
     sessions = subprocess.run(
@@ -179,7 +215,7 @@ def start_login_session() -> dict:
     )
     if sessions.returncode != 0 or not sessions.stdout.strip():
         subprocess.run(
-            ["tmux", "new-session", "-d", "-s", "claude-multi"],
+            ["tmux", "new-session", "-d", "-s", settings.tmux_session_name],
             capture_output=True, text=True,
         )
 
@@ -237,11 +273,14 @@ def verify_login_session(session_id: str) -> dict:
             ),
         }
 
+    # Login completed — remove from tracking so it won't be auto-cleaned up
+    _active_login_sessions.pop(session_id, None)
     return {"success": True, "email": email, "config_dir": config_dir}
 
 
 def cleanup_login_session(session_id: str) -> None:
-    """Remove a login session's config dir (called on cancel)."""
+    """Remove a login session's config dir (called on cancel or timeout)."""
+    _active_login_sessions.pop(session_id, None)
     config_dir = os.path.join(accounts_base(), f"account-{session_id}")
     if os.path.isdir(config_dir) and config_dir.startswith(accounts_base()):
         shutil.rmtree(config_dir, ignore_errors=True)

@@ -395,33 +395,67 @@
   .log-table td.email { color: var(--text); font-weight: 500; }
   .log-table .reason-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; background: rgba(124,58,237,0.15); color: #c4b5fd; }
   .log-table .reason-pill.manual { background: rgba(59,130,246,0.15); color: #93c5fd; }
-  .log-pagination { display: flex; flex-direction: column; align-items: stretch; gap: 6px; padding: 8px 0 0; font-size: 11px; color: var(--text-mute); }
-  .log-pagination .page-info { font-variant-numeric: tabular-nums; text-align: center; }
-  .log-pagination .page-btns { display: flex; gap: 5px; }
-  .log-pagination .page-btn { flex: 1; background: var(--card-2); border: 1px solid var(--border); color: var(--text-dim); border-radius: var(--radius-sm); padding: 4px 8px; font-size: 11px; cursor: pointer; transition: background var(--t), border-color var(--t); text-align: center; }
-  .log-pagination .page-btn:hover:not(:disabled) { background: var(--card-hover); border-color: var(--border-strong); }
-  .log-pagination .page-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .log-table .reason-pill.threshold { background: rgba(245,158,11,0.15); color: #fcd34d; }
   .log-table .reason-pill.api_error { background: rgba(239,68,68,0.15); color: #fca5a5; }
 
-  /* Standalone reason pill (sidebar) */
-  .reason-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; background: rgba(124,58,237,0.15); color: #c4b5fd; }
-  .reason-pill.manual { background: rgba(59,130,246,0.15); color: #93c5fd; }
-  .reason-pill.threshold { background: rgba(245,158,11,0.15); color: #fcd34d; }
-  .reason-pill.api_error { background: rgba(239,68,68,0.15); color: #fca5a5; }
-
-  /* Sidebar switch log entries */
-  .log-list { display: flex; flex-direction: column; gap: 5px; }
-  .log-entry {
-    padding: 8px 10px; background: var(--card); border: 1px solid var(--border);
-    border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 3px;
-    animation: fadein 0.2s ease;
+  /* ── Switch Log sidebar ─────────────────────────────────────────────────── */
+  .sl-header { padding: 2px 0 14px; }
+  .sl-title-row { display: flex; align-items: center; gap: 8px; }
+  .sl-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-mute); flex: 1; }
+  .sl-title::after { content: ""; flex: 1; height: 1px; background: linear-gradient(to right, var(--border), transparent); display: none; }
+  .sl-badge { display: inline-flex; align-items: center; justify-content: center; padding: 1px 7px; background: rgba(124,58,237,0.16); color: #c4b5fd; border-radius: 999px; font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .sl-last { margin-top: 4px; font-size: 10.5px; color: var(--text-mute); }
+  .sl-auto-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0 2px; border-top: 1px solid var(--border); margin-top: 8px; }
+  .sl-auto-label { font-size: 11px; color: var(--text-mute); }
+  .sl-feed { display: flex; flex-direction: column; gap: 5px; }
+  .sl-item {
+    padding: 9px 10px 8px 12px; background: var(--card);
+    border: 1px solid var(--border); border-left: 2px solid rgba(124,58,237,0.4);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    display: flex; flex-direction: column; gap: 5px;
+    animation: sl-in 0.22s ease both;
+    transition: background var(--t), border-color var(--t), transform var(--t);
   }
-  .log-entry-time { font-size: 10px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
-  .log-entry-route { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; flex-wrap: wrap; line-height: 1.5; }
-  .log-entry-route .em { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-  .log-entry-route .arrow { color: var(--text-mute); flex-shrink: 0; font-size: 10px; }
-  .log-entry-foot { display: flex; align-items: center; gap: 4px; }
+  .sl-item:hover { background: var(--card-hover); transform: translateX(1px); }
+  .sl-item--manual { border-left-color: rgba(59,130,246,0.5); }
+  .sl-item--manual:hover { border-left-color: rgba(59,130,246,0.9); }
+  .sl-item--threshold { border-left-color: rgba(245,158,11,0.5); }
+  .sl-item--threshold:hover { border-left-color: rgba(245,158,11,0.9); }
+  .sl-item--api_error { border-left-color: rgba(239,68,68,0.5); }
+  .sl-item--api_error:hover { border-left-color: rgba(239,68,68,0.9); }
+  @keyframes sl-in { from { opacity:0; transform:translateX(-5px); } to { opacity:1; transform:translateX(0); } }
+  .sl-item-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .sl-time { font-size: 10px; color: var(--text-mute); font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0; }
+  .sl-route { display: flex; flex-direction: column; gap: 2px; font-size: 10.5px; line-height: 1.4; }
+  .sl-email { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .sl-email--none { color: var(--text-mute); }
+  .sl-email--to { color: var(--text); font-weight: 600; }
+  .sl-route-sep { display: none; }
+  .sl-item-foot { display: flex; }
+  .sl-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 7px 2px 5px; border-radius: 999px;
+    font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+    background: rgba(124,58,237,0.12); color: #c4b5fd;
+  }
+  .sl-pill svg { flex-shrink: 0; }
+  .sl-pill--manual { background: rgba(59,130,246,0.12); color: #93c5fd; }
+  .sl-pill--threshold { background: rgba(245,158,11,0.12); color: #fcd34d; }
+  .sl-pill--api_error { background: rgba(239,68,68,0.12); color: #fca5a5; }
+  .sl-pg { display: flex; align-items: center; gap: 6px; padding: 10px 0 0; }
+  .sl-pg-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; flex-shrink: 0;
+    background: var(--card-2); border: 1px solid var(--border); color: var(--text-dim);
+    border-radius: var(--radius-sm); cursor: pointer;
+    transition: background var(--t), border-color var(--t), color var(--t);
+  }
+  .sl-pg-btn:hover:not(:disabled) { background: var(--card-hover); border-color: var(--border-strong); color: var(--text); }
+  .sl-pg-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .sl-pg-info { flex: 1; text-align: center; font-size: 11px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
+  .sl-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 28px 16px; background: var(--card); border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); }
+  .sl-empty-icon { color: var(--text-mute); opacity: 0.4; }
+  .sl-empty-text { font-size: 12px; color: var(--text-mute); text-align: center; line-height: 1.5; margin: 0; }
 
   .empty-state { padding: 40px 20px; text-align: center; color: var(--text-mute); font-size: 13px; background: var(--card); border: 1px dashed var(--border-strong); border-radius: var(--radius); }
 
@@ -694,10 +728,13 @@
   [data-theme="light"] .log-table .reason-pill.manual { color: #1d4ed8; background: rgba(59,130,246,0.1); }
   [data-theme="light"] .log-table .reason-pill.threshold { color: #92400e; background: rgba(245,158,11,0.1); }
   [data-theme="light"] .log-table .reason-pill.api_error { color: #991b1b; background: rgba(239,68,68,0.1); }
-  [data-theme="light"] .reason-pill { color: #6d28d9; background: rgba(124,58,237,0.1); }
-  [data-theme="light"] .reason-pill.manual { color: #1d4ed8; background: rgba(59,130,246,0.1); }
-  [data-theme="light"] .reason-pill.threshold { color: #92400e; background: rgba(245,158,11,0.1); }
-  [data-theme="light"] .reason-pill.api_error { color: #991b1b; background: rgba(239,68,68,0.1); }
+  [data-theme="light"] .sl-badge { background: rgba(124,58,237,0.1); color: #6d28d9; }
+  [data-theme="light"] .sl-pill { background: rgba(124,58,237,0.08); color: #6d28d9; }
+  [data-theme="light"] .sl-pill--manual { background: rgba(59,130,246,0.08); color: #1d4ed8; }
+  [data-theme="light"] .sl-pill--threshold { background: rgba(245,158,11,0.08); color: #92400e; }
+  [data-theme="light"] .sl-pill--api_error { background: rgba(239,68,68,0.08); color: #991b1b; }
+  [data-theme="light"] .sl-item { background: #fff; border-color: rgba(100,100,180,0.14); }
+  [data-theme="light"] .sl-item:hover { background: #f8f8fe; }
   /* Terminal stays dark regardless of app theme */
   [data-theme="light"] {
     --term-bg:          #0d1117;
@@ -823,17 +860,33 @@
 
       <!-- ── Sidebar: Switch Log ── -->
       <div class="accounts-sidebar">
-        <div class="section-title">Switch Log</div>
-        <div id="switch-log-wrapper">
-          <div id="switch-log-list" class="log-list"></div>
-          <div id="switch-log-pagination" class="log-pagination" style="display:none;">
-            <span class="page-info" id="log-page-info"></span>
-            <div class="page-btns">
-              <button class="page-btn" id="log-prev-btn">← Prev</button>
-              <button class="page-btn" id="log-next-btn">Next →</button>
-            </div>
+        <div class="sl-header">
+          <div class="sl-title-row">
+            <span class="sl-title">Switch Log</span>
+            <span class="sl-badge" id="sl-badge" style="display:none;"></span>
           </div>
-          <div id="switch-log-empty" class="empty-state" style="display:none;margin-top:10px;">No events yet.</div>
+          <div class="sl-auto-row" id="sl-auto-row" style="display:none;">
+            <span class="sl-auto-label">Auto-switch</span>
+            <label class="toggle" title="Automatically switch to the next account when the usage threshold is reached">
+              <input type="checkbox" id="auto-switch-cb" />
+              <span class="track"></span>
+            </label>
+          </div>
+          <div class="sl-last" id="sl-last" style="display:none;"></div>
+        </div>
+        <div id="switch-log-list" class="sl-feed"></div>
+        <div id="switch-log-pagination" class="sl-pg" style="display:none;">
+          <button class="sl-pg-btn" id="log-prev-btn" aria-label="Previous page">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+          </button>
+          <span class="sl-pg-info" id="log-page-info"></span>
+          <button class="sl-pg-btn" id="log-next-btn" aria-label="Next page">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          </button>
+        </div>
+        <div id="switch-log-empty" class="sl-empty" style="display:none;">
+          <svg class="sl-empty-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 16l4-4-4-4"/><path d="M3 12h18"/><path d="M7 8l-4 4 4 4"/></svg>
+          <p class="sl-empty-text">No switches yet.<br>Events will appear here automatically.</p>
         </div>
       </div>
 
@@ -1059,10 +1112,14 @@ function usageClass(pct, threshold = 95) {
 // Toast
 // =============================================================
 function toast(title, body = "", kind = "info", ttl = 4000) {
+  const container = qs("#toast-container");
+  // Cap at 5 concurrent toasts — evict the oldest if at limit
+  const existing = container.querySelectorAll(".toast");
+  if (existing.length >= 5) existing[0].remove();
   const el = document.createElement("div");
   el.className = "toast " + kind;
   el.innerHTML = `<div class="toast-title">${escapeHtml(title)}</div>${body ? `<div class="toast-body">${escapeHtml(body)}</div>` : ""}`;
-  qs("#toast-container").appendChild(el);
+  container.appendChild(el);
   setTimeout(() => { el.classList.add("fade-out"); setTimeout(() => el.remove(), 300); }, ttl);
 }
 
@@ -1130,6 +1187,7 @@ function updateServiceUI(s) {
   const stateLabel = qs("#service-btn-state");
   const flow = qs("#service-btn-flow");
   const currentEl = qs("#service-btn-current");
+  const autoRow = qs("#sl-auto-row");
 
   if (s.enabled) {
     btn.dataset.on = "true";
@@ -1140,12 +1198,43 @@ function updateServiceUI(s) {
     } else {
       flow.hidden = true;
     }
+    if (autoRow) autoRow.style.display = "";
   } else {
     btn.dataset.on = "false";
     stateLabel.textContent = "Switch: OFF";
     flow.hidden = true;
+    if (autoRow) autoRow.style.display = "none";
   }
 }
+
+// =============================================================
+// Auto-switch setting
+// =============================================================
+async function loadAutoSwitchSetting() {
+  try {
+    const settings = await api("/api/settings");
+    const entry = settings.find(s => s.key === "auto_switch_enabled");
+    const enabled = entry ? entry.value !== "false" : true;
+    const cb = qs("#auto-switch-cb");
+    if (cb) cb.checked = enabled;
+  } catch (e) {
+    console.warn("auto-switch setting:", e);
+  }
+}
+
+qs("#auto-switch-cb").addEventListener("change", async (e) => {
+  const val = e.target.checked ? "true" : "false";
+  try {
+    await api("/api/settings/auto_switch_enabled", {
+      method: "PATCH",
+      body: { value: val },
+    });
+    toast(e.target.checked ? "Auto-switch on" : "Auto-switch off", null, "success", 2000);
+  } catch (err) {
+    e.target.checked = !e.target.checked; // revert
+    toast("Update failed", err.message, "error");
+  }
+});
 
 qs("#service-toggle-btn").addEventListener("click", async () => {
   const btn = qs("#service-toggle-btn");
@@ -1489,32 +1578,89 @@ async function loadSwitchLog(page) {
   } catch(e) { console.warn("switch log:",e); }
 }
 
+// ── Switch Log helpers ─────────────────────────────────────────────────────
+
+function relTime(iso) {
+  if (!iso) return "—";
+  try {
+    const diff = Date.now() - new Date(iso).getTime();
+    if (diff < 60000) return "now";
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    if (diff < 604800000) return `${Math.floor(diff / 86400000)}d ago`;
+    return fmtTime(iso);
+  } catch { return "—"; }
+}
+
+
+const REASON_META = {
+  manual: {
+    icon: `<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
+    label: "Manual", cls: "manual"
+  },
+  threshold: {
+    icon: `<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`,
+    label: "Limit", cls: "threshold"
+  },
+  api_error: {
+    icon: `<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+    label: "Error", cls: "api_error"
+  }
+};
+
+function getReasonMeta(reason) {
+  return REASON_META[reason] || { icon: "", label: reason || "—", cls: "" };
+}
+
 function renderSwitchLog() {
   const list = qs("#switch-log-list");
   const empty = qs("#switch-log-empty");
   const pagination = qs("#switch-log-pagination");
+  const badge = qs("#sl-badge");
+  const lastEl = qs("#sl-last");
+
   if (!state.logTotal) {
-    list.innerHTML = ""; empty.style.display = "block"; pagination.style.display = "none"; return;
+    list.innerHTML = "";
+    empty.style.display = "flex";
+    pagination.style.display = "none";
+    badge.style.display = "none";
+    lastEl.style.display = "none";
+    return;
   }
+
+  badge.textContent = state.logTotal;
+  badge.style.display = "";
+  if (state.switchLog.length > 0) {
+    lastEl.textContent = `last · ${relTime(state.switchLog[0].triggered_at)}`;
+    lastEl.style.display = "";
+  }
+
   empty.style.display = "none";
   const totalPages = Math.ceil(state.logTotal / LOG_PER_PAGE);
   pagination.style.display = totalPages > 1 ? "flex" : "none";
-  qs("#log-page-info").textContent = `${state.logPage + 1}/${totalPages} · ${state.logTotal}`;
+  qs("#log-page-info").textContent = `${state.logPage + 1} / ${totalPages}`;
   qs("#log-prev-btn").disabled = state.logPage === 0;
   qs("#log-next-btn").disabled = state.logPage >= totalPages - 1;
-  const byId = new Map(state.accounts.map(a=>[a.id, a.email]));
-  list.innerHTML = state.switchLog.map(row => {
-    const from = row.from_account_id ? (byId.get(row.from_account_id)||`#${row.from_account_id}`) : "—";
-    const to = byId.get(row.to_account_id)||`#${row.to_account_id}`;
-    const reason = String(row.reason||"").toLowerCase();
-    return `<div class="log-entry">
-      <span class="log-entry-time">${escapeHtml(fmtTime(row.triggered_at))}</span>
-      <div class="log-entry-route">
-        <span class="em" title="${escapeHtml(from)}">${escapeHtml(from)}</span>
-        <span class="arrow">→</span>
-        <span class="em" title="${escapeHtml(to)}">${escapeHtml(to)}</span>
+
+  const byId = new Map(state.accounts.map(a => [a.id, a.email]));
+
+  list.innerHTML = state.switchLog.map((row, i) => {
+    const fromEmail = row.from_account_id ? (byId.get(row.from_account_id) || `#${row.from_account_id}`) : null;
+    const toEmail = byId.get(row.to_account_id) || `#${row.to_account_id}`;
+    const reason = String(row.reason || "").toLowerCase();
+    const rm = getReasonMeta(reason);
+    return `<div class="sl-item sl-item--${rm.cls}" style="animation-delay:${i * 25}ms">
+      <div class="sl-item-top">
+        <span class="sl-time" title="${escapeHtml(fmtTime(row.triggered_at))}">${relTime(row.triggered_at)}</span>
+        <span class="sl-pill sl-pill--${rm.cls}">${rm.icon}${escapeHtml(rm.label)}</span>
       </div>
-      <div class="log-entry-foot"><span class="reason-pill ${reason}">${escapeHtml(reason)}</span></div>
+      <div class="sl-route">
+        ${fromEmail
+          ? `<span class="sl-email" title="${escapeHtml(fromEmail)}">${escapeHtml(fromEmail)}</span>`
+          : `<span class="sl-email sl-email--none">—</span>`}
+        <span class="sl-route-sep">›</span>
+        <span class="sl-email sl-email--to" title="${escapeHtml(toEmail)}">${escapeHtml(toEmail)}</span>
+      </div>
     </div>`;
   }).join("");
 }
@@ -1529,6 +1675,17 @@ function prependSwitchLogRow() {
 
 
 qs("#log-prev-btn").addEventListener("click", () => loadSwitchLog(state.logPage - 1));
+
+// Refresh relative timestamps every 30s without a full re-render
+setInterval(() => {
+  if (!state.switchLog.length) return;
+  const lastEl = qs("#sl-last");
+  if (lastEl) lastEl.textContent = `last · ${relTime(state.switchLog[0].triggered_at)}`;
+  const times = qsa(".sl-time");
+  state.switchLog.forEach((row, i) => {
+    if (times[i]) times[i].textContent = relTime(row.triggered_at);
+  });
+}, 30000);
 qs("#log-next-btn").addEventListener("click", () => loadSwitchLog(state.logPage + 1));
 
 // =============================================================
@@ -1571,6 +1728,7 @@ qs("#open-terminal-btn").addEventListener("click", async () => {
       qs("#add-step-2").style.display = "";
       // Poll terminal output
       refreshAddTerminal();
+      if (addTermInterval) { clearInterval(addTermInterval); addTermInterval = null; }
       addTermInterval = setInterval(refreshAddTerminal, 2000);
     } catch(e) { toast("Failed to open terminal", e.message, "error"); }
   });
@@ -1696,6 +1854,11 @@ function closeTerminal() {
   qs("main").style.paddingBottom = "";
   qsa(".pane-item.selected").forEach(el => el.classList.remove("selected"));
 }
+
+window.addEventListener("beforeunload", () => {
+  if (captureInterval) { clearInterval(captureInterval); captureInterval = null; }
+  if (addTermInterval) { clearInterval(addTermInterval); addTermInterval = null; }
+});
 
 function prefillMonitorForm(target, cmd) {
   const nameInput = qs('[name="name"]', qs("#add-monitor-form"));
@@ -2082,6 +2245,18 @@ function connectWs() {
   };
 }
 
+// Keep WebSocket alive with a periodic ping
+let _wsPingInterval = null;
+function _startWsPing() {
+  if (_wsPingInterval) return;
+  _wsPingInterval = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({type:"ping"})); } catch(_) {}
+    }
+  }, 25000);
+}
+_startWsPing();
+
 function scheduleReconnect() {
   wsReconnectAttempts++;
   setTimeout(connectWs, Math.min(15000, 1000 * Math.pow(1.5, wsReconnectAttempts)));
@@ -2169,6 +2344,7 @@ document.addEventListener("keydown", e => {
 (async () => {
   await loadAccounts();
   await loadServiceStatus();
+  await loadAutoSwitchSetting();
   await loadSwitchLog();
   connectWs();
 })();

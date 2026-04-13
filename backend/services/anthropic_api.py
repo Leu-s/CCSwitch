@@ -12,8 +12,8 @@ import httpx
 
 from ..config import settings
 
-MESSAGES_URL = "https://api.anthropic.com/v1/messages"
-REFRESH_URL = "https://platform.claude.com/v1/oauth/token"
+MESSAGES_URL = settings.anthropic_messages_url
+REFRESH_URL = settings.anthropic_refresh_url
 
 # Headers that activate the unified rate-limit response headers
 _HEADERS = {

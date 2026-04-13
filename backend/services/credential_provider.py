@@ -191,8 +191,17 @@ def get_refresh_token_from_config_dir(config_dir: str) -> str | None:
 
 
 def save_refreshed_token(config_dir: str, access_token: str, expires_at: int | None = None) -> None:
-    """Persist a refreshed access token back into the config dir."""
-    for filename in [".credentials.json", "credentials.json"]:
+    """
+    Persist a refreshed access token back into the config dir.
+
+    Writes the first applicable credentials file (.credentials.json,
+    credentials.json, .claude.json) AND then updates the macOS Keychain
+    entries so a freshly launched `claude` picks up the new token without
+    needing CLAUDE_CONFIG_DIR.
+    """
+    # Update the first applicable credentials file found.  `break` (not
+    # `return`) so the Keychain update below still runs.
+    for filename in [".credentials.json", "credentials.json", ".claude.json"]:
         path = os.path.join(config_dir, filename)
         if not os.path.exists(path):
             continue
@@ -201,24 +210,30 @@ def save_refreshed_token(config_dir: str, access_token: str, expires_at: int | N
             data["claudeAiOauth"]["accessToken"] = access_token
             if expires_at is not None:
                 data["claudeAiOauth"]["expiresAt"] = expires_at
-            with open(path, "w") as f:
-                json.dump(data, f, indent=2)
-            return
-        if "accessToken" in data:
+        elif "accessToken" in data:
             data["accessToken"] = access_token
             if expires_at is not None:
                 data["expiresAt"] = expires_at
-            with open(path, "w") as f:
-                json.dump(data, f, indent=2)
-            return
+        else:
+            continue
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+        break
 
-    # Also try .claude.json
-    path = os.path.join(config_dir, ".claude.json")
-    if os.path.exists(path):
-        data = _load_json_safe(path)
-        if "claudeAiOauth" in data:
-            data["claudeAiOauth"]["accessToken"] = access_token
-            if expires_at is not None:
-                data["claudeAiOauth"]["expiresAt"] = expires_at
-            with open(path, "w") as f:
-                json.dump(data, f, indent=2)
+    # Update the macOS Keychain so Claude Code picks up the refreshed token
+    # even when launched fresh without CLAUDE_CONFIG_DIR.
+    try:
+        kc = _read_keychain_credentials(config_dir)
+        if kc:
+            if "claudeAiOauth" in kc:
+                kc["claudeAiOauth"]["accessToken"] = access_token
+                if expires_at is not None:
+                    kc["claudeAiOauth"]["expiresAt"] = expires_at
+            else:
+                kc["accessToken"] = access_token
+                if expires_at is not None:
+                    kc["expiresAt"] = expires_at
+            _write_keychain_credentials(config_dir, kc)
+            _write_keychain_credentials_legacy(kc)
+    except Exception as e:
+        logger.warning("Failed to update Keychain after token refresh for %s: %s", config_dir, e)

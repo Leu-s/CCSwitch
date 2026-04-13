@@ -8,10 +8,11 @@ from ..database import get_db
 from ..models import Account, SwitchLog, Setting
 from ..schemas import AccountUpdate, AccountOut, AccountWithUsage, SwitchLogOut, UsageData
 from ..schemas import LoginSessionOut, LoginVerifyResult
+from ..config import settings
 from ..services import account_service as ac
 from ..services import settings_service as ss
 from ..services import switcher as sw
-from ..background import usage_cache
+from ..background import usage_cache, token_info_cache
 from ..ws import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,13 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
     out = []
     for acc in accounts:
         usage_raw = usage_cache.get(acc.email, {})
-        token_info = ac.get_token_info(acc.config_dir)
+        # Prefer the cached token metadata populated by the background poll
+        # loop.  Only fall back to a direct Keychain/file lookup when the
+        # cache has never been hydrated (e.g., a brand new account that was
+        # just added and /api/accounts is called before the next poll cycle).
+        token_info = token_info_cache.get(acc.email)
+        if token_info is None:
+            token_info = ac.get_token_info(acc.config_dir)
         usage = _build_usage(usage_raw, token_info)
 
         out.append(AccountWithUsage(
@@ -94,11 +101,13 @@ async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
     email = result["email"]
     config_dir = result["config_dir"]
 
-    # Check for duplicate
+    # Check for duplicate — the user re-authenticated an existing account.
+    # Clean up the temporary login config dir so it does not linger, and tell
+    # the UI via already_exists so it can show "already added" instead of "created".
     existing = await db.execute(select(Account).where(Account.email == email))
     if existing.scalars().first():
-        # Don't error — just return success so the UI can surface it
-        return LoginVerifyResult(success=True, email=email)
+        ac.cleanup_login_session(session_id)
+        return LoginVerifyResult(success=True, email=email, already_exists=True)
 
     # Assign next available priority
     max_result = await db.execute(select(func.max(Account.priority)))
@@ -107,7 +116,7 @@ async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
     account = Account(
         email=email,
         config_dir=config_dir,
-        threshold_pct=95.0,
+        threshold_pct=settings.default_account_threshold_pct,
         priority=(max_prio + 1) if max_prio is not None else 0,
     )
     db.add(account)
@@ -178,7 +187,9 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
 
     logger.info("Deleting account %s (id=%d)", account.email, account_id)
 
-    # If this is the currently active account, switch to another one first
+    # If this is the currently active account, switch to another one first.
+    # If there is no replacement, clear the active pointer so new shells do
+    # not export CLAUDE_CONFIG_DIR to a directory that no longer exists.
     if account.email == ac.get_active_email():
         next_result = await db.execute(
             select(Account)
@@ -188,6 +199,8 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
         next_acc = next_result.scalars().first()
         if next_acc:
             await sw.perform_switch(next_acc, "manual", db, ws_manager)
+        else:
+            ac.clear_active_config_dir()
 
     # Clear the default_account_id setting if this was the default
     setting_result = await db.execute(
@@ -201,8 +214,18 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(account)
     await db.commit()
 
-    # Notify all connected clients so their UI removes the card immediately
-    await ws_manager.broadcast({"type": "account_deleted", "id": account_id})
+    # Drop any cached usage/token entries so the deleted account does not
+    # linger in memory forever.
+    usage_cache.pop(account.email, None)
+    token_info_cache.pop(account.email, None)
+
+    # Notify all connected clients so their UI removes the card immediately.
+    # The account is already deleted at this point, so a broadcast failure must
+    # not surface as a 500 — the deletion itself succeeded.
+    try:
+        await ws_manager.broadcast({"type": "account_deleted", "id": account_id})
+    except Exception:
+        logger.warning("Failed to broadcast account_deleted for id=%s", account_id)
 
 
 @router.post("/{account_id}/switch", status_code=200)

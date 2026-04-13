@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 import re as re_module
 
 
@@ -27,9 +27,9 @@ class AccountUpdate(BaseModel):
 
 class UsageData(BaseModel):
     five_hour_pct: Optional[float] = None
-    five_hour_resets_at: Optional[Any] = None
+    five_hour_resets_at: Optional[int] = None
     seven_day_pct: Optional[float] = None
-    seven_day_resets_at: Optional[Any] = None
+    seven_day_resets_at: Optional[int] = None
     error: Optional[str] = None
     rate_limited: Optional[bool] = None  # True when 429 but showing stale data
     # Token metadata (non-secret: expiry timestamp + subscription tier)
@@ -56,6 +56,7 @@ class LoginVerifyResult(BaseModel):
     success: bool
     email: Optional[str] = None
     error: Optional[str] = None
+    already_exists: bool = False
 
 
 # ── Service toggle ─────────────────────────────────────────────────────────────
@@ -106,6 +107,13 @@ class TmuxMonitorCreate(BaseModel):
             except re_module.error as e:
                 raise ValueError(f"Invalid regex pattern: {e}") from e
         return v
+
+
+class TmuxMonitorUpdate(BaseModel):
+    name: Optional[str] = None
+    pattern_type: Optional[str] = None
+    pattern: Optional[str] = None
+    enabled: Optional[bool] = None
 
 
 class TmuxMonitorOut(BaseModel):

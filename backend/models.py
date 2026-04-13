@@ -1,5 +1,5 @@
 from typing import Optional
-from sqlalchemy import Integer, String, Boolean, DateTime, Float, Text
+from sqlalchemy import Integer, String, Boolean, DateTime, Float, Text, Index
 from sqlalchemy.orm import mapped_column, Mapped
 from datetime import datetime, timezone
 from .database import Base
@@ -19,6 +19,10 @@ class Account(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
+    __table_args__ = (
+        Index("ix_accounts_priority_enabled", "priority", "enabled"),
+        Index("ix_accounts_enabled", "enabled"),
+    )
 
 
 class TmuxMonitor(Base):
@@ -28,6 +32,9 @@ class TmuxMonitor(Base):
     pattern_type: Mapped[str] = mapped_column(String(16), default="manual")
     pattern: Mapped[str] = mapped_column(String(255), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    __table_args__ = (
+        Index("ix_tmux_monitors_enabled", "enabled"),
+    )
 
 
 class SwitchLog(Base):
@@ -38,6 +45,9 @@ class SwitchLog(Base):
     reason: Mapped[str] = mapped_column(String(32), nullable=False)
     triggered_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    __table_args__ = (
+        Index("ix_switch_log_triggered_at", "triggered_at"),
     )
 
 

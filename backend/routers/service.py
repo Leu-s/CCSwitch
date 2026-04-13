@@ -8,7 +8,7 @@ OFF — service_enabled flag is cleared; credentials are left untouched.
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,8 +65,19 @@ async def enable_service(db: AsyncSession = Depends(get_db)):
     if not target:
         target = enabled_accounts[0]
 
-    # Backup current credentials before switching
+    # Backup current credentials before switching.
+    # backup_active_config() returns {} when ~/.claude/.claude.json does not
+    # exist (no pre-existing credentials — nothing to restore, which is fine)
+    # OR when the file cannot be read (permission error, etc.).  In the latter
+    # case restore_config_from_backup() will silently no-op, losing the ability
+    # to roll back on disable.  Log a warning so the risk is visible.
     backup = ac.backup_active_config()
+    if not backup:
+        logger.warning(
+            "backup_active_config() returned empty — either no active credentials "
+            "exist yet (benign) or ~/.claude/.claude.json could not be read "
+            "(disable will not restore original credentials)."
+        )
     await ss.set_setting("original_credentials_backup", json.dumps(backup), db)
 
     # Activate the target account
@@ -100,7 +111,10 @@ async def disable_service(db: AsyncSession = Depends(get_db)):
 # ── Default account ────────────────────────────────────────────────────────────
 
 @router.patch("/default-account")
-async def set_default_account(account_id: int, db: AsyncSession = Depends(get_db)):
+async def set_default_account(
+    account_id: int = Query(..., ge=1),
+    db: AsyncSession = Depends(get_db),
+):
     """Set the starting account activated when the service is enabled."""
     r = await db.execute(select(Account).where(Account.id == account_id))
     account = r.scalars().first()

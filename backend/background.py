@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 import httpx
 
 from sqlalchemy import select
@@ -18,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 # In-memory usage cache: {email: usage_dict}
 usage_cache: dict[str, dict] = {}
+# In-memory token metadata cache: {email: token_info_dict}.  Populated here so
+# GET /api/accounts does not need a subprocess Keychain lookup per account on
+# every request (N+1).  New accounts fall back to a direct lookup until the
+# next poll hydrates this cache.
+token_info_cache: dict[str, dict] = {}
 _cache_lock = asyncio.Lock()
 
 
@@ -39,6 +45,40 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                 token = ac.get_access_token_from_config_dir(account.config_dir)
                 if not token:
                     raise ValueError("No access token found in config directory")
+
+                # Hydrate the token_info cache so GET /api/accounts can read
+                # expiry + subscription metadata without spawning a Keychain
+                # subprocess per account per request.
+                token_info = ac.get_token_info(account.config_dir)
+                async with _cache_lock:
+                    token_info_cache[account.email] = token_info
+
+                # Refresh the token if it is about to expire (within 5 minutes).
+                # Anthropic's OAuth response returns `expires_in` (seconds, relative);
+                # Claude Code stores `expiresAt` in milliseconds (JS convention), so we
+                # need to translate before persisting or the next poll will consider
+                # the token still expired and refresh again on every cycle.
+                try:
+                    expires_at_ms = token_info.get("token_expires_at")
+                    if expires_at_ms and time.time() * 1000 > expires_at_ms - 300_000:
+                        refresh_token = ac.get_refresh_token_from_config_dir(account.config_dir)
+                        if refresh_token:
+                            resp = await anthropic_api.refresh_access_token(refresh_token)
+                            new_token = resp.get("access_token")
+                            if new_token:
+                                expires_in = resp.get("expires_in")
+                                new_expires_at_ms = (
+                                    int((time.time() + expires_in) * 1000)
+                                    if expires_in
+                                    else None
+                                )
+                                ac.save_refreshed_token(
+                                    account.config_dir, new_token, new_expires_at_ms
+                                )
+                                token = new_token
+                                logger.info("Refreshed access token for %s", account.email)
+                except Exception as refresh_err:
+                    logger.warning("Token refresh failed for %s: %s", account.email, refresh_err)
 
                 usage = await anthropic_api.probe_usage(token)
                 async with _cache_lock:

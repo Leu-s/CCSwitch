@@ -3,61 +3,53 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 
+from . import background as bg
 from .config import settings as cfg
 from .database import init_db, AsyncSessionLocal
 from .models import Account
-from .ws import ws_manager
+from .routers import accounts, settings, tmux, service
 from .services import account_service as ac
 from .services import settings_service as ss
-import backend.background as bg
-from .background import poll_usage_and_switch
-from .routers import accounts, settings, tmux, service
+from .ws import ws_manager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-_MIN_POLL_INTERVAL = 120    # floor when nobody is watching
-_DEFAULT_POLL_INTERVAL = 300
-_ACTIVE_POLL_INTERVAL = 15  # poll every 15 s while any client is connected
 
 
 async def _get_idle_interval() -> int:
     """Read usage_poll_interval_seconds from DB for the no-client fallback."""
     try:
         async with AsyncSessionLocal() as db:
-            val = await ss.get_int("usage_poll_interval_seconds", _DEFAULT_POLL_INTERVAL, db)
-            return max(val, _MIN_POLL_INTERVAL)
+            val = await ss.get_int("usage_poll_interval_seconds", cfg.poll_interval_idle, db)
+            return max(val, cfg.poll_interval_min)
     except Exception as e:
         logger.warning("Could not read poll interval from DB: %s", e)
-    return _DEFAULT_POLL_INTERVAL
+    return cfg.poll_interval_idle
 
 
 async def _poll_loop(idle_interval: int) -> None:
     """
-    Smart polling loop:
-    - While clients are connected: poll every _ACTIVE_POLL_INTERVAL seconds.
-    - While no client is watching: poll every idle_interval seconds (fallback).
+    Single polling loop:
+    1. Poll immediately at startup so the cache is warm on first WS connect.
+    2. While any client is connected, poll every poll_interval_active seconds.
+    3. When nobody is watching, sleep in 5s chunks up to idle_interval so we
+       react quickly when a client reconnects, then poll once.
     """
+    await bg.poll_usage_and_switch(ws_manager)
     while True:
         if ws_manager.active_connections:
-            await poll_usage_and_switch(ws_manager)
-            await asyncio.sleep(_ACTIVE_POLL_INTERVAL)
+            await asyncio.sleep(cfg.poll_interval_active)
         else:
-            # Nobody watching — sleep in small chunks so we react quickly
-            # when a client connects, but still refresh data occasionally.
             elapsed = 0
             while elapsed < idle_interval and not ws_manager.active_connections:
                 await asyncio.sleep(5)
                 elapsed += 5
-            # If a client just connected the WS handler will send cached data;
-            # do a fresh poll so the next broadcast has up-to-date numbers.
-            await poll_usage_and_switch(ws_manager)
+        await bg.poll_usage_and_switch(ws_manager)
 
 
 @asynccontextmanager
@@ -76,19 +68,18 @@ async def lifespan(app: FastAPI):
                 logger.info("Synced ~/.claude-multi/active → %s", acc.config_dir)
 
     idle_interval = await _get_idle_interval()
-    logger.info("Poll intervals — active: %ds, idle: %ds", _ACTIVE_POLL_INTERVAL, idle_interval)
+    logger.info("Poll intervals — active: %ds, idle: %ds", cfg.poll_interval_active, idle_interval)
 
-    tasks = [
-        asyncio.create_task(poll_usage_and_switch(ws_manager)),
-        asyncio.create_task(_poll_loop(idle_interval)),
-    ]
+    poll_task = asyncio.create_task(_poll_loop(idle_interval))
     logger.info("Server running on port %d", cfg.server_port)
     yield
-    # Shutdown: cancel background tasks
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-    logger.info("Background tasks stopped")
+    # Shutdown: cancel the background poll task
+    poll_task.cancel()
+    try:
+        await poll_task
+    except asyncio.CancelledError:
+        pass
+    logger.info("Background poll task stopped")
 
 
 app = FastAPI(title="Claude Multi-Account Manager", lifespan=lifespan)

@@ -50,10 +50,11 @@ async def test_perform_switch_calls_activate_and_broadcasts():
 
     target = make_account(2, "new@x.com", 1, config_dir="/tmp/fake-account-2")
 
-    mock_db = AsyncMock()
+    mock_db = MagicMock()
     mock_result = MagicMock()
     mock_result.scalars.return_value.first.return_value = None
-    mock_db.execute.return_value = mock_result
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    mock_db.commit = AsyncMock()
 
     mock_ws = AsyncMock()
 
