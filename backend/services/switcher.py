@@ -21,6 +21,28 @@ async def get_next_account(current_email: str, db: AsyncSession) -> Account | No
     return result.scalars().first()
 
 
+async def switch_if_active_disabled(
+    account: "Account",
+    db: AsyncSession,
+    ws: WebSocketManager,
+) -> None:
+    """
+    If the given account is the currently active account, switch away from it.
+    Called when an account is disabled via the API.
+    """
+    from . import account_service as ac
+    from . import settings_service as ss
+
+    if account.email != ac.get_active_email():
+        return
+    service_enabled = await ss.get_bool("service_enabled", False, db)
+    if not service_enabled:
+        return
+    next_acc = await get_next_account(account.email, db)
+    if next_acc:
+        await perform_switch(next_acc, "manual", db, ws)
+
+
 async def perform_switch(
     target: Account,
     reason: str,

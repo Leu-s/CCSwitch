@@ -43,6 +43,7 @@ from sqlalchemy import select
 
 from ..config import settings
 from ..models import Account
+from ..schemas import UsageData
 from .credential_provider import (
     _read_keychain_credentials,
     _write_keychain_credentials,
@@ -497,6 +498,10 @@ def verify_login_session(session_id: str) -> dict:
     Returns {"success": True, "email": "..."} or {"success": False, "error": "..."}.
     """
     config_dir = os.path.join(accounts_base(), f"account-{session_id}")
+    real = os.path.realpath(config_dir)
+    base = os.path.realpath(accounts_base())
+    if not real.startswith(base + os.sep):
+        return {"success": False, "error": "Invalid session ID"}
     if not os.path.isdir(config_dir):
         return {"success": False, "error": "Session not found"}
 
@@ -599,3 +604,12 @@ async def save_verified_account(
     db.add(account)
     await db.commit()
     return account
+
+
+# ── Usage helpers ──────────────────────────────────────────────────────────────
+
+def build_usage(usage_raw: dict, token_info: dict) -> "UsageData | None":
+    """Convert a raw nested usage cache entry + token_info dict into a flat
+    UsageData.  Public wrapper around UsageData.from_raw so callers outside
+    the routers package can access it without importing schemas directly."""
+    return UsageData.from_raw(usage_raw, token_info)

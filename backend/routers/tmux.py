@@ -56,14 +56,22 @@ async def update_monitor(monitor_id: int, payload: TmuxMonitorUpdate, db: AsyncS
     monitor = result.scalars().first()
     if not monitor:
         raise HTTPException(404, "Monitor not found")
-    for field, value in payload.model_dump(exclude_none=True).items():
-        setattr(monitor, field, value)
-    # Re-validate the pattern if the resulting monitor is a regex monitor.
-    if monitor.pattern_type == "regex":
+
+    # Determine effective values after applying the patch (without mutating yet)
+    effective_pattern_type = payload.pattern_type if payload.pattern_type is not None else monitor.pattern_type
+    effective_pattern = payload.pattern if payload.pattern is not None else monitor.pattern
+
+    # Validate BEFORE any mutation
+    if effective_pattern_type == "regex":
         try:
-            re.compile(monitor.pattern)
+            re.compile(effective_pattern)
         except re.error as e:
             raise HTTPException(400, f"Invalid regex pattern: {e}")
+
+    # Apply changes
+    for field, value in payload.model_dump(exclude_none=True).items():
+        setattr(monitor, field, value)
+
     await db.commit()
     await db.refresh(monitor)
     return monitor

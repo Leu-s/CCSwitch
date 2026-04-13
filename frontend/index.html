@@ -1898,11 +1898,6 @@ function renderSessions() {
       </div>
       <button type="button" class="pane-monitor-btn" data-target="${escapeHtml(p.target)}" data-cmd="${escapeHtml(p.command||"")}" title="Add monitor for this pane">+ Monitor</button>
     </div>`).join("");
-  qsa(".pane-item[data-target]").forEach(el => el.addEventListener("click", () => openTerminal(el.dataset.target)));
-  qsa(".pane-monitor-btn").forEach(btn => btn.addEventListener("click", e => {
-    e.stopPropagation();
-    prefillMonitorForm(btn.dataset.target, btn.dataset.cmd);
-  }));
 }
 
 // ── Bottom terminal panel ──────────────────────────────────────────────────
@@ -2043,6 +2038,18 @@ function renderMonitors() {
       </div>
     </div>`).join("");
 }
+
+// Delegated listener for #sessions-list — attached ONCE, handles all renders.
+qs("#sessions-list").addEventListener("click", e => {
+    const monitorBtn = e.target.closest(".pane-monitor-btn");
+    if (monitorBtn) {
+        e.stopPropagation();
+        prefillMonitorForm(monitorBtn.dataset.target, monitorBtn.dataset.cmd);
+        return;
+    }
+    const paneItem = e.target.closest(".pane-item[data-target]");
+    if (paneItem) openTerminal(paneItem.dataset.target);
+});
 
 // Delegated listeners for #monitors-list — attached ONCE, handle all renders.
 // Per-row state (delete confirm timer) is stored in a WeakMap keyed on the wrap element.
@@ -2252,9 +2259,7 @@ function prependEvent(msg) {
         // ── Shell setup warning ─────────────────────────────────────────────────
         async function checkShellStatus() {
             try {
-                const res = await fetch('/api/settings/shell-status');
-                if (!res.ok) return;
-                const { active_file_exists, shell_configured } = await res.json();
+                const { active_file_exists, shell_configured } = await api('/api/settings/shell-status');
                 const warn = document.getElementById('shell-warn');
                 const desc = document.getElementById('shell-warn-desc');
                 if (active_file_exists && shell_configured) {
@@ -2399,32 +2404,11 @@ function scheduleReconnect() {
 
 function updateUsageLive(updates) {
   for (const u of updates) {
-    // Number() coercion: server may send string IDs (e.g. from the connect-time snapshot)
     const acc = state.accounts.find(a => Number(a.id) === Number(u.id) || a.email === u.email);
     if (!acc) continue;
-    // Preserve token metadata loaded from the initial HTTP fetch
-    const prevMeta = acc.usage ? {
-      token_expires_at: acc.usage.token_expires_at,
-      subscription_type: acc.usage.subscription_type,
-    } : {};
-    // rate_limited can be signalled via u.usage.rate_limited OR a "rate limit"-like error string
-    const isRateLimited = (u.usage && u.usage.rate_limited) ||
-      (typeof u.error === "string" && u.error.toLowerCase().includes("rate limit"));
-    if (isRateLimited) {
-      const fh = (u.usage && u.usage.five_hour) || {};
-      const sd = (u.usage && u.usage.seven_day) || {};
-      acc.usage = { five_hour_pct:fh.utilization, five_hour_resets_at:fh.resets_at,
-                    seven_day_pct:sd.utilization, seven_day_resets_at:sd.resets_at,
-                    rate_limited:true, ...prevMeta };
-    } else if (u.error) {
-      acc.usage = { error:u.error, ...prevMeta };
-    } else if (u.usage) {
-      const fh = u.usage.five_hour || {};
-      const sd = u.usage.seven_day || {};
-      acc.usage = { five_hour_pct:fh.utilization, five_hour_resets_at:fh.resets_at,
-                    seven_day_pct:sd.utilization, seven_day_resets_at:sd.resets_at, ...prevMeta };
+    if (u.usage) {
+      acc.usage = u.usage;
     }
-    // Swap only .usage-block — keeps all card event listeners intact
     const card = qs(`.account-card[data-id="${acc.id}"]`);
     if (card) {
       const usageBlock = card.querySelector(".usage-block");

@@ -8,6 +8,7 @@ from sqlalchemy import select
 from .database import AsyncSessionLocal
 from .models import Account, TmuxMonitor
 from .services import account_service as ac
+from .services.account_service import build_usage
 from .services import anthropic_api
 from .services import settings_service as ss
 from .services import switcher as sw
@@ -109,10 +110,17 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
 
                 async with _cache_lock:
                     usage_cache[account.email] = usage
+                token_info = token_info_cache.get(account.email, {})
+                try:
+                    flat = build_usage(usage, token_info)
+                    flat_dict = flat.model_dump() if flat else {}
+                except Exception as _bu_err:
+                    logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
+                    flat_dict = {}
                 updated.append({
                     "id": account.id,
                     "email": account.email,
-                    "usage": usage,
+                    "usage": flat_dict,
                     "error": None,
                 })
             except Exception as e:
@@ -140,10 +148,17 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                         new_entry = {"error": err_str}
                     usage_cache[account.email] = new_entry
 
+                token_info = token_info_cache.get(account.email, {})
+                try:
+                    flat = build_usage(new_entry, token_info)
+                    flat_dict = flat.model_dump() if flat else {"error": err_str}
+                except Exception as _bu_err:
+                    logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
+                    flat_dict = {"error": err_str}
                 updated.append({
                     "id": account.id,
                     "email": account.email,
-                    "usage": new_entry,
+                    "usage": flat_dict,
                     "error": err_str if "error" in new_entry else None,
                 })
 
@@ -166,7 +181,7 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
             logger.warning("WS broadcast failed: %s", _bc_err)
 
         # ── Auto-switch logic ─────────────────────────────────────────────────
-        auto_enabled = await ss.get_bool("auto_switch_enabled", True, db)
+        auto_enabled = await ss.get_bool("auto_switch_enabled", False, db)
 
         if not auto_enabled:
             return

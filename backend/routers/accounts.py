@@ -10,9 +10,9 @@ from ..schemas import AccountUpdate, AccountOut, AccountWithUsage, SwitchLogOut,
 from ..schemas import LoginSessionOut, LoginVerifyResult
 from ..config import settings
 from ..services import account_service as ac
-from ..services import settings_service as ss
+from ..services.account_service import build_usage
 from ..services import switcher as sw
-from ..background import usage_cache, token_info_cache
+from ..background import usage_cache, token_info_cache, _cache_lock
 from ..ws import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -72,26 +72,10 @@ async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
     email = result["email"]
     config_dir = result["config_dir"]
 
-    # Check for duplicate — the user re-authenticated an existing account.
-    # Clean up the temporary login config dir so it does not linger, and tell
-    # the UI via already_exists so it can show "already added" instead of "created".
-    existing = await db.execute(select(Account).where(Account.email == email))
-    if existing.scalars().first():
+    saved = await ac.save_verified_account(email, config_dir, settings.default_account_threshold_pct, db)
+    if saved is None:
         ac.cleanup_login_session(session_id)
         return LoginVerifyResult(success=True, email=email, already_exists=True)
-
-    # Assign next available priority
-    max_result = await db.execute(select(func.max(Account.priority)))
-    max_prio = max_result.scalar()
-
-    account = Account(
-        email=email,
-        config_dir=config_dir,
-        threshold_pct=settings.default_account_threshold_pct,
-        priority=(max_prio + 1) if max_prio is not None else 0,
-    )
-    db.add(account)
-    await db.commit()
 
     return LoginVerifyResult(success=True, email=email)
 
@@ -137,13 +121,8 @@ async def update_account(
     await db.commit()
     await db.refresh(account)
 
-    # If the currently active account was just disabled, switch away from it
-    if payload.enabled is False and account.email == ac.get_active_email():
-        service_enabled = await ss.get_bool("service_enabled", False, db)
-        if service_enabled:
-            next_acc = await sw.get_next_account(account.email, db)
-            if next_acc:
-                await sw.perform_switch(next_acc, "manual", db, ws_manager)
+    if payload.enabled is False:
+        await sw.switch_if_active_disabled(account, db, ws_manager)
 
     return account
 
@@ -184,8 +163,9 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
 
     # Drop any cached usage/token entries so the deleted account does not
     # linger in memory forever.
-    usage_cache.pop(account.email, None)
-    token_info_cache.pop(account.email, None)
+    async with _cache_lock:
+        usage_cache.pop(account.email, None)
+        token_info_cache.pop(account.email, None)
 
     # Notify all connected clients so their UI removes the card immediately.
     # The account is already deleted at this point, so a broadcast failure must

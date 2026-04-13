@@ -14,8 +14,10 @@ from .database import init_db, AsyncSessionLocal
 from .models import Account
 from .routers import accounts, settings, tmux, service
 from .services import account_service as ac
+from .services.account_service import build_usage
 from .services import settings_service as ss
 from .services.settings_service import ensure_defaults
+from .background import token_info_cache
 from .ws import ws_manager
 
 logging.basicConfig(level=logging.INFO)
@@ -117,16 +119,19 @@ async def websocket_endpoint(websocket: WebSocket):
         if cache_snapshot:
             async with AsyncSessionLocal() as db:
                 id_map = await ac.get_email_to_id_map(db)
-            snapshot = [
-                {
-                    "id": id_map[email],
+            snapshot = []
+            for email, usage in cache_snapshot.items():
+                acct_id = id_map.get(email)
+                if acct_id is None:
+                    continue
+                token_info = token_info_cache.get(email, {})
+                flat = build_usage(usage, token_info)
+                snapshot.append({
+                    "id": acct_id,
                     "email": email,
-                    "usage": usage,
+                    "usage": flat.model_dump() if flat else {},
                     "error": usage.get("error"),
-                }
-                for email, usage in cache_snapshot.items()
-                if id_map.get(email) is not None
-            ]
+                })
             await websocket.send_text(
                 json.dumps({"type": "usage_updated", "accounts": snapshot})
             )

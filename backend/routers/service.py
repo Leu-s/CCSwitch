@@ -44,6 +44,11 @@ async def get_service_status(db: AsyncSession = Depends(get_db)):
 @router.post("/enable")
 async def enable_service(db: AsyncSession = Depends(get_db)):
     """Enable the service. Always activates the default or first enabled account."""
+    # Idempotency: if already enabled, no-op
+    already_enabled = await ss.get_bool("service_enabled", False, db)
+    if already_enabled:
+        return {"ok": True, "active_email": ac.get_active_email()}
+
     enabled_accounts = await ac.get_enabled_accounts(db)
 
     if not enabled_accounts:

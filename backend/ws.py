@@ -15,7 +15,7 @@ class WebSocketManager:
 
     async def broadcast(self, data: dict):
         dead = []
-        for connection in self.active_connections:
+        for connection in list(self.active_connections):
             try:
                 await connection.send_text(json.dumps(data))
             except Exception:
