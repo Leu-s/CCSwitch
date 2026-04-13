@@ -31,7 +31,10 @@ async def get_service_status(db: AsyncSession = Depends(get_db)):
     enabled = await ss.get_bool("service_enabled", False, db)
 
     default_raw = await ss.get_setting("default_account_id", "", db)
-    default_id = int(default_raw) if default_raw.isdigit() else None
+    try:
+        default_id = int(default_raw) if default_raw else None
+    except (ValueError, TypeError):
+        default_id = None
 
     return ServiceStatus(
         enabled=bool(enabled),
@@ -59,7 +62,10 @@ async def enable_service(db: AsyncSession = Depends(get_db)):
 
     # Determine which account to activate (default or first)
     default_raw = await ss.get_setting("default_account_id", "", db)
-    default_id = int(default_raw) if default_raw.isdigit() else None
+    try:
+        default_id = int(default_raw) if default_raw else None
+    except (ValueError, TypeError):
+        default_id = None
     target = None
     if default_id is not None:
         target = next((a for a in enabled_accounts if a.id == default_id), None)

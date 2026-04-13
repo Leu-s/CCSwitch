@@ -61,6 +61,11 @@ class _UsageCache:
         """Read without locking — safe from within an already-locked context."""
         return self._token_info.get(email)
 
+    async def get_token_info_async(self, email: str) -> dict | None:
+        """Thread-safe read — acquires lock, safe to call from any context."""
+        async with self._lock:
+            return self._token_info.get(email)
+
     # ── Invalidation ──────────────────────────────────────────────────────
 
     async def invalidate(self, email: str) -> None:

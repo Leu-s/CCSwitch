@@ -12,7 +12,7 @@ from ..schemas import LoginSessionOut, LoginVerifyResult
 from ..config import settings
 from ..services import account_service as ac
 from ..services import switcher as sw
-from ..background import usage_cache, token_info_cache, cache
+from ..background import cache
 from ..ws import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -30,12 +30,12 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
 
     out = []
     for acc in accounts:
-        usage_raw = usage_cache.get(acc.email, {})
+        usage_raw = await cache.get_usage_async(acc.email)
         # Prefer the cached token metadata populated by the background poll
         # loop.  Only fall back to a direct Keychain/file lookup when the
         # cache has never been hydrated (e.g., a brand new account that was
         # just added and /api/accounts is called before the next poll cycle).
-        token_info = token_info_cache.get(acc.email)
+        token_info = await cache.get_token_info_async(acc.email)
         if token_info is None:
             token_info = await asyncio.to_thread(ac.get_token_info, acc.config_dir)
         usage = UsageData.from_raw(usage_raw, token_info)
@@ -56,7 +56,8 @@ async def start_login():
     try:
         info = await asyncio.to_thread(ac.start_login_session)
     except Exception as e:
-        raise HTTPException(500, str(e))
+        logger.exception("start_login_session failed")
+        raise HTTPException(503, "Could not start login terminal — is tmux running?")
     return LoginSessionOut(**info)
 
 
@@ -155,7 +156,11 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
         select(Setting).where(Setting.key == "default_account_id")
     )
     default_setting = setting_result.scalars().first()
-    if default_setting and default_setting.value.isdigit() and int(default_setting.value) == account_id:
+    try:
+        stored_id = int(default_setting.value) if default_setting else None
+    except (ValueError, TypeError):
+        stored_id = None
+    if default_setting and stored_id == account_id:
         default_setting.value = ""
 
     await db.delete(account)

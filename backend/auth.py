@@ -19,7 +19,7 @@ from starlette.responses import JSONResponse
 
 
 # Paths that are always accessible regardless of token.
-_EXEMPT_PREFIXES = ("/health", "/static/")
+_EXEMPT_PREFIXES = ("/health", "/static/", "/src/")
 _EXEMPT_EXACT = {"/"}
 
 

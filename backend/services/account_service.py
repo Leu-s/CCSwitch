@@ -65,9 +65,15 @@ _OAUTH_KEYS = ("oauthAccount", "userID")
 # state accumulated while a user ran `claude` without CLAUDE_CONFIG_DIR is not
 # silently lost. These cover the fields Claude Code writes most often while
 # running: project tracking, mcp state, recent history, onboarding progress.
+#
+# IDENTITY fields (oauthAccount, userID) are intentionally excluded. They live
+# in the account dir from the login flow and must never be written back — if a
+# concurrent switch has already merged a different account's oauthAccount into
+# HOME, reading HOME here would clobber the account dir's identity with the
+# wrong email/UUID. Keeping writeback strictly limited to workspace state
+# preserves the invariant "account_dir/.claude.json.oauthAccount never changes
+# after login".
 _WRITEBACK_KEYS = (
-    "oauthAccount",
-    "userID",
     "projects",
     "mcpServers",
     "hasCompletedOnboarding",
@@ -399,9 +405,19 @@ def activate_account_config(target_config_dir: str) -> None:
         try:
             shutil.copy2(src_creds, os.path.join(claude_dir, ".credentials.json"))
         except Exception as e:
-            logger.debug(".credentials.json fallback copy failed: %s", e)
+            # A copy failure leaves ~/.claude/ without valid credentials.
+            # Re-raise so perform_switch() knows the switch did NOT complete —
+            # the active-dir pointer (step 6) is intentionally skipped, keeping
+            # the previous pointer intact as the best available fallback.
+            logger.error(
+                ".credentials.json copy failed for %s → %s: %s",
+                src_creds, claude_dir, e,
+            )
+            raise
 
     # ── 6. Update active-dir pointer file ────────────────────────────────────
+    # Written AFTER all credential operations succeed so the pointer is never
+    # advanced to a target whose credentials were not fully installed.
     write_active_config_dir(target_config_dir)
 
 

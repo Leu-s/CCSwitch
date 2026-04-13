@@ -189,8 +189,10 @@ def save_refreshed_token(config_dir: str, access_token: str, expires_at: int | N
                 data["expiresAt"] = expires_at
         else:
             continue
-        with open(path, "w") as f:
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp_path, path)
         break
 
     # Update the macOS Keychain so Claude Code picks up the refreshed token

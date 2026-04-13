@@ -11,6 +11,13 @@ from . import account_service as ac
 
 logger = logging.getLogger(__name__)
 
+# Serializes every call to perform_switch.  activate_account_config touches
+# four artefacts (HOME .claude.json, legacy Keychain, ~/.claude-multi/active,
+# and a writeback into the previous dir) that must move together — two
+# concurrent switches can interleave and corrupt an isolated account dir by
+# writing the wrong oauthAccount during writeback.
+_switch_lock = asyncio.Lock()
+
 
 async def get_next_account(current_email: str, db: AsyncSession) -> Account | None:
     result = await db.execute(
@@ -49,31 +56,32 @@ async def perform_switch(
     db: AsyncSession,
     ws: WebSocketManager,
 ) -> None:
-    current_email = await asyncio.to_thread(ac.get_active_email)
+    async with _switch_lock:
+        current_email = await asyncio.to_thread(ac.get_active_email)
 
-    # Copy the target account's config dir to ~/.claude/
-    await asyncio.to_thread(ac.activate_account_config, target.config_dir)
+        # Copy the target account's config dir to ~/.claude/
+        await asyncio.to_thread(ac.activate_account_config, target.config_dir)
 
-    # Log the switch
-    from_acc = None
-    if current_email:
-        from_acc = await ac.get_account_by_email(current_email, db)
+        # Log the switch
+        from_acc = None
+        if current_email:
+            from_acc = await ac.get_account_by_email(current_email, db)
 
-    log = SwitchLog(
-        from_account_id=from_acc.id if from_acc else None,
-        to_account_id=target.id,
-        reason=reason,
-        triggered_at=datetime.now(timezone.utc),
-    )
-    db.add(log)
-    await db.commit()
+        log = SwitchLog(
+            from_account_id=from_acc.id if from_acc else None,
+            to_account_id=target.id,
+            reason=reason,
+            triggered_at=datetime.now(timezone.utc),
+        )
+        db.add(log)
+        await db.commit()
 
-    try:
-        await ws.broadcast({
-            "type": "account_switched",
-            "from": current_email,
-            "to": target.email,
-            "reason": reason,
-        })
-    except Exception as _bc_err:
-        logger.warning("WS broadcast failed: %s", _bc_err)
+        try:
+            await ws.broadcast({
+                "type": "account_switched",
+                "from": current_email,
+                "to": target.email,
+                "reason": reason,
+            })
+        except Exception as _bc_err:
+            logger.warning("WS broadcast failed: %s", _bc_err)

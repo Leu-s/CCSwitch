@@ -17,7 +17,7 @@ from .services import account_service as ac
 from .services.account_service import build_usage
 from .services import settings_service as ss
 from .services.settings_service import ensure_defaults
-from .background import token_info_cache
+from .background import cache as bg_cache
 from .ws import ws_manager
 
 logging.basicConfig(level=logging.INFO)
@@ -43,16 +43,24 @@ async def _poll_loop(idle_interval: int) -> None:
     3. When nobody is watching, sleep in 5s chunks up to idle_interval so we
        react quickly when a client reconnects, then poll once.
     """
-    await bg.poll_usage_and_switch(ws_manager)
-    while True:
-        if ws_manager.active_connections:
-            await asyncio.sleep(cfg.poll_interval_active)
-        else:
-            elapsed = 0
-            while elapsed < idle_interval and not ws_manager.active_connections:
-                await asyncio.sleep(5)
-                elapsed += 5
+    try:
         await bg.poll_usage_and_switch(ws_manager)
+    except Exception as exc:
+        logger.exception("Initial poll failed: %s", exc)
+    while True:
+        try:
+            if ws_manager.active_connections:
+                await asyncio.sleep(cfg.poll_interval_active)
+            else:
+                elapsed = 0
+                while elapsed < idle_interval and not ws_manager.active_connections:
+                    await asyncio.sleep(5)
+                    elapsed += 5
+            await bg.poll_usage_and_switch(ws_manager)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("poll_usage_and_switch raised unexpectedly: %s", exc)
 
 
 @asynccontextmanager
@@ -65,22 +73,24 @@ async def lifespan(app: FastAPI):
 
     # Sync ~/.claude-multi/active on startup so CLAUDE_CONFIG_DIR works in new terminals
     # even before the first switch event occurs.
-    active_email = ac.get_active_email()
+    active_email = await asyncio.to_thread(ac.get_active_email)
     if active_email:
         async with AsyncSessionLocal() as db:
             acc = await ac.get_account_by_email(active_email, db)
             if acc:
-                ac.write_active_config_dir(acc.config_dir)
+                await asyncio.to_thread(ac.write_active_config_dir, acc.config_dir)
                 logger.info("Synced ~/.claude-multi/active → %s", acc.config_dir)
 
     idle_interval = await _get_idle_interval()
     logger.info("Poll intervals — active: %ds, idle: %ds", cfg.poll_interval_active, idle_interval)
 
     async def _cleanup_sessions_loop() -> None:
-        """Periodically clean up expired login sessions (every 5 minutes)."""
+        """Periodically clean up expired login sessions (every 5 minutes).
+        _cleanup_expired_sessions does shutil.rmtree per stale session, so
+        run it in a worker thread to keep the event loop responsive."""
         while True:
             await asyncio.sleep(300)
-            ac._cleanup_expired_sessions()
+            await asyncio.to_thread(ac._cleanup_expired_sessions)
 
     tasks = [
         asyncio.create_task(_poll_loop(idle_interval)),
@@ -150,7 +160,7 @@ async def websocket_endpoint(websocket: WebSocket, since: int = 0):
                     acct_id = id_map.get(email)
                     if acct_id is None:
                         continue
-                    token_info = token_info_cache.get(email, {})
+                    token_info = bg_cache.get_token_info(email) or {}
                     flat = build_usage(usage, token_info)
                     snapshot.append({
                         "id": acct_id,
@@ -164,8 +174,10 @@ async def websocket_endpoint(websocket: WebSocket, since: int = 0):
 
         while True:
             await websocket.receive_text()
-    except (WebSocketDisconnect, Exception):
+    except WebSocketDisconnect:
         pass
+    except Exception as _ws_err:
+        logger.warning("WebSocket handler error: %s", _ws_err)
     finally:
         ws_manager.disconnect(websocket)
 

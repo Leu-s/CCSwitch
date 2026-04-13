@@ -5,7 +5,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_service.db"
 _engine = None  # set by the test_app fixture
@@ -109,12 +109,12 @@ def test_enable_no_accounts_returns_400(client):
 
 
 def test_enable_activates_first_account(client):
-    """Seed one account; POST /enable should call activate_account_config with its config_dir."""
+    """Seed one account; POST /enable should call perform_switch for the seeded account."""
     config_dir = "/tmp/test_config_enable"
     _seed_account(client, email="enable@example.com", config_dir=config_dir)
 
     with patch("backend.services.account_service.backup_active_config", return_value={}) as mock_backup, \
-         patch("backend.services.account_service.activate_account_config") as mock_activate, \
+         patch("backend.services.switcher.perform_switch", new_callable=AsyncMock) as mock_switch, \
          patch("backend.services.account_service.get_active_email", return_value="enable@example.com"):
         resp = client.post("/api/service/enable")
 
@@ -123,7 +123,10 @@ def test_enable_activates_first_account(client):
     assert data["ok"] is True
     assert data["active_email"] == "enable@example.com"
     mock_backup.assert_called_once()
-    mock_activate.assert_called_once_with(config_dir)
+    mock_switch.assert_called_once()
+    # Verify the call was made with the seeded account (first positional arg)
+    switched_account = mock_switch.call_args[0][0]
+    assert switched_account.config_dir == config_dir
 
 
 def test_disable_uses_backup(client):

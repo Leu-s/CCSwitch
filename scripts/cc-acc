@@ -1,4 +1,26 @@
 #!/usr/bin/env bash
+# cc-acc — Claude Code multi-account CLI wrapper
+# Locates the Python interpreter in the project virtualenv, falls back to
+# system python3, and delegates all arguments to cc-acc.py.
 set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/../.venv/bin/python" "$SCRIPT_DIR/cc-acc.py" "$@"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
+
+# Prefer the project venv; fall back to system python3.
+if [[ -x "$VENV_PYTHON" ]]; then
+    PYTHON="$VENV_PYTHON"
+elif command -v python3 &>/dev/null; then
+    PYTHON="$(command -v python3)"
+    # Warn once if running outside the venv (httpx may be missing).
+    echo "warning: .venv not found at $REPO_ROOT/.venv — using system python3 ($PYTHON)" >&2
+    echo "         Run 'uv sync' or 'python3 -m venv .venv && .venv/bin/pip install -e .' to set up the venv." >&2
+else
+    echo "error: no Python interpreter found." >&2
+    echo "       Install Python 3.12+ or create the project venv:" >&2
+    echo "       cd $REPO_ROOT && python3 -m venv .venv && .venv/bin/pip install -e ." >&2
+    exit 1
+fi
+
+exec "$PYTHON" "$SCRIPT_DIR/cc-acc.py" "$@"
