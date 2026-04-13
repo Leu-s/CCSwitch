@@ -1,16 +1,32 @@
+<div align="center">
+
 # Claude Code Multi-Account Manager
 
-**Seamless auto-switching between Claude.ai accounts when you hit rate limits.**
+**Stop hitting Claude rate limits. Start using all your subscriptions.**
 
-![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)
-![Tests](https://img.shields.io/badge/tests-147%20passing-brightgreen)
-![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
-![No build step](https://img.shields.io/badge/frontend-no%20build%20step-orange)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Tests](https://img.shields.io/badge/tests-147%20passing-brightgreen.svg)](#testing)
+[![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#requirements)
+[![Status](https://img.shields.io/badge/status-stable-success.svg)](#project-status)
+[![Build](https://img.shields.io/badge/frontend-no%20build%20step-orange.svg)](#architecture)
 
-A local dashboard that monitors usage across multiple Claude.ai subscription accounts and automatically switches credentials before you hit the rate-limit ceiling. Each account lives in its own isolated `CLAUDE_CONFIG_DIR`; the switch is transparent — `claude` picks up the new account without any manual intervention.
+</div>
+
+If you've ever been deep in a Claude Code session and hit the 5-hour rate limit, you know the pain. **Claude Code Multi-Account Manager** is a local dashboard that watches usage across every Claude.ai subscription you own and silently swaps credentials *before* you run out — so `claude` keeps working without you noticing the switch.
 
 <!-- To add a screenshot: place it in docs/screenshot.png and uncomment below -->
-<!-- ![Dashboard](docs/screenshot.png) -->
+<!-- <p align="center"><img src="docs/screenshot.png" alt="Dashboard" width="800"/></p> -->
+
+### Who is this for?
+
+- Power users running long Claude Code sessions who burn through a single subscription's rate window
+- Teams or solo developers paying for multiple Claude Pro / Max accounts and tired of swapping `CLAUDE_CONFIG_DIR` by hand
+- Anyone who wants a single pane of glass showing five-hour and seven-day utilization across every account they own
+
+### How it feels
+
+You're refactoring a service. The dashboard sits in a tab. Around hour 4, the active account's usage bar turns amber. At 95 % the app silently activates your second account, sends a `Continue` to the active `claude` pane via tmux, and a toast tells you what just happened. Your build never stops.
 
 > **macOS only** for the full credential-switching path (Keychain via `security` CLI). Linux falls back to file-only credentials.
 > **tmux required** for the login flow and monitor features.
@@ -33,6 +49,9 @@ A local dashboard that monitors usage across multiple Claude.ai subscription acc
 - [Testing](#testing)
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
+- [Project Status](#project-status)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
 
 ---
 
@@ -413,3 +432,29 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 
 **Database schema error after upgrade**
 - Alembic runs `upgrade head` automatically on every server start — no manual migration step needed.
+
+---
+
+## Project Status
+
+**Stable** — running 24/7 as a personal LaunchAgent on the maintainer's machine. The codebase has been through five rounds of audited refactoring (147 tests, ~85 % coverage of backend services). The public API and database schema are considered stable; breaking changes ship with an Alembic migration.
+
+What is intentionally **not** done:
+- No multi-tenant support — one user per machine
+- No cloud sync — everything lives in local SQLite + `~/.claude-multi/`
+- No Linux Keychain integration — file-based fallback only
+- No GUI for credential targets beyond the dashboard checkbox list
+
+---
+
+## License
+
+This project does not currently ship with a license file, which means the source is **All Rights Reserved** by default under copyright law. You may read the code and run it locally for personal use, but redistribution, derivative works, and commercial use are not granted. If you need an explicit license for your use case, open an issue.
+
+---
+
+## Acknowledgments
+
+- Built on [FastAPI](https://fastapi.tiangolo.com/), [SQLAlchemy](https://www.sqlalchemy.org/), and [uv](https://docs.astral.sh/uv/).
+- Inspired by the daily reality of hitting Claude Code's five-hour rate window mid-refactor.
+- Architecture refined across multiple agent-assisted refactoring passes — see `CLAUDE.md` for the architecture tour aimed at future AI sessions.
