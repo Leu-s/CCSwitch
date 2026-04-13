@@ -21,6 +21,7 @@ This module:
   can fan out the ``oauthAccount``/``userID`` merge across all of them.
 """
 
+import asyncio
 import glob
 import json
 import logging
@@ -149,7 +150,7 @@ async def list_targets(db: AsyncSession) -> list[dict]:
     are also included with ``exists=False`` so the user can clean them up.
     """
     state = await _load_state(db)
-    discovered = discover_targets()
+    discovered = await asyncio.to_thread(discover_targets)
 
     by_canonical = {t["canonical"]: t for t in discovered}
     # Surface DB entries that are no longer discoverable, so the user can see
@@ -174,7 +175,20 @@ async def list_targets(db: AsyncSession) -> list[dict]:
 async def set_target_enabled(
     canonical_path: str, enabled: bool, db: AsyncSession
 ) -> None:
-    """Flip the ``enabled`` flag for a single canonical target."""
+    """Flip the ``enabled`` flag for a single canonical target.
+
+    When enabling, the path MUST appear in the current ``discover_targets()``
+    result set — otherwise a caller with local API access (or a typoing user)
+    could steer the mirror fan-out at arbitrary files (``~/.zshrc``,
+    ``~/.ssh/authorized_keys``, …).  Disabling is always allowed so stale DB
+    entries surfaced by ``list_targets`` as "missing" can be cleared.
+    """
+    if enabled:
+        discovered = {t["canonical"] for t in discover_targets()}
+        if canonical_path not in discovered:
+            raise ValueError(
+                f"canonical path not in discovered targets: {canonical_path}"
+            )
     state = await _load_state(db)
     if enabled:
         state[canonical_path] = True

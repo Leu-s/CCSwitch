@@ -173,6 +173,12 @@ def write_active_config_dir(config_dir: str) -> None:
         _d=$(cat ~/.claude-multi/active 2>/dev/null); [ -n "$_d" ] && export CLAUDE_CONFIG_DIR="$_d"; unset _d
     This ensures new terminal sessions use the correct account without Keychain gymnastics.
     File is written with mode 0o600 (owner-read/write only) since the path is sensitive.
+
+    Raises on any failure — callers in ``_activate_account_config_locked``
+    assume success, so a silently-swallowed write would leave HOME/Keychain
+    holding the new identity while the pointer still references the previous
+    account (the very split-brain state the credential lock was designed to
+    prevent).
     """
     state_dir = os.path.expanduser(settings.state_dir)
     active_path = os.path.join(state_dir, "active")
@@ -192,7 +198,8 @@ def write_active_config_dir(config_dir: str) -> None:
             raise
         logger.debug("Active config dir written to %s", active_path)
     except Exception as e:
-        logger.warning("Failed to write active config dir file: %s", e)
+        logger.error("Failed to write active config dir file: %s", e)
+        raise
 
 
 def _clear_stale_legacy_keychain_entries() -> None:
@@ -239,16 +246,23 @@ def activate_account_config(
     """
     Make ``target_config_dir`` the active account.
 
-    Steps:
-      1. Mirror ``oauthAccount`` + ``userID`` from ``target_config_dir/.claude.json``
-         into every file in ``enabled_credential_targets`` (canonical paths).
-         With an empty list, no ``.claude.json`` files outside the isolated
-         account dir are touched.
-      2. If any enabled target is a system-default location
-         (``$HOME/.claude.json`` or ``$HOME/.claude/.claude.json``), also:
-           - write the legacy ``Claude Code-credentials`` Keychain entry,
-           - clean stale Keychain entries left by older Claude Code versions,
-           - copy ``.credentials.json`` into ``~/.claude/`` as plaintext fallback.
+    Steps (order matters — the failure-prone credential install runs FIRST so
+    the identity mirror and pointer are only reached when the credentials
+    were actually installed):
+
+      1. If any enabled target is a system-default location
+         (``$HOME/.claude.json`` or ``$HOME/.claude/.claude.json``):
+           a. Atomically copy ``.credentials.json`` into ``~/.claude/`` via a
+              tmp file + ``os.replace`` in the same directory.  A failure
+              here raises BEFORE any identity state is touched, so the
+              previous account stays intact.
+           b. Write the legacy ``Claude Code-credentials`` Keychain entry.
+           c. Clean stale Keychain entries left by older Claude Code versions.
+      2. Mirror ``oauthAccount`` + ``userID`` from
+         ``target_config_dir/.claude.json`` into every file in
+         ``enabled_credential_targets`` (canonical paths).  With an empty
+         list, no ``.claude.json`` files outside the isolated account dir
+         are touched.
       3. Update ``~/.claude-multi/active`` so the shell-profile snippet picks
          up the new account in brand-new terminals that source it.
 
@@ -272,6 +286,27 @@ def activate_account_config(
         )
 
 
+def _atomic_copy_credentials(src: str, dst: str) -> None:
+    """Copy ``src`` → ``dst`` via a same-dir tmp file + ``os.replace``.
+
+    Matches the tmp-path pattern in ``write_active_config_dir`` (pid + tid
+    suffix).  On any exception the tmp file is unlinked so failed attempts
+    do not leave junk behind.  The source is copied with ``shutil.copy2``
+    into the tmp path so metadata (mode/mtime) is preserved, exactly like
+    the previous single-step ``shutil.copy2`` call.
+    """
+    tmp = f"{dst}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def _activate_account_config_locked(
     target_config_dir: str, enabled_targets: list[str]
 ) -> dict:
@@ -279,15 +314,29 @@ def _activate_account_config_locked(
 
     target_config_dir = os.path.abspath(os.path.expanduser(target_config_dir))
 
-    # ── 1. Mirror identity keys into every user-enabled target file ──────────
-    mirror_summary = ct.mirror_oauth_into_targets(target_config_dir, enabled_targets)
-
-    # ── 2. System-default hooks (legacy Keychain + plaintext fallback) ───────
+    # ── 1. System-default hooks (plaintext copy + legacy Keychain) ───────────
+    # Run the FAILURE-PRONE credential install BEFORE any identity mirroring
+    # so a copy failure cannot leave HOME/.claude.json or the Keychain holding
+    # the new identity while the pointer still points at the previous account.
     system_defaults = _system_default_canonicals()
     system_default_enabled = bool(set(enabled_targets) & system_defaults)
 
     keychain_written = False
     if system_default_enabled:
+        claude_dir = active_claude_dir()
+        try:
+            os.makedirs(claude_dir, exist_ok=True)
+        except Exception:
+            pass
+        src_creds = os.path.join(target_config_dir, ".credentials.json")
+        if os.path.exists(src_creds):
+            # Atomic copy — raises on failure so steps 2 + 3 never run and
+            # the previous pointer/HOME identity stay as the best available
+            # fallback.
+            _atomic_copy_credentials(
+                src_creds, os.path.join(claude_dir, ".credentials.json")
+            )
+
         kc = _read_keychain_credentials(target_config_dir)
         if kc:
             keychain_written = _write_keychain_credentials(
@@ -307,25 +356,8 @@ def _activate_account_config_locked(
             )
         _clear_stale_legacy_keychain_entries()
 
-        claude_dir = active_claude_dir()
-        try:
-            os.makedirs(claude_dir, exist_ok=True)
-        except Exception:
-            pass
-        src_creds = os.path.join(target_config_dir, ".credentials.json")
-        if os.path.exists(src_creds):
-            try:
-                shutil.copy2(
-                    src_creds, os.path.join(claude_dir, ".credentials.json")
-                )
-            except Exception as e:
-                # Re-raise so the pointer write below is skipped — the
-                # previous pointer stays as the best available fallback.
-                logger.error(
-                    ".credentials.json copy failed for %s → %s: %s",
-                    src_creds, claude_dir, e,
-                )
-                raise
+    # ── 2. Mirror identity keys into every user-enabled target file ──────────
+    mirror_summary = ct.mirror_oauth_into_targets(target_config_dir, enabled_targets)
 
     # ── 3. Update active-dir pointer file ────────────────────────────────────
     # Written AFTER credential operations so the pointer is never advanced to
@@ -401,7 +433,7 @@ async def build_ws_snapshot(db) -> list[dict]:
         acct_id = id_map.get(email)
         if acct_id is None:
             continue
-        token_info = _cache.get_token_info(email) or {}
+        token_info = await _cache.get_token_info_async(email) or {}
         flat = build_usage(usage, token_info)
         snapshot.append({
             "id": acct_id,

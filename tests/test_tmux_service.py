@@ -64,7 +64,6 @@ async def test_capture_pane():
     "Claude usage limit reached. Try again at 18:00.",
     "  rate limit exceeded — please wait",
     "RATE_LIMIT_ERROR returned by API",
-    "HTTP 429 Too Many Requests",
     "Approaching usage limit (95%)",
     "API Error: Overloaded — try again later",
 ])
@@ -143,8 +142,8 @@ async def test_wake_records_per_pane_errors_without_aborting():
     from backend.services import tmux_service as ts
 
     panes = [
-        {"target": "good:0.0"},
-        {"target": "bad:0.0"},
+        {"target": "good:0.0", "command": "claude"},
+        {"target": "bad:0.0", "command": "claude"},
     ]
     captures = {
         "good:0.0": "rate limit reached",

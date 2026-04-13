@@ -9,12 +9,16 @@ A local FastAPI dashboard that lets you keep several Claude.ai subscription
 accounts, each in its own isolated `CLAUDE_CONFIG_DIR`.  It polls Anthropic's
 `/v1/messages` endpoint with a near-empty probe just to read the unified
 rate-limit headers, and when the active account approaches its 5-hour window
-limit (or gets rate-limited) it auto-switches to the next eligible account
-(credentials are copied into `~/.claude/` and the macOS Keychain so a fresh
-`claude` run picks the change up immediately).  Optionally, after every
-switch a tmux nudge scan sends a configurable message to any pane whose
-recent output matches a rate-limit notice, so already-running Claude Code
-sessions resume work with the freshly-mirrored credentials.
+limit (or gets rate-limited) it auto-switches to the next eligible account.
+On every switch the dashboard mirrors the active account's identity into any
+user-opted-in `.claude.json` files ("credential targets") and — when a
+system-default target is enabled — also rewrites the legacy
+`Claude Code-credentials` Keychain entry and `~/.claude/.credentials.json`
+so a fresh `claude` run picks up the change without `CLAUDE_CONFIG_DIR` set.
+Optionally, after every switch a tmux nudge scan sends a configurable
+message to any **claude** pane whose recent output matches a rate-limit
+notice, so already-running Claude Code sessions resume work with the
+freshly-mirrored credentials.
 
 ## Layout
 
@@ -37,17 +41,22 @@ backend/
   services/
     credential_provider.py  CANONICAL: Keychain read/write, _load_json_safe,
                             active_dir_pointer_path, _credential_lock (RLock)
-    account_service.py      activate_account_config (6-step), backup/restore,
-                            path helpers — imports shared utils from credential_provider
+    account_service.py      activate_account_config (credentials→mirror→pointer),
+                            backup/restore, path helpers — imports shared utils
+                            from credential_provider
     account_queries.py      DB query helpers (get_by_id, get_by_email, etc.)
-    login_session_service.py  isolated add-account login sessions (+RLock)
-    credential_targets.py   discover .claude.json targets + JSON settings row
+    login_session_service.py  isolated add-account login sessions (+RLock,
+                              subprocess timeouts)
+    credential_targets.py   discover .claude.json targets, JSON settings row,
+                            mirror_oauth_into_targets — validated opt-in list
     anthropic_api.py   probe_usage() + refresh_access_token()
     switcher.py        get_next_account() + perform_switch() + maybe_auto_switch
-                       (+ _switch_lock asyncio)
+                       (+ _switch_lock asyncio); fires tmux_service.fire_nudge()
+                       after every switch
     settings_service.py  typed get/set for Setting rows (bool/int/int_or_none/json)
     tmux_service.py    list_panes, send_keys, capture_pane, looks_stalled,
-                        wake_stalled_sessions, fire_nudge (post-switch)
+                        wake_stalled_sessions, fire_nudge — nudges only panes
+                        whose pane_current_command looks like `claude`
 frontend/
   index.html           HTML shell (Accounts page + Settings page + Add-account modal)
   src/
@@ -89,25 +98,36 @@ tests/
    probes `/v1/messages` for rate-limit headers, stores the result in
    `cache` (a `_UsageCache` singleton in `cache.py`), and caches `token_info`
    so `GET /api/accounts` does not fan out Keychain subprocess calls per row.
-4. If the active account crosses its `threshold_pct`, it picks the next
-   enabled **non-stale** account by priority, calls `switcher.perform_switch`, which
-   copies credentials into `~/.claude/`, rewrites both Keychain entries (the
-   hashed per-config-dir one and the legacy no-hash one), and writes
-   `~/.claude-multi/active`.
+4. If the active account crosses its `threshold_pct` (or came back 429), it
+   picks the next enabled **non-stale** account by priority, calls
+   `switcher.perform_switch`, and then fires `tmux_service.fire_nudge()` as
+   a background task to kick any stalled claude panes.
 5. Every outcome is broadcast over `/ws` so the SPA updates live.
 
-## Account switching = four artefacts
+## Account switching = four artefacts (ordered!)
 
-`account_service.activate_account_config()` keeps these in sync so any fresh
-`claude` invocation picks up the current account even without
-`CLAUDE_CONFIG_DIR` in the environment:
+`account_service.activate_account_config()` writes four pieces of state.
+The **step order matters** — the failure-prone step runs FIRST so a mid-switch
+exception cannot leave the system in a split-brain state:
 
-1. Credential files (`.credentials.json`, `credentials.json`, `.claude.json`)
-   copied into `~/.claude/`.
-2. Keychain entry keyed by `sha256(~/.claude)[:8]` (hashed per-dir service).
-3. Legacy `Claude Code-credentials` Keychain entry (no hash).
-4. `~/.claude-multi/active` — a plain file the shell integration reads to
-   export `CLAUDE_CONFIG_DIR` for new terminals.
+1. **Atomic `.credentials.json` copy** into `~/.claude/` (tmp-in-same-dir +
+   `os.replace`). Runs only when a system-default credential target is
+   enabled. Most likely step to fail (disk full, permission denied), so it
+   runs before anything else is touched.
+2. **Legacy `Claude Code-credentials` Keychain entry** rewritten, and any
+   stale `claude-code`/`claude-code-user`/`root` leftover entries deleted.
+   Runs only when a system-default credential target is enabled.
+3. **Mirror `oauthAccount` + `userID`** from the new account's `.claude.json`
+   into every user-opted-in credential target file (atomic write, 0o600).
+   Other keys in each target file (projects, MCP state, etc.) are preserved.
+4. **`~/.claude-multi/active` pointer** — the last write. The shell
+   integration reads this to export `CLAUDE_CONFIG_DIR` for new terminals.
+   Writes are atomic and now re-raise on failure instead of silently
+   swallowing — callers treat the switch as failed if this step raises.
+
+The per-config-dir hashed Keychain entry (`sha256(config_dir)[:8]`) is
+written once at account creation, not per switch, and is read by
+`credential_provider` on every token refresh.
 
 ## Constraints
 

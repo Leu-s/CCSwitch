@@ -17,6 +17,7 @@ control the whole feature.
 
 import asyncio
 import logging
+import os
 import re
 
 from ..database import AsyncSessionLocal
@@ -37,7 +38,6 @@ _STALL_PATTERNS = re.compile(
     r"|claude.+limit reached"
     r"|rate limit(ed| exceeded| reached)?"
     r"|rate_limit_error"
-    r"|429"
     r"|api error.*overloaded"
     r"|try again later"
     r")",
@@ -145,9 +145,34 @@ def looks_stalled(capture: str) -> bool:
     return bool(_STALL_PATTERNS.search(capture))
 
 
+def _looks_like_claude_pane(command: str) -> bool:
+    """True if ``command`` (from ``pane_current_command``) looks like a Claude
+    Code process.  Case-insensitive prefix match on the basename so absolute
+    paths (``/usr/local/bin/claude``) and wrapper invocations
+    (``python -m claude``) both count, while a regular ``zsh``/``bash`` pane
+    does not.
+
+    Used by ``wake_stalled_sessions`` so a stray rate-limit substring in a
+    shell pane's scrollback does not cause us to type the nudge message into
+    that shell (which would execute it as a command — self-footgun).
+    """
+    if not command:
+        return False
+    cmd = command.strip().lower()
+    # Strip a leading directory so "/usr/local/bin/claude" matches.
+    basename = os.path.basename(cmd.split()[0]) if cmd else ""
+    if basename.startswith("claude"):
+        return True
+    # Handle "python -m claude" style wrappers.
+    tokens = cmd.split()
+    if len(tokens) >= 3 and tokens[0].startswith("python") and tokens[1] == "-m":
+        return tokens[2].startswith("claude")
+    return False
+
+
 async def wake_stalled_sessions(message: str) -> dict:
     """Scan every tmux pane on the box and send ``message`` to each one whose
-    recent output matches a rate-limit notice.
+    recent output matches a rate-limit notice AND is running ``claude``.
 
     Returns a summary dict suitable for logging:
 
@@ -165,6 +190,16 @@ async def wake_stalled_sessions(message: str) -> dict:
     if not message:
         return summary
 
+    # Defensive length cap — the router already validates ALLOWED_KEYS, but
+    # defense in depth is cheap and prevents us from blasting an arbitrarily
+    # long string into every matching pane.
+    if len(message) > 256:
+        logger.warning(
+            "tmux nudge message too long (%d chars) — truncating to 256",
+            len(message),
+        )
+        message = message[:256]
+
     panes = await list_panes()
     summary["scanned"] = len(panes)
 
@@ -172,13 +207,20 @@ async def wake_stalled_sessions(message: str) -> dict:
         target = pane.get("target")
         if not target:
             continue
+        command = pane.get("command") or ""
+        if not _looks_like_claude_pane(command):
+            logger.debug(
+                "tmux nudge: skipping %s — not a claude pane (command=%r)",
+                target, command,
+            )
+            continue
         try:
             capture = await capture_pane(target)
             if not looks_stalled(capture):
                 continue
             await send_keys(target, message, press_enter=True)
             summary["nudged"].append(target)
-            logger.info("tmux nudge sent to %s (%s)", target, pane.get("command"))
+            logger.info("tmux nudge sent to %s (%s)", target, command)
         except Exception as e:
             summary["errors"].append({"target": target, "error": str(e)})
             logger.warning("tmux nudge failed for %s: %s", target, e)

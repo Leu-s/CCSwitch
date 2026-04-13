@@ -169,17 +169,57 @@ async def test_list_targets_joins_discovery_with_state(fake_home, db):
 async def test_list_targets_surfaces_missing_stored_entry(fake_home, db):
     """A target that was once enabled but has since been deleted from disk
     must still show up in the list (with exists=False) so the user can
-    remove it from the enabled set."""
+    remove it from the enabled set.
+
+    ``set_target_enabled`` now rejects paths that are not in the current
+    discovery set, so the realistic shape of this scenario is "user enabled
+    a file that Claude Code has since deleted".  We simulate that by saving
+    the phantom entry directly through ``_save_state`` (bypassing the
+    enable-time validation), then verify ``list_targets`` still surfaces it
+    as "missing"."""
     from backend.services import credential_targets as ct
 
     phantom = "/does/not/exist/.claude.json"
     async for session in db():
-        await ct.set_target_enabled(phantom, True, session)
+        await ct._save_state({phantom: True}, session)
         listed = await ct.list_targets(session)
 
     phantom_entry = next(t for t in listed if t["canonical"] == phantom)
     assert phantom_entry["exists"] is False
     assert phantom_entry["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_set_target_enabled_rejects_non_discovered_path(fake_home, db):
+    """Enabling a path that is NOT in the discovery result set must raise
+    ValueError — otherwise a caller with local API access could steer the
+    mirror fan-out at ``~/.zshrc``, ``~/.ssh/authorized_keys``, etc."""
+    from backend.services import credential_targets as ct
+
+    attacker = str(fake_home / ".ssh" / "authorized_keys")
+    async for session in db():
+        with pytest.raises(ValueError, match="not in discovered targets"):
+            await ct.set_target_enabled(attacker, True, session)
+        # And the attacker path was NOT persisted.
+        enabled = await ct.enabled_canonical_paths(session)
+        assert attacker not in enabled
+
+
+@pytest.mark.asyncio
+async def test_set_target_enabled_disable_allows_stale_path(fake_home, db):
+    """Disabling must always be allowed so stale DB entries surfaced by
+    ``list_targets`` as "missing" can be cleared, even after the file has
+    been deleted from disk."""
+    from backend.services import credential_targets as ct
+
+    phantom = "/does/not/exist/.claude.json"
+    async for session in db():
+        # Prime the state map without going through the enable-time check.
+        await ct._save_state({phantom: True}, session)
+        # Disabling the stale entry must succeed.
+        await ct.set_target_enabled(phantom, False, session)
+        enabled = await ct.enabled_canonical_paths(session)
+        assert phantom not in enabled
 
 
 # ── Mirror writes ──────────────────────────────────────────────────────────

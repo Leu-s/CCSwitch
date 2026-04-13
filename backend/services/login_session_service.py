@@ -91,16 +91,28 @@ def start_login_session() -> dict:
     with _sessions_lock:
         _active_login_sessions[session_id] = time.time()
 
-    # Ensure at least one tmux server/session is running so new-window works
-    sessions = subprocess.run(
-        ["tmux", "list-sessions", "-F", "#{session_name}"],
-        capture_output=True, text=True,
-    )
-    if sessions.returncode != 0 or not sessions.stdout.strip():
-        subprocess.run(
-            ["tmux", "new-session", "-d", "-s", settings.tmux_session_name],
-            capture_output=True, text=True,
+    # Ensure at least one tmux server/session is running so new-window works.
+    # These two calls are best-effort setup; a hung tmux server that times out
+    # here is logged and we fall through to new-window, which has check=True
+    # and will surface any real problem to the caller as a 500.
+    try:
+        sessions = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=10,
         )
+        no_sessions = sessions.returncode != 0 or not sessions.stdout.strip()
+    except subprocess.TimeoutExpired:
+        logger.warning("tmux list-sessions timed out — falling through")
+        no_sessions = True
+
+    if no_sessions:
+        try:
+            subprocess.run(
+                ["tmux", "new-session", "-d", "-s", settings.tmux_session_name],
+                capture_output=True, text=True, timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("tmux new-session timed out — falling through")
 
     result = subprocess.run(
         [
@@ -108,7 +120,7 @@ def start_login_session() -> dict:
             "-P", "-F", "#{session_name}:#{window_index}.#{pane_index}",
             "-n", f"add-acct",
         ],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, timeout=10,
     )
     pane_target = result.stdout.strip()
 
@@ -116,7 +128,7 @@ def start_login_session() -> dict:
     subprocess.run(
         ["tmux", "send-keys", "-t", pane_target,
          f"CLAUDE_CONFIG_DIR={config_dir} claude", "Enter"],
-        check=True, capture_output=True,
+        check=True, capture_output=True, timeout=10,
     )
 
     return {

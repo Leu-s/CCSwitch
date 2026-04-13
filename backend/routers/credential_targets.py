@@ -47,6 +47,10 @@ async def set_credential_target(
         raise HTTPException(status_code=400, detail="canonical path required")
     try:
         await ct.set_target_enabled(canonical, payload.enabled, db)
+    except ValueError as e:
+        # Rejected canonical path (not in discovery) — surface as 400 so the
+        # UI can show a validation error instead of a generic server error.
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.exception("failed to update credential target %s", canonical)
         raise HTTPException(status_code=500, detail=str(e)) from e

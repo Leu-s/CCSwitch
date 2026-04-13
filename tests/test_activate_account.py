@@ -237,6 +237,44 @@ def test_keychain_write_failure_does_not_advance_pointer(fake_home, fake_keychai
     assert ptr_path.read_text().strip() == str(prev)
 
 
+def test_copy_failure_leaves_mirror_identity_untouched(fake_home, fake_keychain, monkeypatch):
+    """Fix C2 invariant: when the ``.credentials.json`` copy step raises,
+    HOME ``.claude.json`` must still hold the PREVIOUS account's identity —
+    the reorder establishes that the mirror write only runs after the
+    failure-prone copy succeeds, so a disk-full error cannot leave the dash
+    in a half-switched split-brain state."""
+    from backend.services import account_service as ac
+
+    prev = make_account_dir(fake_home, "prev", "prev@x.com", "tok-prev", fake_keychain)
+    new = make_account_dir(fake_home, "new", "new@x.com", "tok-new", fake_keychain)
+    (new / ".credentials.json").write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": "tok-new"}})
+    )
+
+    targets = [_home_canonical(fake_home)]
+    # Activate A so HOME .claude.json + pointer + legacy Keychain hold A.
+    ac.activate_account_config(str(prev), targets)
+    ptr_path = fake_home / ".claude-multi" / "active"
+    home_json = fake_home / ".claude.json"
+    assert ptr_path.read_text().strip() == str(prev)
+    assert json.loads(home_json.read_text())["oauthAccount"]["emailAddress"] == "prev@x.com"
+
+    # Force shutil.copy2 to raise — the atomic copy step runs before mirror.
+    def failing_copy(src, dst, *a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("backend.services.account_service.shutil.copy2", failing_copy)
+
+    with pytest.raises(OSError, match="disk full"):
+        ac.activate_account_config(str(new), targets)
+
+    # Pointer still points at the previous account (existing invariant).
+    assert ptr_path.read_text().strip() == str(prev)
+    # NEW invariant: HOME .claude.json still has the previous identity — the
+    # mirror step was never reached because the copy raised first.
+    assert json.loads(home_json.read_text())["oauthAccount"]["emailAddress"] == "prev@x.com"
+
+
 # ── Tests: no targets enabled (default — nothing outside isolated dir) ─────
 
 
