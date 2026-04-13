@@ -15,9 +15,28 @@ from .services import switcher as sw
 from .services import tmux_service
 from .ws import WebSocketManager
 from .config import settings
-from .cache import cache, usage_cache, token_info_cache, _cache_lock, snapshot_usage_cache, forget_account
+# `cache` is used directly throughout this module.  The remaining names are
+# re-exported here so callers that imported them from background keep working.
+from .cache import (  # noqa: F401
+    cache,
+    usage_cache,
+    token_info_cache,
+    _cache_lock,
+    snapshot_usage_cache,
+    forget_account,
+)
 
 logger = logging.getLogger(__name__)
+
+# ── Per-account 429 backoff state ────────────────────────────────────────────
+# Maps email → monotonic deadline (seconds); if time.monotonic() < deadline,
+# skip the probe and return stale cached data instead.
+_backoff_until: dict[str, float] = {}
+# Maps email → consecutive 429 count for exponential doubling.
+_backoff_count: dict[str, int] = {}
+
+_BACKOFF_INITIAL = 120   # first 429: wait 2 minutes
+_BACKOFF_MAX = 3600      # cap at 1 hour
 
 
 async def _process_single_account(account: Account, db) -> tuple[dict, "str | None"]:
@@ -81,12 +100,50 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
                 logger.warning("Token refresh failed for %s: %s", account.email, refresh_err)
 
         # Probe usage; a 401 here also means the credentials are dead.
+        # Skip the probe if the account is in a 429 backoff window — return
+        # stale cached data instead of hammering the endpoint.
+        backoff_deadline = _backoff_until.get(account.email, 0)
+        if time.monotonic() < backoff_deadline:
+            remaining = int(backoff_deadline - time.monotonic())
+            logger.debug(
+                "Skipping probe for %s — 429 backoff active (%ds remaining)",
+                account.email, remaining,
+            )
+            cached = await cache.get_usage_async(account.email)
+            token_info = cache.get_token_info(account.email) or {}
+            try:
+                flat = build_usage(cached, token_info)
+                flat_dict = flat.model_dump() if flat else {}
+            except Exception as _bu_err:
+                logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
+                flat_dict = {}
+            return {
+                "id": account.id,
+                "email": account.email,
+                "usage": flat_dict,
+                "error": cached.get("error"),
+            }, new_stale_reason
+
         try:
             usage = await anthropic_api.probe_usage(token)
         except httpx.HTTPStatusError as probe_err:
             if probe_err.response.status_code == 401:
                 new_stale_reason = "Anthropic API returned 401 — re-login required"
+            elif probe_err.response.status_code == 429:
+                # Compute exponential backoff: double the previous window, capped.
+                count = _backoff_count.get(account.email, 0) + 1
+                _backoff_count[account.email] = count
+                backoff_seconds = min(_BACKOFF_INITIAL * (2 ** (count - 1)), _BACKOFF_MAX)
+                _backoff_until[account.email] = time.monotonic() + backoff_seconds
+                logger.warning(
+                    "429 for %s (offense #%d) — backing off %ds",
+                    account.email, count, backoff_seconds,
+                )
             raise
+
+        # Successful probe — clear any backoff state for this account.
+        _backoff_until.pop(account.email, None)
+        _backoff_count.pop(account.email, None)
 
         await cache.set_usage(account.email, usage)
         token_info = cache.get_token_info(account.email) or {}

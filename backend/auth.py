@@ -7,7 +7,7 @@ enable auth.  When set, every request must supply the token either as:
   • HTTP:      Authorization: Bearer <token>
   • WebSocket: ?token=<token>  (query parameter)
 
-Paths exempt from auth: /health, / (frontend index), /static/* (assets).
+Paths exempt from auth: /health, / (frontend index), /src/* (assets).
 
 When api_token is empty (the default), all requests are allowed — suitable for
 localhost-only deployments where network exposure is not a concern.
