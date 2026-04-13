@@ -1160,7 +1160,7 @@ async function refreshAddTerminal() {
 qs("#add-term-send-form").addEventListener("submit", async e => {
   e.preventDefault();
   const input = qs("#add-term-input");
-  const text = input.value; if (!text || !loginSession) return;
+  const text = input.value; if (!loginSession) return;
   input.value = "";
   try {
     await api("/api/tmux/send", {method:"POST", body:{target:loginSession.pane_target, text}});
@@ -1261,7 +1261,7 @@ qs("#terminal-close-btn").addEventListener("click", closeTerminal);
 qs("#terminal-send-form").addEventListener("submit", async e => {
   e.preventDefault();
   const input = qs("#terminal-input");
-  const text = input.value; if (!text||!terminalTarget) return;
+  const text = input.value; if (!terminalTarget) return;
   input.value = "";
   try { await api("/api/tmux/send",{method:"POST",body:{target:terminalTarget,text}}); setTimeout(refreshCapture,300); }
   catch(err) { toast("Send failed",err.message,"error"); }
