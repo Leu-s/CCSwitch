@@ -12,14 +12,12 @@ from . import background as bg
 from .auth import TokenAuthMiddleware
 from .config import settings as cfg
 from .database import init_db, AsyncSessionLocal
-from .routers import accounts, settings, tmux, service
+from .routers import accounts, settings, service, credential_targets
 from .services import account_service as ac
 from .services import account_queries as aq
 from .services import login_session_service as ls
-from .services.account_service import build_usage
 from .services import settings_service as ss
 from .services.settings_service import ensure_defaults
-from .background import cache as bg_cache
 from .ws import ws_manager
 
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +43,9 @@ async def _poll_loop(idle_interval: int) -> None:
     3. When nobody is watching, sleep in 5s chunks up to idle_interval so we
        react quickly when a client reconnects, then poll once.
     """
+    # Note: this is a single coroutine — `await bg.poll_usage_and_switch()` always
+    # completes before the next iteration's sleep begins, so overlapping polls
+    # are structurally impossible. No need for a re-entrancy guard.
     try:
         await bg.poll_usage_and_switch(ws_manager)
     except Exception as exc:
@@ -101,7 +102,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_poll_loop(idle_interval)),
         asyncio.create_task(_cleanup_sessions_loop()),
     ]
-    logger.info("Server running on port %d", cfg.server_port)
+    logger.info("Server running on http://%s:%d", cfg.server_host, cfg.server_port)
     yield
     # Shutdown: cancel all background tasks
     for task in tasks:
@@ -114,13 +115,13 @@ async def lifespan(app: FastAPI):
     logger.info("Background tasks stopped")
 
 
-app = FastAPI(title="Claude Multi-Account Manager", lifespan=lifespan)
+app = FastAPI(title="CCSwitch", lifespan=lifespan)
 app.add_middleware(TokenAuthMiddleware, api_token=cfg.api_token)
 
 app.include_router(accounts.router)
 app.include_router(settings.router)
-app.include_router(tmux.router)
 app.include_router(service.router)
+app.include_router(credential_targets.router)
 
 # Serve frontend
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
@@ -136,7 +137,7 @@ async def root():
     index = os.path.join(frontend_path, "index.html")
     if os.path.exists(index):
         return FileResponse(index)
-    return {"message": "Claude Multi-Account Manager API"}
+    return {"message": "CCSwitch API"}
 
 
 @app.websocket("/ws")
@@ -156,23 +157,9 @@ async def websocket_endpoint(websocket: WebSocket, since: int = 0):
 
         # Send the full state snapshot on first connect or after a buffer gap.
         if since == 0:
-            cache_snapshot = await bg_cache.snapshot()
-            if cache_snapshot:
-                async with AsyncSessionLocal() as db:
-                    id_map = await aq.get_email_to_id_map(db)
-                snapshot = []
-                for email, usage in cache_snapshot.items():
-                    acct_id = id_map.get(email)
-                    if acct_id is None:
-                        continue
-                    token_info = await bg_cache.get_token_info_async(email) or {}
-                    flat = build_usage(usage, token_info)
-                    snapshot.append({
-                        "id": acct_id,
-                        "email": email,
-                        "usage": flat.model_dump() if flat else {},
-                        "error": usage.get("error"),
-                    })
+            async with AsyncSessionLocal() as db:
+                snapshot = await ac.build_ws_snapshot(db)
+            if snapshot:
                 await websocket.send_text(
                     json.dumps({"type": "usage_updated", "accounts": snapshot})
                 )

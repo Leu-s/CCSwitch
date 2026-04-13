@@ -7,7 +7,6 @@ import { toast } from "../toast.js";
 // Signals to main.js that accounts or service data should be reloaded.
 // Custom events break the circular dep between accounts↔service.
 function reloadAccounts() { document.dispatchEvent(new CustomEvent("app:reload-accounts")); }
-function reloadService()  { document.dispatchEvent(new CustomEvent("app:reload-service")); }
 
 function updateSliderFill(slider) {
   const min = Number(slider.min) || 0;
@@ -17,6 +16,7 @@ function updateSliderFill(slider) {
     `linear-gradient(to right, var(--accent) ${pct}%, var(--slider-bg) ${pct}%)`;
 }
 
+let _accountsGen = 0;
 let pendingRenderAfterDrag = false;
 let isDragging = false;
 let isSavingPriorities = false;
@@ -231,7 +231,7 @@ function attachCardEvents() {
             ok = true;
           } catch(e) { toast("Switch failed", e.message, "error"); }
         });
-        if (ok) { reloadAccounts(); reloadService(); }
+        // WS account_switched event will trigger reloadAccounts + reloadService
       } finally { isSwitching = false; }
     });
   });
@@ -311,8 +311,10 @@ function attachDragHandlers(card) {
 export async function loadAccounts() {
   const loadingEl = qs("#accounts-loading");
   const errorEl   = qs("#accounts-error");
+  const gen = ++_accountsGen;
   try {
     const data = await api("/api/accounts");
+    if (gen !== _accountsGen) return;
     state.accounts = data;
     if (errorEl) errorEl.style.display = "none";
     renderAccounts();

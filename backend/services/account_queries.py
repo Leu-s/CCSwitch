@@ -5,6 +5,7 @@ These are pure async SQLAlchemy queries with no side effects.
 Extracted from account_service.py to reduce file size and clarify separation.
 """
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Account
@@ -66,6 +67,10 @@ async def save_verified_account(
         threshold_pct=threshold_pct,
         priority=(max_prio + 1) if max_prio is not None else 0,
     )
-    db.add(account)
-    await db.commit()
+    try:
+        db.add(account)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return None
     return account

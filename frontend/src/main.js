@@ -2,14 +2,15 @@
 // fires the initial data load.
 
 import { state } from "./state.js";
-import { qs, qsa } from "./utils.js";
+import { qs } from "./utils.js";
 import { api } from "./api.js";
 import { loadAccounts, renderAccounts } from "./ui/accounts.js";
 import { loadServiceStatus, updateServiceUI, loadAutoSwitchSetting, initServiceListeners } from "./ui/service.js";
 import { loadSwitchLog, initLogListeners } from "./ui/log.js";
 import { closeAddModal, initLoginListeners } from "./ui/login.js";
-import { loadTmuxData, initTmuxListeners, clearCaptureInterval } from "./ui/tmux.js";
 import { clearAddTermInterval } from "./ui/login.js";
+import { loadCredentialTargets, initCredentialTargetsListeners } from "./ui/credential_targets.js";
+import { loadTmuxNudge, initTmuxNudgeListeners } from "./ui/tmux_nudge.js";
 import { connectWs } from "./ws.js";
 
 // ── App-level reload events (break circular dep between accounts↔service) ──
@@ -19,21 +20,6 @@ document.addEventListener("app:reload-accounts", async () => {
 document.addEventListener("app:reload-service", async () => {
   await loadServiceStatus();
   updateServiceUI(state.service);
-});
-
-// ── Tabs ────────────────────────────────────────────────────────────────────
-qsa(".tab-btn").forEach(btn => {
-  btn.addEventListener("click", () => {
-    const tab = btn.dataset.tab;
-    state.currentTab = tab;
-    qsa(".tab-btn").forEach(b => {
-      const a = b.dataset.tab === tab;
-      b.classList.toggle("active", a);
-      b.setAttribute("aria-selected", a ? "true" : "false");
-    });
-    qsa(".tab-panel").forEach(p => p.classList.toggle("active", p.id === "tab-" + tab));
-    if (tab === "tmux") loadTmuxData();
-  });
 });
 
 // ── Theme ───────────────────────────────────────────────────────────────────
@@ -64,19 +50,31 @@ const _savedTheme = localStorage.getItem("theme");
 if (_savedTheme) applyTheme(_savedTheme);
 else syncThemeBtn();
 
+// ── Settings page routing ───────────────────────────────────────────────────
+function showPage(name) {
+  const accounts = qs("#tab-accounts");
+  const settings = qs("#tab-settings");
+  if (name === "settings") {
+    accounts.hidden = true;
+    accounts.classList.remove("active");
+    settings.hidden = false;
+    settings.classList.add("active");
+  } else {
+    settings.hidden = true;
+    settings.classList.remove("active");
+    accounts.hidden = false;
+    accounts.classList.add("active");
+  }
+}
+qs("#settings-btn").addEventListener("click", () => showPage("settings"));
+qs("#settings-back-btn").addEventListener("click", () => showPage("accounts"));
+
 // ── Keyboard shortcuts ───────────────────────────────────────────────────────
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     const addModal = qs("#add-modal");
-    if (addModal.classList.contains("open")) { closeAddModal(); return; }
-    // closeTerminal is handled inside tmux.js via the button — also dispatch here
-    document.dispatchEvent(new CustomEvent("app:close-terminal"));
+    if (addModal && addModal.classList.contains("open")) { closeAddModal(); return; }
   }
-});
-document.addEventListener("app:close-terminal", () => {
-  // tmux.js listens for this event internally — re-export it via DOM
-  const closeBtn = qs("#terminal-close-btn");
-  if (closeBtn && qs("#terminal-panel").classList.contains("visible")) closeBtn.click();
 });
 
 // ── Shell status ─────────────────────────────────────────────────────────────
@@ -149,7 +147,6 @@ document.getElementById("shell-tip-copy-btn").addEventListener("click", async ()
 
 // ── Cleanup on unload ────────────────────────────────────────────────────────
 window.addEventListener("beforeunload", () => {
-  clearCaptureInterval();
   clearAddTermInterval();
 });
 
@@ -157,16 +154,24 @@ window.addEventListener("beforeunload", () => {
 initServiceListeners();
 initLogListeners();
 initLoginListeners();
-initTmuxListeners();
+initCredentialTargetsListeners();
+initTmuxNudgeListeners();
+
+// ── Reload credential targets whenever the active account changes, so the
+//    "Currently: …" label under each target file stays in sync. ─────────────
+document.addEventListener("app:reload-accounts", () => {
+  loadCredentialTargets();
+});
 
 // ── Initial data load ────────────────────────────────────────────────────────
 (async () => {
   await Promise.all([
     loadAccounts(),
-    loadServiceStatus(),
+    loadServiceStatus(true),
     loadAutoSwitchSetting(),
     loadSwitchLog(),
-    loadTmuxData(),
+    loadCredentialTargets(),
+    loadTmuxNudge(),
   ]);
   checkShellStatus();
   connectWs();

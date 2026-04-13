@@ -14,7 +14,6 @@ from backend.schemas import (
     AccountWithUsage,
     SettingOut,
     SwitchLogOut,
-    TmuxMonitorOut,
     UsageData,
 )
 
@@ -70,11 +69,6 @@ def test_switch_log_out():
     )
     assert log.reason == "threshold"
     assert log.to_account_id == 2
-
-
-def test_tmux_monitor_out():
-    m = TmuxMonitorOut(id=1, name="test", pattern_type="manual", pattern="main:0.0", enabled=True)
-    assert m.pattern == "main:0.0"
 
 
 # ── UsageData.from_raw ───────────────────────────────────────────────────────

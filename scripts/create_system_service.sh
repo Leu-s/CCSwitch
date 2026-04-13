@@ -53,9 +53,9 @@ cat > "$PLIST_PATH" << EOF
         <string>uvicorn</string>
         <string>backend.main:app</string>
         <string>--host</string>
-        <string>127.0.0.1</string>
+        <string>${CLAUDE_MULTI_SERVER_HOST:-127.0.0.1}</string>
         <string>--port</string>
-        <string>8765</string>
+        <string>${CLAUDE_MULTI_SERVER_PORT:-41924}</string>
         <string>--log-level</string>
         <string>warning</string>
     </array>

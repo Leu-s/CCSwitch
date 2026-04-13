@@ -2,7 +2,7 @@
 WebSocket manager with sequence numbers and a bounded event replay buffer.
 
 Every event broadcast gets a monotonically-increasing `seq` number.  The
-manager keeps the last BUFFER_SIZE events so a reconnecting client can ask
+manager keeps a bounded number of recent events so a reconnecting client can ask
 for missed events by supplying the `?since=<seq>` query parameter on the
 WebSocket handshake URL.
 
@@ -20,16 +20,15 @@ import json
 from collections import deque
 from fastapi import WebSocket
 
-# Number of past events kept for replay on reconnect
-BUFFER_SIZE = 100
+from .config import settings as cfg
 
 
 class WebSocketManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
         self._seq: int = 0
-        # deque of (seq, json_text) — bounded to BUFFER_SIZE
-        self._buffer: deque[tuple[int, str]] = deque(maxlen=BUFFER_SIZE)
+        # deque of (seq, json_text) — bounded to cfg.ws_replay_buffer_size
+        self._buffer: deque[tuple[int, str]] = deque(maxlen=cfg.ws_replay_buffer_size)
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()

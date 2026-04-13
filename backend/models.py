@@ -28,18 +28,6 @@ class Account(Base):
     )
 
 
-class TmuxMonitor(Base):
-    __tablename__ = "tmux_monitors"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
-    pattern_type: Mapped[str] = mapped_column(String(16), default="manual")
-    pattern: Mapped[str] = mapped_column(String(255), nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    __table_args__ = (
-        Index("ix_tmux_monitors_enabled", "enabled"),
-    )
-
-
 class SwitchLog(Base):
     __tablename__ = "switch_log"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

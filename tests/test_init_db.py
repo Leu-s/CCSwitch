@@ -45,7 +45,7 @@ def _patch_db_url(monkeypatch, url: str):
 
 def _expected_tables() -> set[str]:
     """All app tables + alembic_version after a successful migration."""
-    return {"accounts", "tmux_monitors", "switch_log", "settings", "alembic_version"}
+    return {"accounts", "switch_log", "settings", "alembic_version"}
 
 
 def _inspect_tables(sync_url: str) -> set[str]:

@@ -17,6 +17,12 @@ SETTING_DEFAULTS: dict[str, str] = {
     "service_enabled": "false",
     "auto_switch_enabled": "false",
     "usage_poll_interval_seconds": "300",
+    # tmux nudge — when enabled, after every account switch the background
+    # loop scans every tmux pane and sends `tmux_nudge_message` to any pane
+    # whose recent output matches a rate-limit / usage-limit notice.  Off by
+    # default so the service never touches the user's terminals unprompted.
+    "tmux_nudge_enabled": "false",
+    "tmux_nudge_message": "continue",
 }
 
 

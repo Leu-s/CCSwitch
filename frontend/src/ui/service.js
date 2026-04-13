@@ -3,12 +3,17 @@ import { qs } from "../utils.js";
 import { api, withLoading } from "../api.js";
 import { toast } from "../toast.js";
 
-export async function loadServiceStatus() {
+export async function loadServiceStatus(silent = false) {
   try {
     const s = await api("/api/service");
     state.service = s;
     updateServiceUI(s);
-  } catch { /* initial load — ignore */ }
+  } catch (e) {
+    if (!silent) {
+      console.warn("loadServiceStatus error", e);
+      toast("Service status failed", e.message || String(e), "error");
+    }
+  }
 }
 
 export function updateServiceUI(s) {
@@ -36,7 +41,7 @@ export async function loadAutoSwitchSetting() {
   try {
     const settings = await api("/api/settings");
     const entry = settings.find(s => s.key === "auto_switch_enabled");
-    const enabled = entry ? entry.value !== "false" : true;
+    const enabled = entry ? entry.value !== "false" : false;
     const cb = qs("#auto-switch-cb");
     if (cb) cb.checked = enabled;
   } catch { /* initial load — ignore */ }

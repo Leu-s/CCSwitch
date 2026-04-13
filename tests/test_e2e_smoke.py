@@ -25,7 +25,7 @@ TEST_DB_URL = "sqlite+aiosqlite:///./test_e2e.db"
 @pytest.fixture(scope="module")
 def test_app():
     from backend.database import Base, get_db
-    from backend.routers import accounts, settings, tmux
+    from backend.routers import accounts, settings
 
     engine = create_async_engine(TEST_DB_URL, echo=False)
     TestSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -47,7 +47,6 @@ def test_app():
     app = FastAPI()
     app.include_router(accounts.router)
     app.include_router(settings.router)
-    app.include_router(tmux.router)
     app.dependency_overrides[get_db] = override_get_db
 
     @app.get("/health")
@@ -171,49 +170,6 @@ def test_settings_patch(client):
     resp = client.patch("/api/settings/auto_switch_enabled", json={"value": "false"})
     assert resp.status_code == 200
     assert resp.json()["value"] == "false"
-
-
-# ── Tmux ───────────────────────────────────────────────────────────────────────
-
-def test_tmux_sessions_empty(client):
-    with patch("backend.services.tmux_service.list_panes", return_value=[]):
-        resp = client.get("/api/tmux/sessions")
-    assert resp.status_code == 200
-    assert resp.json() == []
-
-
-def test_tmux_monitors_create(client):
-    resp = client.post("/api/tmux/monitors", json={
-        "name": "smoke-test-monitor",
-        "pattern_type": "manual",
-        "pattern": "main:0.0",
-        "enabled": True,
-    })
-    assert resp.status_code == 201
-    data = resp.json()
-    assert data["name"] == "smoke-test-monitor"
-    assert data["pattern"] == "main:0.0"
-    assert data["enabled"] is True
-
-
-def test_tmux_monitors_list(client):
-    resp = client.get("/api/tmux/monitors")
-    assert resp.status_code == 200
-    monitors = resp.json()
-    assert isinstance(monitors, list)
-    assert any(m["name"] == "smoke-test-monitor" for m in monitors)
-
-
-def test_tmux_monitors_delete(client):
-    create_resp = client.post("/api/tmux/monitors", json={
-        "name": "smoke-delete-test",
-        "pattern_type": "manual",
-        "pattern": "x:0.0",
-        "enabled": True,
-    })
-    mid = create_resp.json()["id"]
-    del_resp = client.delete(f"/api/tmux/monitors/{mid}")
-    assert del_resp.status_code == 204
 
 
 # ── Switch log ─────────────────────────────────────────────────────────────────

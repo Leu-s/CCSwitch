@@ -26,10 +26,10 @@ If you've ever been deep in a Claude Code session and hit the 5-hour rate limit,
 
 ### How it feels
 
-You're refactoring a service. The dashboard sits in a tab. Around hour 4, the active account's usage bar turns amber. At 95 % the app silently activates your second account, sends a `Continue` to the active `claude` pane via tmux, and a toast tells you what just happened. Your build never stops.
+You're refactoring a service. The dashboard sits in a tab. Around hour 4, the active account's usage bar turns amber. At 95 % the app silently activates your second account, and — if you enabled the **Wake tmux sessions** toggle in Settings — scans every tmux pane and sends your configured message (default `continue`) to any `claude` session that's stalled on a rate-limit notice. A toast tells you what just happened. Your build never stops.
 
 > **macOS only** for the full credential-switching path (Keychain via `security` CLI). Linux falls back to file-only credentials.
-> **tmux required** for the login flow and monitor features.
+> **tmux required** for the Add-Account login flow; the post-switch nudge also uses tmux when enabled.
 
 ---
 
@@ -65,7 +65,7 @@ You're refactoring a service. The dashboard sits in a tab. Around hour 4, the ac
   - *System default* (`~/.claude.json` or `~/.claude/.claude.json`) — additionally writes the legacy `Claude Code-credentials` Keychain entry and copies `.credentials.json` into `~/.claude/`, so a fresh `claude` invocation immediately uses the new account
 - **Shell integration** — a one-liner in `.zshrc`/`.bashrc` exports `CLAUDE_CONFIG_DIR` from `~/.claude-multi/active`, so every new terminal picks up the active account without a restart
 - **Real-time dashboard** — vanilla-JS single-page app; account cards, drag-to-reorder priority, per-account threshold slider, switch log; no build step required
-- **tmux monitors** — watch specific panes, auto-continue paused `claude` sessions after a switch
+- **Optional tmux nudge** — opt-in toggle on the Settings page: after every account switch, scan every `tmux` pane and send a configurable message (default `continue`) to any pane whose recent output matches a rate-limit notice (`usage limit reached`, `rate_limit_error`, HTTP 429, …). Off by default.
 - **CLI** (`ccswitch`) — list/switch/enable/disable accounts, tail logs, manage the LaunchAgent, set up shell integration
 - **macOS LaunchAgent** — optional auto-start on login
 
@@ -78,7 +78,7 @@ You're refactoring a service. The dashboard sits in a tab. Around hour 4, the ac
 | macOS | Full Keychain support. Linux works with file-only credentials. |
 | Python 3.12+ | Tested on 3.14 |
 | [uv](https://docs.astral.sh/uv/) | Recommended. Plain `pip` also works. |
-| tmux | Required for the "Add Account" login flow and monitor features |
+| tmux | Required for the "Add Account" login flow; also used by the opt-in post-switch nudge |
 
 ---
 
@@ -155,7 +155,7 @@ All settings use the `CLAUDE_MULTI_` environment variable prefix. Copy `.env.exa
 | `CLAUDE_MULTI_POLL_INTERVAL_IDLE` | `300` | Poll interval (seconds) with no active WebSocket clients |
 | `CLAUDE_MULTI_POLL_INTERVAL_MIN` | `120` | Minimum floor for the DB-overridable idle interval |
 | `CLAUDE_MULTI_DEFAULT_ACCOUNT_THRESHOLD_PCT` | `95.0` | Auto-switch threshold for newly added accounts (0–100) |
-| `CLAUDE_MULTI_HAIKU_MODEL` | `claude-haiku-4-5-20251001` | Model used for tmux monitor evaluation |
+| `CLAUDE_MULTI_HAIKU_MODEL` | `claude-haiku-4-5-20251001` | Cheapest model used for the minimal `/v1/messages` probe (the probe only reads rate-limit headers; no tokens are billed) |
 | `CLAUDE_MULTI_API_TOKEN` | *(empty)* | Optional Bearer token. **Empty = no auth** (safe for localhost). |
 
 No variable is mandatory — all have sensible defaults. Set `CLAUDE_MULTI_API_TOKEN` only if you expose the server beyond localhost.
@@ -224,8 +224,7 @@ After a switch, existing terminals can re-source their rc file (`source ~/.zshrc
                 │ SQLite DB       │      │ Anthropic API   │  │ ~/.claude/       │
                 │ (accounts,      │      │ /v1/messages    │  │ ~/.claude-multi/ │
                 │  settings,      │      │ (headers only)  │  │ macOS Keychain   │
-                │  switch_log,    │      └─────────────────┘  └──────────────────┘
-                │  tmux_monitors) │
+                │  switch_log)    │      └─────────────────┘  └──────────────────┘
                 └─────────────────┘
 ```
 
@@ -259,7 +258,7 @@ What a switch *does* touch is determined by the **credential targets** the user 
 ├── backend/
 │   ├── main.py                        # FastAPI app, lifespan, /ws, static serving
 │   ├── config.py                      # Pydantic settings (CLAUDE_MULTI_ prefix)
-│   ├── models.py                      # ORM: Account, TmuxMonitor, SwitchLog, Setting
+│   ├── models.py                      # ORM: Account, SwitchLog, Setting
 │   ├── database.py                    # Async SQLAlchemy engine + Alembic init_db()
 │   ├── schemas.py                     # Pydantic request/response models
 │   ├── cache.py                       # Thread-safe in-memory usage + token_info cache
@@ -270,8 +269,7 @@ What a switch *does* touch is determined by the **credential targets** the user 
 │   │   ├── accounts.py                # /api/accounts CRUD + login flow
 │   │   ├── service.py                 # /api/service enable/disable/default-account
 │   │   ├── settings.py                # /api/settings + shell snippet
-│   │   ├── credential_targets.py      # /api/credential-targets list/rescan/toggle/sync
-│   │   └── tmux.py                    # /api/tmux sessions, monitors, capture, send
+│   │   └── credential_targets.py      # /api/credential-targets list/rescan/toggle/sync
 │   └── services/
 │       ├── account_service.py         # Account lifecycle, activation, backup/restore
 │       ├── account_queries.py         # DB query helpers
@@ -279,13 +277,13 @@ What a switch *does* touch is determined by the **credential targets** the user 
 │       ├── credential_provider.py     # Keychain read/write + credential file I/O
 │       ├── credential_targets.py      # Auto-discover .claude.json targets + enable state
 │       ├── anthropic_api.py           # probe_usage() + refresh_access_token()
-│       ├── switcher.py                # get_next_account() + perform_switch()
+│       ├── switcher.py                # get_next_account() + perform_switch() + maybe_auto_switch
 │       ├── settings_service.py        # Typed get/set for Setting DB rows
-│       └── tmux_service.py            # tmux pane ops + Claude Haiku evaluation
+│       └── tmux_service.py            # tmux pane ops + wake_stalled_sessions + fire_nudge
 ├── frontend/
-│   ├── index.html                     # HTML shell (259 lines)
+│   ├── index.html                     # Accounts page + Settings page + Add-account modal
 │   └── src/
-│       ├── main.js                    # Entry point: tabs, theme, keyboard shortcuts
+│       ├── main.js                    # Entry point: theme, page toggle, keyboard shortcuts
 │       ├── api.js                     # fetch wrapper (30 s timeout, error extraction)
 │       ├── ws.js                      # WebSocket + exponential backoff + replay
 │       ├── state.js                   # Shared mutable state
@@ -298,17 +296,17 @@ What a switch *does* touch is determined by the **credential targets** the user 
 │           ├── service.js             # Service toggle, default account, auto-switch
 │           ├── log.js                 # Switch log + pagination
 │           ├── login.js               # Add-account modal (multi-step tmux login)
-│           ├── tmux.js                # tmux terminal pane, monitors, event feed
-│           └── events.js              # Custom DOM event bus
+│           ├── credential_targets.js  # Settings-page Credential Targets panel
+│           └── tmux_nudge.js          # Settings-page Wake Tmux Sessions block
 ├── alembic/                           # Database migrations
-│   └── versions/                      # initial schema + drop_display_name
+│   └── versions/                      # initial + drop_display_name + drop_tmux_monitors
 ├── scripts/
-│   ├── ccswitch / ccswitch.py             # CLI tool
+│   ├── ccswitch / ccswitch.py         # CLI tool
 │   ├── launch.sh                      # Production server launcher
 │   ├── status.sh                      # Server health check
 │   ├── create_system_service.sh       # macOS LaunchAgent installer
 │   └── remove_system_service.sh       # LaunchAgent removal
-└── tests/                             # 16 test files, 147 tests
+└── tests/                             # router + service + background + schemas + e2e
 ```
 
 ---
@@ -362,16 +360,9 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CLAUDE_MULTI_A
 | `POST` | `/api/credential-targets/rescan` | Re-run target discovery |
 | `PATCH` | `/api/credential-targets` | Toggle the `enabled` flag for one canonical target |
 | `POST` | `/api/credential-targets/sync` | Re-mirror active account into all enabled targets |
-| `GET` | `/api/tmux/sessions` | Discover tmux panes |
-| `GET` | `/api/tmux/capture` | Capture output from a pane |
-| `POST` | `/api/tmux/send` | Send keys to a pane |
-| `GET` | `/api/tmux/monitors` | List monitors |
-| `POST` | `/api/tmux/monitors` | Create monitor |
-| `PATCH` | `/api/tmux/monitors/{id}` | Update monitor |
-| `DELETE` | `/api/tmux/monitors/{id}` | Delete monitor |
 | `GET` | `/health` | Health check (always public) |
 
-**WebSocket:** `ws://localhost:41924/ws?since=<seq>` — streams `usage_updated`, `account_switched`, `account_deleted`, `tmux_result`, and `error` events. The `since` parameter requests buffered events the client may have missed; the server falls back to a full snapshot if the buffer gap is too large.
+**WebSocket:** `ws://localhost:41924/ws?since=<seq>` — streams `usage_updated`, `account_switched`, `account_deleted`, and `error` events. The `since` parameter requests buffered events the client may have missed; the server falls back to a full snapshot if the buffer gap is too large.
 
 ---
 

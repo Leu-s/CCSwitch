@@ -2,36 +2,29 @@
 Account lifecycle service.
 
 Each managed account has an isolated Claude config directory under
-~/.claude-multi-accounts/account-{uuid}/.
+``~/.claude-multi-accounts/account-{uuid}/``.  Claude Code reads credentials
+from whatever ``CLAUDE_CONFIG_DIR`` points at, and every isolated dir has its
+own Keychain entry keyed by ``sha256(config_dir)[:8]``.
 
-Claude Code respects the CLAUDE_CONFIG_DIR environment variable; when set to
-an empty (fresh) directory it will run a new OAuth flow, storing all credentials
-and config in that directory without touching the default location.
+Credential targets — the user-controlled mirror list
+----------------------------------------------------
+Different tools read ``oauthAccount`` from different ``.claude.json`` locations
+on the same machine (HOME root, HOME/.claude/, Gas Town, cmux, …).  This
+service no longer guesses which of those to update on a switch.  The user
+picks explicit targets in the dashboard; ``activate_account_config`` takes
+that list and delegates identity-key mirroring to
+``credential_targets.mirror_oauth_into_targets``.
 
-IMPORTANT — where Claude Code actually reads credentials on macOS
-----------------------------------------------------------------
-When CLAUDE_CONFIG_DIR is NOT set, Claude Code reads/writes:
-
-    • Config:       $HOME/.claude.json            (file directly in HOME,
-                                                   NOT inside $HOME/.claude/)
-    • Keychain:     service = "Claude Code-credentials"  (no hash suffix)
-                    account = $USER (process.env.USER)
-
-When CLAUDE_CONFIG_DIR *is* set to /some/dir, Claude Code reads/writes:
-
-    • Config:       /some/dir/.claude.json
-    • Keychain:     service = "Claude Code-credentials-<sha256(/some/dir)[:8]>"
-                    account = $USER
-
-Switching the "global" active account (for new terminals that don't have
-CLAUDE_CONFIG_DIR set) therefore requires writing to $HOME/.claude.json AND to
-the legacy unhashed Keychain entry — not to $HOME/.claude/.claude.json, which
-Claude Code never reads for OAuth state.
+When the user enables a "system default" target — either ``$HOME/.claude.json``
+or ``$HOME/.claude/.claude.json`` — this service ALSO writes the legacy
+(no-hash) ``Claude Code-credentials`` Keychain entry and mirrors
+``.credentials.json`` into ``~/.claude/``, so a fresh ``claude`` invocation
+without ``CLAUDE_CONFIG_DIR`` picks up the switch.  With zero targets enabled,
+only the dashboard's own pointer file is touched.
 """
 
 import asyncio
 import getpass
-import json
 import logging
 import os
 import shutil
@@ -43,6 +36,7 @@ from ..config import settings
 from ..models import Account
 from ..schemas import UsageData
 from .credential_provider import (
+    LEGACY_KEYCHAIN_SERVICE,
     _load_json_safe as _load_json,
     _read_keychain_credentials,
     _write_keychain_credentials,
@@ -54,33 +48,6 @@ from .credential_provider import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Keys in .claude.json that describe the active OAuth account. Only these are
-# copied from an account's isolated config dir into $HOME/.claude.json on a
-# switch, so unrelated home state (projects, mcpServers, onboarding, etc.) is
-# preserved across account switches.
-_OAUTH_KEYS = ("oauthAccount", "userID")
-
-# Keys in .claude.json that are per-account UI/workspace state and should be
-# written back into the account's isolated dir BEFORE switching away, so that
-# state accumulated while a user ran `claude` without CLAUDE_CONFIG_DIR is not
-# silently lost. These cover the fields Claude Code writes most often while
-# running: project tracking, mcp state, recent history, onboarding progress.
-#
-# IDENTITY fields (oauthAccount, userID) are intentionally excluded. They live
-# in the account dir from the login flow and must never be written back — if a
-# concurrent switch has already merged a different account's oauthAccount into
-# HOME, reading HOME here would clobber the account dir's identity with the
-# wrong email/UUID. Keeping writeback strictly limited to workspace state
-# preserves the invariant "account_dir/.claude.json.oauthAccount never changes
-# after login".
-_WRITEBACK_KEYS = (
-    "projects",
-    "mcpServers",
-    "hasCompletedOnboarding",
-    "lastOnboardingVersion",
-    "customApiKeyResponses",
-)
 
 
 # ── Path helpers ───────────────────────────────────────────────────────────────
@@ -103,14 +70,24 @@ def active_config_file() -> str:
     return os.path.join(os.path.expanduser("~"), ".claude.json")
 
 
-
 # ── Active (system) config helpers ────────────────────────────────────────────
 
 def get_active_email() -> str | None:
-    """Return the email of the currently-active account as Claude Code sees it
-    (i.e. the oauthAccount stored in $HOME/.claude.json). Falls back to the
-    legacy $HOME/.claude/.claude.json location for installs upgrading from
-    older versions of this service."""
+    """Return the email of the currently-active account.
+
+    Reads the dashboard's pointer file first — that is the authoritative
+    source of "what this service thinks is active", independent of whether
+    the user has enabled any system-level credential target.  Falls back to
+    ``$HOME/.claude.json`` for the cold-start case (service just installed,
+    no switch yet) and then to ``$HOME/.claude/.claude.json`` so upgrades
+    from older installs still work.
+    """
+    pointer = get_active_config_dir_pointer()
+    if pointer:
+        data = _load_json(os.path.join(pointer, ".claude.json"))
+        email = (data.get("oauthAccount") or {}).get("emailAddress")
+        if email:
+            return email
     data = _load_json(active_config_file())
     email = (data.get("oauthAccount") or {}).get("emailAddress")
     if email:
@@ -150,8 +127,18 @@ def restore_config_from_backup(backup: dict) -> None:
     if not backup.get("claude_json"):
         return
     path = active_config_file()
-    with open(path, "w") as f:
-        f.write(backup["claude_json"])
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            f.write(backup["claude_json"])
+        os.replace(tmp_path, path)
+    except Exception:
+        # Clean up orphaned temp file on write failure
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
     try:
         os.chmod(path, 0o600)
     except Exception:
@@ -208,83 +195,6 @@ def write_active_config_dir(config_dir: str) -> None:
         logger.warning("Failed to write active config dir file: %s", e)
 
 
-def _atomic_write_json(path: str, data: dict, mode: int = 0o600) -> None:
-    """Write a JSON file atomically using os.replace, with restrictive perms."""
-    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
-
-
-def _merge_oauth_into_home(source_dir: str) -> bool:
-    """
-    Merge oauthAccount + userID from source_dir/.claude.json into $HOME/.claude.json.
-
-    Preserves every other field already in $HOME/.claude.json (projects,
-    mcpServers, autoUpdates, onboarding, etc.) so switching accounts does not
-    wipe unrelated home state. Creates $HOME/.claude.json if missing.
-
-    Returns True if a merge happened.
-    """
-    source_file = os.path.join(source_dir, ".claude.json")
-    if not os.path.exists(source_file):
-        logger.warning("Source .claude.json missing: %s", source_file)
-        return False
-    source = _load_json(source_file)
-    if not source.get("oauthAccount"):
-        logger.warning("Source .claude.json has no oauthAccount: %s", source_file)
-        return False
-
-    home_file = active_config_file()
-    home = _load_json(home_file)
-    for k in _OAUTH_KEYS:
-        if k in source:
-            home[k] = source[k]
-    _atomic_write_json(home_file, home)
-    logger.info(
-        "Merged oauthAccount (%s) from %s → %s",
-        source["oauthAccount"].get("emailAddress", "?"),
-        source_file,
-        home_file,
-    )
-    return True
-
-
-def _writeback_home_into_account(account_dir: str) -> None:
-    """
-    Copy the account-related subset of $HOME/.claude.json back into
-    account_dir/.claude.json. Called BEFORE switching away from account_dir,
-    so state the user accumulated while running `claude` in a shell without
-    CLAUDE_CONFIG_DIR is preserved on the next activation.
-    """
-    home = _load_json(active_config_file())
-    if not home:
-        return
-    target_file = os.path.join(account_dir, ".claude.json")
-    try:
-        os.makedirs(account_dir, exist_ok=True)
-    except Exception:
-        pass
-    target = _load_json(target_file)
-    changed = False
-    for k in _WRITEBACK_KEYS:
-        if k in home and home[k] != target.get(k):
-            target[k] = home[k]
-            changed = True
-    if changed:
-        _atomic_write_json(target_file, target)
-        logger.debug("Wrote back home → %s", target_file)
-
-
 def _clear_stale_legacy_keychain_entries() -> None:
     """
     Delete any 'Claude Code-credentials' Keychain entries whose account name
@@ -294,11 +204,8 @@ def _clear_stale_legacy_keychain_entries() -> None:
     remaining stale entry is a landmine that can surface with the wrong token
     if the user ever downgrades or runs a different Claude Code build.
     """
-    service = "Claude Code-credentials"
+    service = LEGACY_KEYCHAIN_SERVICE
     user = getpass.getuser()
-    # Enumerate candidates by querying with an unlikely-to-exist acct to force
-    # an error so we don't accidentally mask a real lookup; instead we loop
-    # deleting by alternative account strings known to exist historically.
     for stale_acct in ("claude-code", "claude-code-user", "root"):
         if stale_acct == user:
             continue
@@ -312,103 +219,159 @@ def _clear_stale_legacy_keychain_entries() -> None:
             pass
 
 
-def activate_account_config(target_config_dir: str) -> None:
+def _system_default_canonicals() -> set[str]:
+    """Canonical (symlink-resolved) paths Claude Code reads when
+    CLAUDE_CONFIG_DIR is unset.  Enabling *either* as a credential target
+    means the legacy Keychain entry and ``~/.claude/.credentials.json`` must
+    also move with the switch — that is the combination a fresh ``claude``
+    run pairs together."""
+    home = os.path.expanduser("~")
+    return {
+        os.path.realpath(os.path.join(home, ".claude.json")),
+        os.path.realpath(os.path.join(home, ".claude", ".claude.json")),
+    }
+
+
+def activate_account_config(
+    target_config_dir: str,
+    enabled_credential_targets: list[str] | None = None,
+) -> dict:
     """
-    Make target_config_dir the active account for the system-default Claude
-    Code invocation (i.e. what new terminals see when they run `claude`
-    without setting CLAUDE_CONFIG_DIR themselves).
+    Make ``target_config_dir`` the active account.
 
     Steps:
-      1. Write the account-related subset of $HOME/.claude.json back into the
-         PREVIOUSLY active account's dir (so we don't lose state the user
-         accumulated in that account since the last switch).
-      2. Merge oauthAccount + userID from target_config_dir/.claude.json into
-         $HOME/.claude.json. Does NOT overwrite projects, mcpServers, or
-         unrelated home state.
-      3. Copy target_config_dir's Keychain entry into the legacy no-hash
-         'Claude Code-credentials' service under acct=$USER.
-      4. Remove any stale 'Claude Code-credentials' entries left by older
-         Claude Code versions (acct=claude-code, etc.).
-      5. Copy target_config_dir/.credentials.json → $HOME/.claude/.credentials.json
-         as a plaintext fallback (used when the Keychain is unavailable).
-      6. Update ~/.claude-multi/active so the shell-profile snippet picks up
-         the new account in brand-new terminals that source it.
+      1. Mirror ``oauthAccount`` + ``userID`` from ``target_config_dir/.claude.json``
+         into every file in ``enabled_credential_targets`` (canonical paths).
+         With an empty list, no ``.claude.json`` files outside the isolated
+         account dir are touched.
+      2. If any enabled target is a system-default location
+         (``$HOME/.claude.json`` or ``$HOME/.claude/.claude.json``), also:
+           - write the legacy ``Claude Code-credentials`` Keychain entry,
+           - clean stale Keychain entries left by older Claude Code versions,
+           - copy ``.credentials.json`` into ``~/.claude/`` as plaintext fallback.
+      3. Update ``~/.claude-multi/active`` so the shell-profile snippet picks
+         up the new account in brand-new terminals that source it.
 
     Acquires ``credential_provider._credential_lock`` for the full body so a
     background token refresh running in another thread cannot interleave
-    between the legacy-Keychain write (step 3) and the pointer update
-    (step 6) — see the lock's docstring in credential_provider.py.
+    between the legacy-Keychain write and the pointer update — see the lock's
+    docstring in ``credential_provider.py``.
+
+    Returns a summary dict:
+        {
+          "mirror": {"written": [...], "skipped": [...], "errors": [...]},
+          "keychain_written": bool,
+          "system_default_enabled": bool,
+        }
     """
     from .credential_provider import _credential_lock  # local import avoids cycle
 
     with _credential_lock:
-        _activate_account_config_locked(target_config_dir)
+        return _activate_account_config_locked(
+            target_config_dir, list(enabled_credential_targets or [])
+        )
 
 
-def _activate_account_config_locked(target_config_dir: str) -> None:
+def _activate_account_config_locked(
+    target_config_dir: str, enabled_targets: list[str]
+) -> dict:
+    from . import credential_targets as ct
+
     target_config_dir = os.path.abspath(os.path.expanduser(target_config_dir))
 
-    # ── 1. Writeback: previous account → its own config dir ──────────────────
-    prev_dir = get_active_config_dir_pointer()
-    if prev_dir and os.path.abspath(prev_dir) != target_config_dir and os.path.isdir(prev_dir):
-        try:
-            _writeback_home_into_account(prev_dir)
-        except Exception as e:
-            logger.warning("Writeback to %s failed: %s", prev_dir, e)
+    # ── 1. Mirror identity keys into every user-enabled target file ──────────
+    mirror_summary = ct.mirror_oauth_into_targets(target_config_dir, enabled_targets)
 
-    # ── 2. Merge target's oauthAccount → $HOME/.claude.json ──────────────────
-    merged = _merge_oauth_into_home(target_config_dir)
-    if not merged:
-        raise ValueError(
-            f"Target account config has no oauthAccount — credentials may be "
-            f"corrupted (config dir: {target_config_dir})"
-        )
+    # ── 2. System-default hooks (legacy Keychain + plaintext fallback) ───────
+    system_defaults = _system_default_canonicals()
+    system_default_enabled = bool(set(enabled_targets) & system_defaults)
 
-    # ── 3. Legacy Keychain entry (no hash, read by new terminals) ────────────
-    kc = _read_keychain_credentials(target_config_dir)
-    if kc:
-        if not _write_keychain_credentials(kc, service="Claude Code-credentials"):
+    keychain_written = False
+    if system_default_enabled:
+        kc = _read_keychain_credentials(target_config_dir)
+        if kc:
+            keychain_written = _write_keychain_credentials(
+                kc, service=LEGACY_KEYCHAIN_SERVICE
+            )
+            if not keychain_written:
+                logger.warning(
+                    "Legacy Keychain write failed for %s — a fresh `claude` "
+                    "run may still use stale credentials.",
+                    target_config_dir,
+                )
+        else:
             logger.warning(
-                "Legacy Keychain write failed for %s — new terminal sessions "
-                "may not pick up the account switch until Keychain is writable.",
+                "No Keychain entry found for %s — new terminals will use "
+                "whatever credentials currently live under 'Claude Code-credentials'.",
                 target_config_dir,
             )
-    else:
-        logger.warning(
-            "No Keychain entry found for %s — new terminals will use whatever "
-            "credentials currently live under 'Claude Code-credentials'.",
-            target_config_dir,
-        )
+        _clear_stale_legacy_keychain_entries()
 
-    # ── 4. Clean up old-Claude-Code ghost entries ────────────────────────────
-    _clear_stale_legacy_keychain_entries()
-
-    # ── 5. Plaintext credential fallback (for no-Keychain macOS builds) ──────
-    claude_dir = active_claude_dir()
-    try:
-        os.makedirs(claude_dir, exist_ok=True)
-    except Exception:
-        pass
-    src_creds = os.path.join(target_config_dir, ".credentials.json")
-    if os.path.exists(src_creds):
+        claude_dir = active_claude_dir()
         try:
-            shutil.copy2(src_creds, os.path.join(claude_dir, ".credentials.json"))
-        except Exception as e:
-            # A copy failure leaves ~/.claude/ without valid credentials.
-            # Re-raise so perform_switch() knows the switch did NOT complete —
-            # the active-dir pointer (step 6) is intentionally skipped, keeping
-            # the previous pointer intact as the best available fallback.
-            logger.error(
-                ".credentials.json copy failed for %s → %s: %s",
-                src_creds, claude_dir, e,
-            )
-            raise
+            os.makedirs(claude_dir, exist_ok=True)
+        except Exception:
+            pass
+        src_creds = os.path.join(target_config_dir, ".credentials.json")
+        if os.path.exists(src_creds):
+            try:
+                shutil.copy2(
+                    src_creds, os.path.join(claude_dir, ".credentials.json")
+                )
+            except Exception as e:
+                # Re-raise so the pointer write below is skipped — the
+                # previous pointer stays as the best available fallback.
+                logger.error(
+                    ".credentials.json copy failed for %s → %s: %s",
+                    src_creds, claude_dir, e,
+                )
+                raise
 
-    # ── 6. Update active-dir pointer file ────────────────────────────────────
-    # Written AFTER all credential operations succeed so the pointer is never
-    # advanced to a target whose credentials were not fully installed.
+    # ── 3. Update active-dir pointer file ────────────────────────────────────
+    # Written AFTER credential operations so the pointer is never advanced to
+    # a target whose credentials were not fully installed.
     write_active_config_dir(target_config_dir)
 
+    return {
+        "mirror": mirror_summary,
+        "keychain_written": keychain_written,
+        "system_default_enabled": system_default_enabled,
+    }
+
+
+def sync_active_to_targets(
+    enabled_credential_targets: list[str] | None = None,
+) -> dict:
+    """Re-mirror the currently active account's identity into every enabled
+    credential target without performing an account switch.
+
+    Used by the "Sync now" button: the user has just enabled a new target and
+    wants to backfill it immediately so a fresh ``claude`` invocation reads
+    the right account, instead of waiting until the next switch.
+
+    Reads the active config dir from inside the credential lock so a
+    concurrent switch cannot race with us choosing the wrong dir.  Returns
+    the same summary shape as ``activate_account_config``.
+    """
+    from .credential_provider import _credential_lock  # local import avoids cycle
+
+    with _credential_lock:
+        pointer = get_active_config_dir_pointer()
+        if not pointer or not os.path.isdir(pointer):
+            return {
+                "mirror": {
+                    "written": [],
+                    "skipped": [],
+                    "errors": [
+                        "no active account — switch to an account first, then sync"
+                    ],
+                },
+                "keychain_written": False,
+                "system_default_enabled": False,
+            }
+        return _activate_account_config_locked(
+            pointer, list(enabled_credential_targets or [])
+        )
 
 
 # ── Usage helpers ──────────────────────────────────────────────────────────────
@@ -418,3 +381,32 @@ def build_usage(usage_raw: dict, token_info: dict) -> "UsageData | None":
     UsageData.  Public wrapper around UsageData.from_raw so callers outside
     the routers package can access it without importing schemas directly."""
     return UsageData.from_raw(usage_raw, token_info)
+
+
+async def build_ws_snapshot(db) -> list[dict]:
+    """Build the initial WS snapshot from cache + DB id map.
+
+    Used by the /ws endpoint to send the full state to a freshly connected
+    client without duplicating the cache → UsageData flattening logic.
+    """
+    from . import account_queries as aq
+    from ..cache import cache as _cache
+
+    cache_snapshot = await _cache.snapshot()
+    if not cache_snapshot:
+        return []
+    id_map = await aq.get_email_to_id_map(db)
+    snapshot = []
+    for email, usage in cache_snapshot.items():
+        acct_id = id_map.get(email)
+        if acct_id is None:
+            continue
+        token_info = _cache.get_token_info(email) or {}
+        flat = build_usage(usage, token_info)
+        snapshot.append({
+            "id": acct_id,
+            "email": email,
+            "usage": flat.model_dump() if flat else {},
+            "error": usage.get("error"),
+        })
+    return snapshot

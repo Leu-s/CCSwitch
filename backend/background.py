@@ -6,17 +6,15 @@ import httpx
 from sqlalchemy import select
 
 from .database import AsyncSessionLocal
-from .models import Account, TmuxMonitor
+from .models import Account
 from .services import account_service as ac
 from .services.account_service import build_usage
 from .services import anthropic_api
 from .services import settings_service as ss
 from .services import switcher as sw
-from .services import tmux_service
 from .ws import WebSocketManager
 from .config import settings
 from .cache import cache
-from .services import account_queries as aq
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +25,8 @@ _backoff_until: dict[str, float] = {}
 # Maps email → consecutive 429 count for exponential doubling.
 _backoff_count: dict[str, int] = {}
 
-_BACKOFF_INITIAL = 120   # first 429: wait 2 minutes
-_BACKOFF_MAX = 3600      # cap at 1 hour
+_BACKOFF_INITIAL = settings.rate_limit_backoff_initial
+_BACKOFF_MAX = settings.rate_limit_backoff_max
 
 
 async def _process_single_account(account: Account, db) -> tuple[dict, "str | None"]:
@@ -164,7 +162,13 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
                 pass
         logger.warning("Usage fetch failed for %s: %s", account.email, err_str)
 
-        is_rate_limited = "429" in str(e) or "rate_limit" in str(e).lower()
+        # Prefer the response status code over string parsing — it's the
+        # only reliable signal that the API actually rate-limited us, and
+        # the auto-switch loop relies on this flag firing on every 429.
+        if isinstance(e, httpx.HTTPStatusError):
+            is_rate_limited = e.response.status_code == 429
+        else:
+            is_rate_limited = "429" in str(e) or "rate_limit" in str(e).lower()
         new_entry, err_str = await cache.set_usage_error(account.email, err_str, is_rate_limited)
 
         token_info = await cache.get_token_info_async(account.email) or {}
@@ -184,50 +188,6 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
     return usage_entry, new_stale_reason
 
 
-async def _maybe_auto_switch(db, ws: WebSocketManager) -> None:
-    """Check auto-switch threshold for the active account and switch if needed."""
-    auto_enabled = await ss.get_bool("auto_switch_enabled", False, db)
-    if not auto_enabled:
-        return
-
-    current_email = await asyncio.to_thread(ac.get_active_email)
-    if not current_email:
-        return
-
-    # Find the current account to get its per-account threshold
-    current_account = await aq.get_account_by_email(current_email, db)
-    if not current_account:
-        return
-
-    current_usage = await cache.get_usage_async(current_email)
-    five_hour_pct = (current_usage.get("five_hour") or {}).get("utilization", 0)
-    threshold = current_account.threshold_pct
-
-    if five_hour_pct >= threshold:
-        next_account = await sw.get_next_account(current_email, db)
-        if next_account:
-            logger.info(
-                "Auto-switching %s → %s (usage %.1f%% ≥ threshold %.1f%%)",
-                current_email, next_account.email, five_hour_pct, threshold,
-            )
-            await sw.perform_switch(next_account, "threshold", db, ws)
-
-            # Notify tmux monitors
-            monitors_result = await db.execute(
-                select(TmuxMonitor).where(TmuxMonitor.enabled == True)
-            )
-            monitors = monitors_result.scalars().all()
-            await tmux_service.notify_monitors(monitors, ws, settings.haiku_model)
-        else:
-            logger.warning("No eligible account to switch to")
-            try:
-                await ws.broadcast({
-                    "type": "error",
-                    "message": "Rate limit reached — no eligible accounts to switch to",
-                })
-            except Exception as _bc_err:
-                logger.warning("WS broadcast failed: %s", _bc_err)
-
 
 async def poll_usage_and_switch(ws: WebSocketManager) -> None:
     async with AsyncSessionLocal() as db:
@@ -240,10 +200,28 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
         accounts_result = await db.execute(select(Account))
         accounts = accounts_result.scalars().all()
 
+        results = await asyncio.gather(
+            *[_process_single_account(account, db) for account in accounts],
+            return_exceptions=True,
+        )
+
         updated = []
         stale_changed = False
-        for account in accounts:
-            usage_entry, new_stale_reason = await _process_single_account(account, db)
+        for account, result in zip(accounts, results):
+            if isinstance(result, Exception):
+                logger.exception(
+                    "_process_single_account raised for %s: %s", account.email, result
+                )
+                usage_entry = {
+                    "id": account.id,
+                    "email": account.email,
+                    "usage": {"error": str(result)},
+                    "error": str(result),
+                }
+                new_stale_reason = account.stale_reason  # leave unchanged
+            else:
+                usage_entry, new_stale_reason = result
+
             updated.append(usage_entry)
 
             # Flip stale_reason on the DB row if it changed. Rate-limiting is NOT
@@ -266,4 +244,4 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
             logger.warning("WS broadcast failed: %s", _bc_err)
 
         # ── Auto-switch logic ─────────────────────────────────────────────────
-        await _maybe_auto_switch(db, ws)
+        await sw.maybe_auto_switch(db, ws)

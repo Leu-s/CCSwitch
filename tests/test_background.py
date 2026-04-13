@@ -6,7 +6,9 @@ background.py now:
 - calls account_service.get_access_token_from_config_dir(account.config_dir)
 - calls account_service.get_active_email() (no args)
 - gates all work behind service_enabled setting (not auto_switch_enabled)
-- notify_monitors is now in tmux_service; tests import it from there directly.
+- delegates auto-switch decisions to switcher.maybe_auto_switch, which also
+  fires a tmux nudge (tmux_service.fire_nudge) after every successful switch
+  when the user has opted in via settings.
 """
 import time
 import pytest
@@ -99,32 +101,6 @@ async def test_poll_does_nothing_when_service_disabled():
         await poll_usage_and_switch(mock_ws)
 
     mock_ws.broadcast.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_notify_tmux_monitors_manual_pattern():
-    from backend.services.tmux_service import notify_monitors
-
-    mock_ws = AsyncMock()
-    monitor = MagicMock()
-    monitor.id = 1
-    monitor.pattern_type = "manual"
-    monitor.pattern = "main:0.0"
-
-    with patch("backend.services.tmux_service.list_panes", return_value=[{"target": "main:0.0", "command": "claude"}]), \
-         patch("backend.services.tmux_service.send_continue") as mock_send, \
-         patch("backend.services.tmux_service.capture_pane", return_value="some output"), \
-         patch("backend.services.tmux_service.evaluate_with_haiku", new_callable=AsyncMock,
-               return_value={"status": "SUCCESS", "explanation": "All good", "raw": "SUCCESS All good"}):
-        import asyncio
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            await notify_monitors([monitor], mock_ws, "claude-haiku-4-5-20251001")
-
-    mock_send.assert_called_once_with("main:0.0")
-    mock_ws.broadcast.assert_called_once()
-    data = mock_ws.broadcast.call_args[0][0]
-    assert data["type"] == "tmux_result"
-    assert data["status"] == "SUCCESS"
 
 
 # ── Race-condition fix: error path reads and writes cache inside one lock ──────
@@ -418,7 +394,7 @@ async def test_refresh_token_401_marks_permanently_expired():
 
 def _make_db_for_auto_switch(account, auto_switch_enabled="true",
                              current_account=None, next_account=None,
-                             monitors=None):
+                             tmux_nudge_enabled="false"):
     """Return a mock async DB for auto-switch scenarios.
 
     DB execute calls in order:
@@ -427,7 +403,8 @@ def _make_db_for_auto_switch(account, auto_switch_enabled="true",
       3. auto_switch_enabled setting (inside _maybe_auto_switch)
       4. get_account_by_email (inside _maybe_auto_switch via aq)
       5. get_next_account query (inside _maybe_auto_switch via sw)
-      6. tmux monitors query (only if switch happens)
+      6. (if switch fires) tmux_nudge_enabled setting
+      7. (if nudge enabled) tmux_nudge_message setting
     """
     mock_db = AsyncMock()
     mock_db.commit = AsyncMock()
@@ -452,8 +429,8 @@ def _make_db_for_auto_switch(account, auto_switch_enabled="true",
             result.scalars.return_value.first.return_value = current_account
         elif call_count[0] == 5:        # get_next_account
             result.scalars.return_value.first.return_value = next_account
-        elif call_count[0] == 6:        # tmux monitors
-            result.scalars.return_value.all.return_value = monitors or []
+        elif call_count[0] == 6:        # tmux_nudge_enabled
+            result.scalars.return_value.first.return_value = make_setting(tmux_nudge_enabled)
         else:
             result.scalars.return_value.first.return_value = None
             result.scalars.return_value.all.return_value = []
@@ -500,9 +477,9 @@ async def test_auto_switch_triggered_when_threshold_exceeded():
                new_callable=AsyncMock, return_value={
                    "five_hour": {"utilization": 85.0, "resets_at": "2099-01-01T00:00:00Z"},
                }), \
-         patch("backend.background.ac.get_active_email", return_value=active_email), \
-         patch("backend.background.sw.perform_switch", new_callable=AsyncMock) as mock_switch, \
-         patch("backend.background.tmux_service.notify_monitors", new_callable=AsyncMock):
+         patch("backend.services.switcher.ac.get_active_email", return_value=active_email), \
+         patch("backend.services.switcher.perform_switch", new_callable=AsyncMock) as mock_switch, \
+         patch("backend.services.switcher.tmux_service.fire_nudge"):
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)
@@ -547,8 +524,8 @@ async def test_auto_switch_not_triggered_below_threshold():
                new_callable=AsyncMock, return_value={
                    "five_hour": {"utilization": 70.0, "resets_at": "2099-01-01T00:00:00Z"},
                }), \
-         patch("backend.background.ac.get_active_email", return_value=active_email), \
-         patch("backend.background.sw.perform_switch", new_callable=AsyncMock) as mock_switch:
+         patch("backend.services.switcher.ac.get_active_email", return_value=active_email), \
+         patch("backend.services.switcher.perform_switch", new_callable=AsyncMock) as mock_switch:
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)
@@ -592,8 +569,8 @@ async def test_auto_switch_no_eligible_next_account():
                new_callable=AsyncMock, return_value={
                    "five_hour": {"utilization": 90.0, "resets_at": "2099-01-01T00:00:00Z"},
                }), \
-         patch("backend.background.ac.get_active_email", return_value=active_email), \
-         patch("backend.background.sw.perform_switch", new_callable=AsyncMock) as mock_switch:
+         patch("backend.services.switcher.ac.get_active_email", return_value=active_email), \
+         patch("backend.services.switcher.perform_switch", new_callable=AsyncMock) as mock_switch:
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)
@@ -631,7 +608,7 @@ async def test_auto_switch_disabled_skips_check():
                new_callable=AsyncMock, return_value={
                    "five_hour": {"utilization": 50.0},
                }), \
-         patch("backend.background.ac.get_active_email") as mock_get_active:
+         patch("backend.services.switcher.ac.get_active_email") as mock_get_active:
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)

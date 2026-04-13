@@ -6,9 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from ..database import get_db
-from ..models import Account, SwitchLog
+from ..models import SwitchLog
 from ..schemas import AccountUpdate, AccountOut, AccountWithUsage, SwitchLogOut, UsageData
-from ..schemas import LoginSessionOut, LoginVerifyResult, OkResult, LogCount
+from ..schemas import LoginSessionOut, LoginVerifyResult, LogCount
 from ..config import settings
 from ..services import account_service as ac
 from ..services import account_queries as aq

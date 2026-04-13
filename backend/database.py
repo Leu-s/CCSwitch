@@ -1,8 +1,8 @@
 import logging
 import os
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy import text
 from .config import settings
 
 logger = logging.getLogger(__name__)
@@ -12,6 +12,18 @@ engine = create_async_engine(
     echo=False,
     connect_args={"check_same_thread": False},
 )
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _enable_sqlite_wal(dbapi_connection, _connection_record):
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        cursor.close()
+
+
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -50,7 +62,6 @@ async def init_db() -> None:
         """Run alembic in a thread — alembic is not async-native."""
         # Check whether the alembic_version table exists (i.e. this DB has
         # already been managed by Alembic before).
-        from alembic.runtime.migration import MigrationContext
         from sqlalchemy import create_engine, inspect
 
         # Use the synchronous SQLite URL for the alembic bootstrap check

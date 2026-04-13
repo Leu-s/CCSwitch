@@ -1,7 +1,6 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional
-import re as re_module
 
 
 # ── Accounts ──────────────────────────────────────────────────────────────────
@@ -43,6 +42,8 @@ class UsageData(BaseModel):
         base = dict(token_info)
         if "error" in usage_raw:
             base["error"] = usage_raw["error"]
+            if usage_raw.get("rate_limited"):
+                base["rate_limited"] = True
             return cls(**base)
         fh = usage_raw.get("five_hour") or {}
         sd = usage_raw.get("seven_day") or {}
@@ -113,69 +114,6 @@ class SettingUpdate(BaseModel):
     value: str
 
 
-# ── Tmux ───────────────────────────────────────────────────────────────────────
-
-class TmuxMonitorCreate(BaseModel):
-    name: str
-    pattern_type: str = "manual"
-    pattern: str
-    enabled: bool = True
-
-    @field_validator("pattern")
-    @classmethod
-    def validate_pattern(cls, v, info):
-        pattern_type = (info.data or {}).get("pattern_type", "manual")
-        if pattern_type == "regex":
-            try:
-                re_module.compile(v)
-            except re_module.error as e:
-                raise ValueError(f"Invalid regex pattern: {e}") from e
-        return v
-
-
-class TmuxMonitorUpdate(BaseModel):
-    name: Optional[str] = None
-    pattern_type: Optional[str] = None
-    pattern: Optional[str] = None
-    enabled: Optional[bool] = None
-
-    @field_validator("pattern")
-    @classmethod
-    def validate_pattern(cls, v, info):
-        if v is None:
-            return v
-        pattern_type = (info.data or {}).get("pattern_type", "manual")
-        if pattern_type == "regex":
-            try:
-                re_module.compile(v)
-            except re_module.error as e:
-                raise ValueError(f"Invalid regex pattern: {e}") from e
-        return v
-
-
-class TmuxMonitorOut(BaseModel):
-    id: int
-    name: str
-    pattern_type: str
-    pattern: str
-    enabled: bool
-    model_config = {"from_attributes": True}
-
-
-class TmuxPane(BaseModel):
-    target: str
-    command: str
-
-
-class CaptureResult(BaseModel):
-    target: str
-    output: str
-
-
-class OkResult(BaseModel):
-    ok: bool
-
-
 # ── Settings (response) ──────────────────────────────────────────────────────
 
 class ShellStatus(BaseModel):
@@ -191,3 +129,19 @@ class SetupShellResult(BaseModel):
 
 class LogCount(BaseModel):
     total: int
+
+
+# ── Credential targets (auto-discovered .claude.json mirror list) ─────────────
+
+class CredentialTargetOut(BaseModel):
+    path: str
+    canonical: str
+    label: str
+    exists: bool
+    current_email: Optional[str] = None
+    enabled: bool
+
+
+class CredentialTargetUpdate(BaseModel):
+    canonical: str
+    enabled: bool

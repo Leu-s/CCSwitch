@@ -1,9 +1,9 @@
 """
 Tests for backend.services.switcher.
 
-The Account model no longer has keychain_suffix / account_uuid / org_uuid.
-perform_switch now calls account_service.activate_account_config() instead
-of keychain read/write helpers.
+perform_switch fetches the user-chosen mirror targets from the DB and
+passes them to account_service.activate_account_config alongside the target
+config dir.
 """
 import asyncio
 import pytest
@@ -48,8 +48,6 @@ async def test_get_next_account_returns_none_when_no_others():
 async def test_get_next_account_skips_stale():
     """get_next_account must not return an account that has stale_reason set."""
     from backend.services.switcher import get_next_account
-    # The DB query with the stale_reason == None filter returns nothing
-    # because the only other account is stale.
     mock_result = MagicMock()
     mock_result.scalars.return_value.first.return_value = None
     mock_db = AsyncMock()
@@ -59,8 +57,9 @@ async def test_get_next_account_skips_stale():
 
 
 @pytest.mark.asyncio
-async def test_perform_switch_calls_activate_and_broadcasts():
-    """perform_switch should activate the target's config dir and broadcast."""
+async def test_perform_switch_activates_with_enabled_targets_and_broadcasts():
+    """perform_switch should fetch enabled credential targets from the DB
+    and pass them to activate_account_config alongside the target dir."""
     from backend.services.switcher import perform_switch
 
     target = make_account(2, "new@x.com", 1, config_dir="/tmp/fake-account-2")
@@ -73,16 +72,26 @@ async def test_perform_switch_calls_activate_and_broadcasts():
 
     mock_ws = AsyncMock()
 
+    fake_enabled = ["/Users/me/.claude.json", "/Users/me/.claude-accounts/foo/.claude.json"]
+
     with patch("backend.services.account_service.get_active_email", return_value="old@x.com"), \
-         patch("backend.services.account_service.activate_account_config") as mock_activate:
+         patch("backend.services.credential_targets.enabled_canonical_paths",
+               AsyncMock(return_value=fake_enabled)), \
+         patch("backend.services.account_service.activate_account_config",
+               return_value={
+                   "mirror": {"written": fake_enabled, "skipped": [], "errors": []},
+                   "keychain_written": True,
+                   "system_default_enabled": True,
+               }) as mock_activate:
         await perform_switch(target, "threshold", mock_db, mock_ws)
 
-    mock_activate.assert_called_once_with("/tmp/fake-account-2")
+    mock_activate.assert_called_once_with("/tmp/fake-account-2", fake_enabled)
     mock_ws.broadcast.assert_called_once()
     broadcast_data = mock_ws.broadcast.call_args[0][0]
     assert broadcast_data["type"] == "account_switched"
     assert broadcast_data["to"] == "new@x.com"
     assert broadcast_data["reason"] == "threshold"
+    assert broadcast_data["mirror"]["written"] == fake_enabled
 
 
 @pytest.mark.asyncio
@@ -97,18 +106,19 @@ async def test_perform_switch_serialized_by_lock():
     import time
     from backend.services import switcher as sw
 
-    # Reset the module-level lock so earlier tests don't affect state.
     sw._switch_lock = asyncio.Lock()
 
-    call_log: list[tuple[str, float]] = []  # (event, timestamp)
+    call_log: list[tuple[str, float]] = []
 
-    # activate_account_config is called via asyncio.to_thread — it must be a
-    # synchronous function.  Use time.sleep() to block the thread and give the
-    # event loop a chance to schedule the second coroutine.
-    def slow_activate(config_dir: str) -> None:
+    def slow_activate(config_dir, enabled_targets=None):
         call_log.append(("start", time.monotonic()))
         time.sleep(0.05)
         call_log.append(("end", time.monotonic()))
+        return {
+            "mirror": {"written": [], "skipped": [], "errors": []},
+            "keychain_written": False,
+            "system_default_enabled": False,
+        }
 
     target_a = make_account(1, "a@x.com", 0, config_dir="/tmp/fake-a")
     target_b = make_account(2, "b@x.com", 1, config_dir="/tmp/fake-b")
@@ -124,20 +134,19 @@ async def test_perform_switch_serialized_by_lock():
     mock_ws = AsyncMock()
 
     with patch("backend.services.account_service.get_active_email", return_value="old@x.com"), \
+         patch("backend.services.credential_targets.enabled_canonical_paths",
+               AsyncMock(return_value=[])), \
          patch("backend.services.account_service.activate_account_config", side_effect=slow_activate):
         await asyncio.gather(
             sw.perform_switch(target_a, "threshold", make_mock_db(), mock_ws),
             sw.perform_switch(target_b, "threshold", make_mock_db(), mock_ws),
         )
 
-    # Both calls completed
     starts = [t for ev, t in call_log if ev == "start"]
     ends = [t for ev, t in call_log if ev == "end"]
     assert len(starts) == 2, "activate_account_config must be called exactly twice"
     assert len(ends) == 2
 
-    # The second activation must not have started before the first finished.
-    # Sort by time to be order-agnostic about which ran first.
     first_end = min(ends)
     second_start = max(starts)
     assert second_start >= first_end - 1e-6, (

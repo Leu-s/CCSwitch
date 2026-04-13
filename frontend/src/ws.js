@@ -3,11 +3,11 @@ import { state } from "./state.js";
 import { qs } from "./utils.js";
 import { toast } from "./toast.js";
 import { renderAccounts, updateUsageLive } from "./ui/accounts.js";
-import { prependSwitchLogRow } from "./ui/log.js";
-import { prependEvent } from "./ui/events.js";
+import { loadSwitchLog } from "./ui/log.js";
 
 let ws = null;
 let wsReconnectAttempts = 0;
+let _replayBoundary = 0;
 // Persisted so a page reload does not replay the full backlog from seq=0,
 // which would miss any switch / delete / usage events buffered since the
 // previous tab was open.
@@ -39,6 +39,7 @@ export function connectWs() {
   try { ws = new WebSocket(url); } catch(e) { scheduleReconnect(); return; }
 
   ws.onopen = () => {
+    _replayBoundary = _lastSeq;
     qs("#ws-dot").classList.remove("disconnected");
     wsReconnectAttempts = 0;
     if (_wsPingInterval) { clearInterval(_wsPingInterval); _wsPingInterval = null; }
@@ -52,19 +53,23 @@ export function connectWs() {
     let msg;
     try { msg = JSON.parse(evt.data); } catch { return; }
 
-    if (msg.seq) {
+    const isReplay = msg.seq != null && msg.seq <= _replayBoundary;
+
+    if (msg.seq != null) {
       _lastSeq = Math.max(_lastSeq, msg.seq);
       try { sessionStorage.setItem("wsLastSeq", String(_lastSeq)); } catch {}
     }
 
     switch(msg.type) {
       case "account_switched":
-        prependSwitchLogRow(msg);
+        loadSwitchLog(0);
         // Use custom events to reload accounts + service without importing those modules
         // (avoids circular dependency account↔service).
         document.dispatchEvent(new CustomEvent("app:reload-accounts"));
         document.dispatchEvent(new CustomEvent("app:reload-service"));
-        toast("Account switched", `→ ${msg.to} (${msg.reason})`, "success");
+        if (!isReplay) {
+          toast("Account switched", `→ ${msg.to} (${msg.reason})`, "success");
+        }
         break;
       case "account_deleted":
         state.accounts = state.accounts.filter(a => a.id !== Number(msg.id));
@@ -72,7 +77,6 @@ export function connectWs() {
         document.dispatchEvent(new CustomEvent("app:reload-service"));
         break;
       case "usage_updated": updateUsageLive(msg.accounts||[]); break;
-      case "tmux_result": prependEvent(msg); break;
       case "error": toast("Server error", msg.message, "error", 6000); break;
       default: break;
     }

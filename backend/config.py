@@ -5,7 +5,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="CLAUDE_MULTI_")
 
     database_url: str = "sqlite+aiosqlite:///./claude_multi_account.db"
-    server_port: int = 8765
+    server_host: str = "127.0.0.1"
+    server_port: int = 41924
     # System-wide Claude Code config directory (~/.claude by default).
     # Prefixed so the app never inherits the user's runtime CLAUDE_CONFIG_DIR,
     # which typically points at a per-account isolated dir.
@@ -29,6 +30,13 @@ class Settings(BaseSettings):
     # all HTTP requests and ?token=... on WebSocket connections.  Empty string
     # means no authentication required (safe for localhost-only use).
     api_token: str = ""
+    # WebSocket replay buffer — how many recent events to keep for reconnecting clients.
+    ws_replay_buffer_size: int = 100
+    # Login session timeout (seconds) — how long an unused login terminal stays alive.
+    login_session_timeout: int = 1800
+    # Rate-limit backoff — initial delay and cap (seconds) after Anthropic 429.
+    rate_limit_backoff_initial: int = 120
+    rate_limit_backoff_max: int = 3600
 
 
 settings = Settings()

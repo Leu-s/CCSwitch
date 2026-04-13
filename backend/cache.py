@@ -66,12 +66,27 @@ class _UsageCache:
         self, email: str, err_str: str, is_rate_limited: bool
     ) -> tuple[dict, str]:
         """Atomically update the cache for a failed probe.
-        Returns (new_entry, final_err_str) — err_str may become 'Rate limited'."""
+
+        Returns (new_entry, final_err_str) — err_str may become 'Rate limited'.
+
+        The ``rate_limited`` flag is set on the cache entry whenever
+        ``is_rate_limited`` is True, regardless of whether prior usage data
+        exists.  The auto-switch loop in ``switcher.maybe_auto_switch``
+        reads this flag to decide whether to switch — losing it for accounts
+        that have never returned usable data would silently break the switch.
+        """
         async with self._lock:
             prev = self._usage.get(email, {})
-            if is_rate_limited and prev and "error" not in prev:
-                new_entry = {**prev, "rate_limited": True}
-                final_err = "Rate limited"
+            if is_rate_limited:
+                if prev and "error" not in prev:
+                    # Preserve the last good utilization data and set the flag.
+                    new_entry = {**prev, "rate_limited": True}
+                    final_err = "Rate limited"
+                else:
+                    # Cold cache or previous error — at minimum record the
+                    # flag so the auto-switch loop can act on it.
+                    new_entry = {"error": err_str, "rate_limited": True}
+                    final_err = err_str
             else:
                 new_entry = {"error": err_str}
                 final_err = err_str

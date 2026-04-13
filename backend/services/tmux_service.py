@@ -1,10 +1,53 @@
+"""
+tmux helpers.
+
+Two responsibilities:
+
+1. Thin wrappers around ``tmux list-panes`` / ``capture-pane`` / ``send-keys``
+   used by the background switch flow.
+2. ``wake_stalled_sessions(message)`` — after an account switch, scan every
+   tmux pane on the box, and for any pane whose recent output matches a
+   rate-limit/usage-limit message send a nudge so that already-running Claude
+   Code sessions pick up the freshly-mirrored credentials and continue.
+
+There are no user-managed monitor rows or LLM-based evaluators anymore.  One
+toggle (``tmux_nudge_enabled``) and one message string (``tmux_nudge_message``)
+control the whole feature.
+"""
+
 import asyncio
 import logging
 import re
 
-from ..ws import WebSocketManager
+from ..database import AsyncSessionLocal
+from . import settings_service as ss
 
 logger = logging.getLogger(__name__)
+
+
+# Patterns that mean "this Claude Code pane is stalled on a rate-limit screen
+# and needs a nudge to continue".  Matched case-insensitively against the last
+# few hundred lines of the pane.  Kept conservative to avoid false positives
+# on benign output that happens to contain the word "limit".
+_STALL_PATTERNS = re.compile(
+    r"("
+    r"usage limit reached"
+    r"|approaching usage limit"
+    r"|claude usage limit"
+    r"|claude.+limit reached"
+    r"|rate limit(ed| exceeded| reached)?"
+    r"|rate_limit_error"
+    r"|429"
+    r"|api error.*overloaded"
+    r"|try again later"
+    r")",
+    re.IGNORECASE,
+)
+
+# Number of pane lines we capture per scan.  Big enough to catch a recent
+# rate-limit notice that has scrolled past the visible region, small enough
+# that capturing every pane is cheap.
+_CAPTURE_LINES = 200
 
 
 async def list_panes() -> list[dict]:
@@ -15,7 +58,16 @@ async def list_panes() -> list[dict]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("tmux list-panes timed out — killing subprocess")
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+            return []
         panes = []
         for line in stdout.decode().strip().splitlines():
             if not line.strip():
@@ -31,98 +83,147 @@ async def list_panes() -> list[dict]:
 
 
 async def send_keys(target: str, text: str, press_enter: bool = True) -> None:
-    cmd = ["tmux", "send-keys", "-t", target, text]
-    if press_enter:
-        cmd.append("Enter")
+    # 1. Send literal text (use -l so key-name tokens are not interpreted)
     proc = await asyncio.create_subprocess_exec(
-        *cmd,
+        "tmux", "send-keys", "-t", target, "-l", text,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    await proc.wait()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        logger.warning("tmux send-keys (literal) timed out — killing subprocess")
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+        return
+
+    # 2. Send Enter as a separate call (key-name, so -l must be absent)
+    if press_enter:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "send-keys", "-t", target, "Enter",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("tmux send-keys (Enter) timed out — killing subprocess")
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
 
 
-async def send_continue(target: str) -> None:
-    await send_keys(target, "continue")
-
-
-async def capture_pane(target: str, lines: int = 20) -> str:
+async def capture_pane(target: str, lines: int = _CAPTURE_LINES) -> str:
     proc = await asyncio.create_subprocess_exec(
         "tmux", "capture-pane", "-t", target, "-p", "-S", f"-{lines}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _ = await proc.communicate()
-    return stdout.decode()
-
-
-async def evaluate_with_haiku(capture: str, model: str) -> dict:
-    prompt = (
-        "Did the Claude Code session successfully continue after an account switch? "
-        "Reply with one of: SUCCESS, FAILED, UNCERTAIN. Then one sentence of explanation.\n\n"
-        f"Terminal output:\n{capture}"
-    )
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "claude", "--print", "--model", model,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(prompt.encode()), timeout=30)
-        output = stdout.decode().strip()
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except asyncio.TimeoutError:
+        logger.warning("tmux capture-pane timed out — killing subprocess")
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+        return ""
+    return stdout.decode(errors="replace")
+
+
+def looks_stalled(capture: str) -> bool:
+    """True if the pane capture contains text that looks like a Claude Code
+    rate-limit / usage-limit notice waiting for the user to continue."""
+    if not capture:
+        return False
+    return bool(_STALL_PATTERNS.search(capture))
+
+
+async def wake_stalled_sessions(message: str) -> dict:
+    """Scan every tmux pane on the box and send ``message`` to each one whose
+    recent output matches a rate-limit notice.
+
+    Returns a summary dict suitable for logging:
+
+        {
+          "scanned": int,    # total panes inspected
+          "nudged":  [target, ...],
+          "errors":  [{"target": ..., "error": ...}],
+        }
+
+    Used by the background switch flow as a "kick stalled sessions" step
+    after every successful ``perform_switch``.  Safe to call when no panes
+    match — does nothing in that case.
+    """
+    summary = {"scanned": 0, "nudged": [], "errors": []}
+    if not message:
+        return summary
+
+    panes = await list_panes()
+    summary["scanned"] = len(panes)
+
+    for pane in panes:
+        target = pane.get("target")
+        if not target:
+            continue
+        try:
+            capture = await capture_pane(target)
+            if not looks_stalled(capture):
+                continue
+            await send_keys(target, message, press_enter=True)
+            summary["nudged"].append(target)
+            logger.info("tmux nudge sent to %s (%s)", target, pane.get("command"))
+        except Exception as e:
+            summary["errors"].append({"target": target, "error": str(e)})
+            logger.warning("tmux nudge failed for %s: %s", target, e)
+    return summary
+
+
+# ── Post-switch nudge orchestration ───────────────────────────────────────────
+# Called fire-and-forget by switcher.perform_switch so a slow tmux scan cannot
+# stall the poll loop.  Opens its own DB session because the caller's session
+# is released as soon as perform_switch returns — using it from a background
+# task would race with session pool lifecycle.
+
+
+async def _nudge_if_enabled() -> None:
+    """Read the two nudge settings in a fresh DB session and, if enabled,
+    scan every pane for a rate-limit notice and send the configured message."""
+    async with AsyncSessionLocal() as db:
+        enabled = await ss.get_bool("tmux_nudge_enabled", False, db)
+        if not enabled:
+            return
+        message = await ss.get_setting("tmux_nudge_message", "continue", db)
+    try:
+        summary = await wake_stalled_sessions(message)
+        if summary["nudged"]:
+            logger.info(
+                "tmux nudge: scanned %d pane(s), nudged %d (%s)",
+                summary["scanned"], len(summary["nudged"]),
+                ", ".join(summary["nudged"]),
+            )
+        elif summary["scanned"]:
+            logger.debug(
+                "tmux nudge: scanned %d pane(s), no rate-limit notices found",
+                summary["scanned"],
+            )
     except Exception as e:
-        return {"status": "UNCERTAIN", "explanation": str(e), "raw": ""}
-    status = "UNCERTAIN"
-    for s in ("SUCCESS", "FAILED", "UNCERTAIN"):
-        if s in output:
-            status = s
-            break
-    explanation = output.replace(status, "").strip(" .\n") or "No explanation"
-    return {"status": status, "explanation": explanation, "raw": output}
+        logger.warning("tmux nudge failed: %s", e)
 
 
-async def notify_monitors(monitors, ws: WebSocketManager, model: str) -> None:
-    """
-    For each enabled monitor, find matching tmux panes, send 'continue',
-    capture output, evaluate with Haiku, and broadcast the result.
-    """
-    all_panes = await list_panes()
-    for monitor in monitors:
-        if monitor.pattern_type == "manual":
-            matching = [p for p in all_panes if p["target"] == monitor.pattern]
-        else:
-            try:
-                matching = [p for p in all_panes if re.search(monitor.pattern, p["target"])]
-            except re.error:
-                matching = []
-
-        for pane in matching:
-            try:
-                await send_continue(pane["target"])
-                await asyncio.sleep(2)
-                capture = await capture_pane(pane["target"])
-                eval_result = await evaluate_with_haiku(capture, model)
-                try:
-                    await ws.broadcast({
-                        "type": "tmux_result",
-                        "monitor_id": monitor.id,
-                        "target": pane["target"],
-                        "status": eval_result["status"],
-                        "explanation": eval_result["explanation"],
-                        "capture": capture,
-                    })
-                except Exception as _bc_err:
-                    logger.warning("WS broadcast failed: %s", _bc_err)
-            except Exception as e:
-                try:
-                    await ws.broadcast({
-                        "type": "tmux_result",
-                        "monitor_id": monitor.id,
-                        "target": pane["target"],
-                        "status": "FAILED",
-                        "explanation": str(e),
-                        "capture": "",
-                    })
-                except Exception as _bc_err:
-                    logger.warning("WS broadcast failed: %s", _bc_err)
+def fire_nudge() -> None:
+    """Schedule ``_nudge_if_enabled`` as a background task.  Safe to call from
+    any async context; returns immediately so the caller is never blocked by a
+    slow tmux scan."""
+    async def _run():
+        try:
+            await _nudge_if_enabled()
+        except Exception as e:
+            logger.warning("fire_nudge task failed: %s", e)
+    asyncio.create_task(_run())

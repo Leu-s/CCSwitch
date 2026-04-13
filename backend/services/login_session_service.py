@@ -32,8 +32,8 @@ _active_login_sessions: dict[str, float] = {}
 # cleanup_login_session, which also needs the lock.
 _sessions_lock = threading.RLock()
 
-# Sessions older than this many seconds are considered expired
-_SESSION_TIMEOUT: int = 1800  # 30 minutes
+# Sessions older than this are considered expired — read from config for tunability.
+_SESSION_TIMEOUT: int = settings.login_session_timeout
 
 
 # ── Private path helpers (inlined to avoid circular imports) ──────────────────

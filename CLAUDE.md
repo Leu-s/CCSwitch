@@ -9,10 +9,12 @@ A local FastAPI dashboard that lets you keep several Claude.ai subscription
 accounts, each in its own isolated `CLAUDE_CONFIG_DIR`.  It polls Anthropic's
 `/v1/messages` endpoint with a near-empty probe just to read the unified
 rate-limit headers, and when the active account approaches its 5-hour window
-limit it auto-switches to the next eligible account (credentials are copied
-into `~/.claude/` and the macOS Keychain so a fresh `claude` run picks the
-change up immediately).  A tmux integration can "continue" paused sessions
-after a switch and evaluate the outcome with a Haiku call.
+limit (or gets rate-limited) it auto-switches to the next eligible account
+(credentials are copied into `~/.claude/` and the macOS Keychain so a fresh
+`claude` run picks the change up immediately).  Optionally, after every
+switch a tmux nudge scan sends a configurable message to any pane whose
+recent output matches a rate-limit notice, so already-running Claude Code
+sessions resume work with the freshly-mirrored credentials.
 
 ## Layout
 
@@ -23,15 +25,15 @@ backend/
   cache.py             _UsageCache class + module-level cache singleton
   config.py            Pydantic settings (env prefix: CLAUDE_MULTI_)
   database.py          async SQLAlchemy engine + init_db (Alembic-backed)
-  models.py            Account, TmuxMonitor, SwitchLog, Setting (with indexes)
+  models.py            Account, SwitchLog, Setting (with indexes)
   schemas.py           Pydantic request/response models
   ws.py                Minimal WebSocketManager (broadcast + connection list)
   auth.py              Optional Bearer/WS token middleware
   routers/
-    accounts.py        /api/accounts CRUD + login flow
-    service.py         /api/service enable/disable + default-account
-    settings.py        /api/settings get/patch + shell-setup helper
-    tmux.py            /api/tmux/* panes, monitors, evaluate
+    accounts.py            /api/accounts CRUD + login flow
+    service.py             /api/service enable/disable + default-account
+    settings.py            /api/settings get/patch + shell-setup helper
+    credential_targets.py  /api/credential-targets list/rescan/toggle/sync
   services/
     credential_provider.py  CANONICAL: Keychain read/write, _load_json_safe,
                             active_dir_pointer_path, _credential_lock (RLock)
@@ -39,14 +41,17 @@ backend/
                             path helpers — imports shared utils from credential_provider
     account_queries.py      DB query helpers (get_by_id, get_by_email, etc.)
     login_session_service.py  isolated add-account login sessions (+RLock)
+    credential_targets.py   discover .claude.json targets + JSON settings row
     anthropic_api.py   probe_usage() + refresh_access_token()
-    switcher.py        get_next_account() + perform_switch() (+ _switch_lock asyncio)
+    switcher.py        get_next_account() + perform_switch() + maybe_auto_switch
+                       (+ _switch_lock asyncio)
     settings_service.py  typed get/set for Setting rows (bool/int/int_or_none/json)
-    tmux_service.py    list_panes, send_keys, capture_pane, evaluate_with_haiku
+    tmux_service.py    list_panes, send_keys, capture_pane, looks_stalled,
+                        wake_stalled_sessions, fire_nudge (post-switch)
 frontend/
-  index.html           HTML shell (259 lines)
+  index.html           HTML shell (Accounts page + Settings page + Add-account modal)
   src/
-    main.js            App entry point — tabs, theme, shell status, init
+    main.js            App entry point — theme, shell status, page toggle, init
     api.js             Fetch wrapper (30s timeout, error extraction)
     ws.js              WebSocket with exponential reconnect + sequence replay
     state.js           Shared mutable state object
@@ -55,14 +60,15 @@ frontend/
     toast.js           Toast notification system
     style.css          Full stylesheet (dark default, light via data-theme)
     ui/
-      accounts.js      Account cards, drag-reorder, threshold slider
-      service.js       Service toggle, default account
-      log.js           Switch log with pagination
-      login.js         Add-account modal (multi-step login flow)
-      tmux.js          Monitors, pane terminal, event feed
-      events.js        Custom DOM event helpers
+      accounts.js              Account cards, drag-reorder, threshold slider
+      service.js               Service toggle, default account
+      log.js                   Switch log with pagination
+      login.js                 Add-account modal (multi-step login flow)
+      credential_targets.js    Settings-page Credential Targets panel
+      tmux_nudge.js            Settings-page Wake Tmux Sessions block
 alembic/
-  versions/            Schema migrations (initial schema + drop_display_name)
+  versions/            Schema migrations (initial + drop_display_name
+                       + drop_tmux_monitors)
 tests/
   conftest.py          tmp-dir isolation + make_test_app factory fixture
   test_*.py            router + service + background + schemas + e2e
@@ -111,7 +117,8 @@ tests/
 - **Local only**.  The `/ws` endpoint has no authentication — the app is
   intended to run on `127.0.0.1:41924` behind your browser.  Host and port
   are configurable via `CLAUDE_MULTI_SERVER_HOST` / `CLAUDE_MULTI_SERVER_PORT`.
-- **tmux required** for the login flow and monitor features.
+- **tmux required** for the Add-Account login flow.  The tmux nudge
+  (`wake_stalled_sessions`) is an opt-in feature on the Settings page — off by default.
 - **Python 3.12+** (the repo's `.venv` runs on 3.14).
 
 ## Tests

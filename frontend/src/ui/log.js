@@ -109,10 +109,6 @@ export async function loadSwitchLog(page) {
   } catch(e) { toast("Failed to load switch log", e.message, "error"); }
 }
 
-export function prependSwitchLogRow() {
-  loadSwitchLog(0);
-}
-
 export function initLogListeners() {
   qs("#log-prev-btn").addEventListener("click", () => loadSwitchLog(state.logPage - 1));
   qs("#log-next-btn").addEventListener("click", () => loadSwitchLog(state.logPage + 1));

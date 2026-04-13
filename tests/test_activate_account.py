@@ -1,9 +1,12 @@
 """
-Integration-ish tests for account_service.activate_account_config.
+Integration-ish tests for account_service.activate_account_config under the
+credential-targets model.
 
-These tests exercise the path that was previously broken: when a user switches
-accounts in the UI, new `claude` invocations (no CLAUDE_CONFIG_DIR set) must
-read the new account's oauthAccount from $HOME/.claude.json.
+The function now takes an explicit list of enabled target paths.  With an
+empty list, nothing outside the isolated account dir is touched.  With the
+HOME ``.claude.json`` included, the legacy Keychain and ``~/.claude/``
+plaintext fallback are also updated — matching what a fresh ``claude`` run
+reads when CLAUDE_CONFIG_DIR is unset.
 
 All Keychain operations are monkey-patched so tests run hermetically on Linux
 and CI.
@@ -11,7 +14,6 @@ and CI.
 import json
 import os
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -31,9 +33,7 @@ def fake_home(tmp_path, monkeypatch):
 @pytest.fixture
 def fake_keychain(monkeypatch):
     """Replace the keychain-touching subprocess calls with an in-memory dict."""
-    # service_name -> credentials_json_str
     store: dict[str, str] = {}
-    # Calls made against `security delete-generic-password -s X -a Y`.
     deletions: list[tuple[str, str]] = []
 
     def fake_read(config_dir: str) -> dict:
@@ -45,16 +45,11 @@ def fake_keychain(monkeypatch):
         store[service] = json.dumps(credentials)
         return True
 
-    # Stale-entry cleanup calls subprocess.run([...delete-generic-password...])
-    # directly; intercept with a wrapper that records but doesn't touch the real
-    # keychain. Any OTHER subprocess call still goes through (we're not in tmux
-    # tests here, so none expected).
     import subprocess
     real_run = subprocess.run
 
     def fake_run(argv, *a, **kw):
         if isinstance(argv, list) and argv[:2] == ["security", "delete-generic-password"]:
-            # argv is like ["security","delete-generic-password","-s",svc,"-a",acct]
             svc = argv[argv.index("-s") + 1] if "-s" in argv else ""
             acct = argv[argv.index("-a") + 1] if "-a" in argv else ""
             deletions.append((svc, acct))
@@ -96,7 +91,6 @@ def make_account_dir(
     if extra_keys:
         claude_json.update(extra_keys)
     (d / ".claude.json").write_text(json.dumps(claude_json))
-    # Prime the fake keychain with this dir's credentials
     from backend.services.credential_provider import _keychain_service_name
     fake_keychain["store"][_keychain_service_name(str(d))] = json.dumps({
         "claudeAiOauth": {
@@ -110,15 +104,19 @@ def make_account_dir(
     return d
 
 
-# ── Tests ───────────────────────────────────────────────────────────────────
+def _home_canonical(fake_home: Path) -> str:
+    """Canonical path of $HOME/.claude.json used as a credential target."""
+    return os.path.realpath(str(fake_home / ".claude.json"))
 
 
-def test_activate_merges_oauth_into_home(fake_home, fake_keychain):
-    """After activate_account_config, $HOME/.claude.json has the target's
-    oauthAccount merged in, preserving any pre-existing home keys."""
+# ── Tests: HOME target enabled (most common configuration) ─────────────────
+
+
+def test_activate_with_home_target_merges_oauth_into_home(fake_home, fake_keychain):
+    """With HOME .claude.json in enabled_targets, activate mirrors the
+    target's oauthAccount into HOME while preserving unrelated keys."""
     from backend.services import account_service as ac
 
-    # Pre-populate $HOME/.claude.json with unrelated state we must preserve.
     home_json = fake_home / ".claude.json"
     home_json.write_text(json.dumps({
         "oauthAccount": {"emailAddress": "old@x.com"},
@@ -129,81 +127,52 @@ def test_activate_merges_oauth_into_home(fake_home, fake_keychain):
 
     acct_dir = make_account_dir(fake_home, "a", "new@x.com", "tok-a", fake_keychain)
 
-    ac.activate_account_config(str(acct_dir))
+    summary = ac.activate_account_config(str(acct_dir), [_home_canonical(fake_home)])
 
-    # Home file was updated with the new oauthAccount…
     home = json.loads(home_json.read_text())
     assert home["oauthAccount"]["emailAddress"] == "new@x.com"
     assert home["userID"] == "userid-a"
-    # …and unrelated keys were preserved.
     assert home["projects"] == {"/some/project": {"history": ["hi"]}}
     assert home["autoUpdates"] is True
     assert home["someOtherKey"] == "stays"
 
-    # get_active_email now reflects the new account
     assert ac.get_active_email() == "new@x.com"
 
-    # Legacy keychain entry was updated with the target's token
     legacy = json.loads(fake_keychain["store"]["Claude Code-credentials"])
     assert legacy["claudeAiOauth"]["accessToken"] == "tok-a"
 
+    assert summary["system_default_enabled"] is True
+    assert summary["keychain_written"] is True
+    assert _home_canonical(fake_home) in summary["mirror"]["written"]
 
-def test_switch_between_two_accounts_roundtrip(fake_home, fake_keychain):
-    """Switching A → B → A updates email and token each time."""
+
+def test_switch_between_two_accounts_with_home_target(fake_home, fake_keychain):
+    """Switching A → B → A updates email and token each time when HOME is a target."""
     from backend.services import account_service as ac
 
     a = make_account_dir(fake_home, "a", "a@x.com", "tok-a", fake_keychain)
     b = make_account_dir(fake_home, "b", "b@x.com", "tok-b", fake_keychain)
+    targets = [_home_canonical(fake_home)]
 
-    ac.activate_account_config(str(a))
+    ac.activate_account_config(str(a), targets)
     assert ac.get_active_email() == "a@x.com"
     assert json.loads(fake_keychain["store"]["Claude Code-credentials"])["claudeAiOauth"]["accessToken"] == "tok-a"
 
-    ac.activate_account_config(str(b))
+    ac.activate_account_config(str(b), targets)
     assert ac.get_active_email() == "b@x.com"
     assert json.loads(fake_keychain["store"]["Claude Code-credentials"])["claudeAiOauth"]["accessToken"] == "tok-b"
 
-    ac.activate_account_config(str(a))
+    ac.activate_account_config(str(a), targets)
     assert ac.get_active_email() == "a@x.com"
     assert json.loads(fake_keychain["store"]["Claude Code-credentials"])["claudeAiOauth"]["accessToken"] == "tok-a"
 
 
-def test_switch_writes_back_home_state_to_previous_account(fake_home, fake_keychain):
-    """
-    User runs `claude` without CLAUDE_CONFIG_DIR while account A is active.
-    Claude writes new project state to $HOME/.claude.json. When we switch to
-    B, that new state should be written back to A's isolated dir so it isn't
-    lost next time A is activated.
-    """
+def test_activate_missing_oauth_returns_error_in_summary(fake_home, fake_keychain):
+    """If the target has no oauthAccount, the mirror summary reports an error
+    but activation still advances the pointer (the isolated dir is still the
+    account — it's the target file that cannot receive a merge)."""
     from backend.services import account_service as ac
 
-    a = make_account_dir(fake_home, "a", "a@x.com", "tok-a", fake_keychain)
-    b = make_account_dir(fake_home, "b", "b@x.com", "tok-b", fake_keychain)
-
-    ac.activate_account_config(str(a))
-
-    # Simulate Claude Code appending a project while A is active.
-    home_json = fake_home / ".claude.json"
-    home = json.loads(home_json.read_text())
-    home["projects"] = {"/work/proj": {"opened": True}}
-    home_json.write_text(json.dumps(home))
-
-    ac.activate_account_config(str(b))
-
-    # A's dir should now contain the project entry (writeback)
-    a_json = json.loads((a / ".claude.json").read_text())
-    assert a_json["projects"] == {"/work/proj": {"opened": True}}
-
-    # And B's oauthAccount is now in home
-    assert ac.get_active_email() == "b@x.com"
-
-
-def test_activate_refuses_target_without_oauth(fake_home, fake_keychain, caplog):
-    """If the target account dir has no oauthAccount, activation raises
-    ValueError (rather than silently wiping home state)."""
-    from backend.services import account_service as ac
-
-    # Pre-existing home state
     home_json = fake_home / ".claude.json"
     home_json.write_text(json.dumps({
         "oauthAccount": {"emailAddress": "existing@x.com"},
@@ -214,23 +183,25 @@ def test_activate_refuses_target_without_oauth(fake_home, fake_keychain, caplog)
     bad.mkdir()
     (bad / ".claude.json").write_text(json.dumps({"someUnrelatedKey": 1}))
 
-    with pytest.raises(ValueError, match="no oauthAccount"):
-        ac.activate_account_config(str(bad))
+    summary = ac.activate_account_config(str(bad), [_home_canonical(fake_home)])
 
-    # Home unchanged
-    assert ac.get_active_email() == "existing@x.com"
+    # Mirror summary surfaces the error.
+    assert summary["mirror"]["errors"], "missing oauthAccount should surface an error"
+    assert any("oauthAccount" in e for e in summary["mirror"]["errors"])
+
+    # HOME was NOT touched because the source had no oauthAccount — mirror_oauth_into_targets
+    # refuses to write anything when the source is unusable.
+    home = json.loads(home_json.read_text())
+    assert home["oauthAccount"]["emailAddress"] == "existing@x.com"
 
 
-def test_stale_claude_code_keychain_entries_are_cleaned(fake_home, fake_keychain):
-    """After activate_account_config, any legacy 'Claude Code-credentials' entries
-    for accounts other than $USER are scheduled for deletion."""
+def test_stale_keychain_entries_cleaned_when_home_target_enabled(fake_home, fake_keychain):
+    """Stale-cleanup runs only when a system-default target is enabled."""
     from backend.services import account_service as ac
 
     a = make_account_dir(fake_home, "a", "a@x.com", "tok-a", fake_keychain)
-    ac.activate_account_config(str(a))
+    ac.activate_account_config(str(a), [_home_canonical(fake_home)])
 
-    # The stale-cleanup call should have attempted to delete the known-bad
-    # legacy account strings against 'Claude Code-credentials'.
     deletions = fake_keychain["deletions"]
     assert any(svc == "Claude Code-credentials" and acct == "claude-code"
                for svc, acct in deletions)
@@ -238,80 +209,107 @@ def test_stale_claude_code_keychain_entries_are_cleaned(fake_home, fake_keychain
                for svc, acct in deletions)
 
 
-def test_active_dir_pointer_updated(fake_home, fake_keychain):
-    """activate_account_config writes the target dir to ~/.claude-multi/active
-    so the shell-profile snippet picks it up in new terminals."""
+def test_keychain_write_failure_does_not_advance_pointer(fake_home, fake_keychain, monkeypatch):
+    """If the plaintext .credentials.json copy raises during activation,
+    the pointer must NOT advance to the new target."""
+    from backend.services import account_service as ac
+
+    prev = make_account_dir(fake_home, "prev", "prev@x.com", "tok-prev", fake_keychain)
+    new = make_account_dir(fake_home, "new", "new@x.com", "tok-new", fake_keychain)
+    # Plant a .credentials.json in the new dir so the copy step runs.
+    (new / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok-new"}}))
+
+    targets = [_home_canonical(fake_home)]
+    ac.activate_account_config(str(prev), targets)
+    ptr_path = fake_home / ".claude-multi" / "active"
+    assert ptr_path.read_text().strip() == str(prev)
+
+    # Force shutil.copy2 to raise during the plaintext copy step.
+    def failing_copy(src, dst, *a, **kw):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("backend.services.account_service.shutil.copy2", failing_copy)
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        ac.activate_account_config(str(new), targets)
+
+    # Pointer must still be the previous account — step 3 is never reached.
+    assert ptr_path.read_text().strip() == str(prev)
+
+
+# ── Tests: no targets enabled (default — nothing outside isolated dir) ─────
+
+
+def test_activate_with_no_targets_leaves_home_untouched(fake_home, fake_keychain):
+    """With an empty enabled_targets list, HOME .claude.json is not modified."""
+    from backend.services import account_service as ac
+
+    home_json = fake_home / ".claude.json"
+    home_json.write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "existing@x.com"},
+        "userID": "existing-uid",
+    }))
+
+    acct_dir = make_account_dir(fake_home, "a", "new@x.com", "tok-a", fake_keychain)
+    summary = ac.activate_account_config(str(acct_dir), [])
+
+    home = json.loads(home_json.read_text())
+    assert home["oauthAccount"]["emailAddress"] == "existing@x.com"
+    assert home["userID"] == "existing-uid"
+
+    # No legacy Keychain write either.
+    assert "Claude Code-credentials" not in fake_keychain["store"]
+
+    assert summary["system_default_enabled"] is False
+    assert summary["keychain_written"] is False
+    # The mirror step records a "no targets enabled" skip message.
+    assert summary["mirror"]["skipped"], summary
+
+
+def test_activate_with_no_targets_still_updates_pointer(fake_home, fake_keychain):
+    """The active pointer is always written — it reflects dashboard intent,
+    independent of external mirroring."""
     from backend.services import account_service as ac
 
     a = make_account_dir(fake_home, "a", "a@x.com", "tok-a", fake_keychain)
-    ac.activate_account_config(str(a))
+    ac.activate_account_config(str(a), [])
 
     ptr = fake_home / ".claude-multi" / "active"
     assert ptr.exists()
     assert ptr.read_text().strip() == str(a)
 
 
-def test_get_active_email_falls_back_to_legacy_location(fake_home, fake_keychain):
-    """If $HOME/.claude.json is missing but $HOME/.claude/.claude.json is
-    present from an older install, get_active_email still works."""
+def test_get_active_email_reads_via_pointer(fake_home, fake_keychain):
+    """After a no-target activation, HOME is untouched but get_active_email
+    still returns the target's email — it reads via the pointer file."""
     from backend.services import account_service as ac
 
-    # No $HOME/.claude.json, but legacy dir file exists
-    legacy_dir = fake_home / ".claude"
-    legacy_dir.mkdir(parents=True, exist_ok=True)
-    (legacy_dir / ".claude.json").write_text(json.dumps({
-        "oauthAccount": {"emailAddress": "legacy@x.com"}
+    # Pre-existing HOME with a stale oauthAccount the service must ignore.
+    home_json = fake_home / ".claude.json"
+    home_json.write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "stale@x.com"},
     }))
 
-    # Redirect settings.active_claude_dir to the fake dir
-    with patch("backend.services.account_service.active_claude_dir",
-               return_value=str(legacy_dir)):
-        assert ac.get_active_email() == "legacy@x.com"
+    a = make_account_dir(fake_home, "a", "a@x.com", "tok-a", fake_keychain)
+    ac.activate_account_config(str(a), [])
+
+    # Pointer was updated → get_active_email reports the target's email.
+    assert ac.get_active_email() == "a@x.com"
 
 
-def test_activate_keychain_write_failure_does_not_advance_pointer(fake_home, fake_keychain, monkeypatch):
-    """If the Keychain write raises during activate_account_config, the
-    ~/.claude-multi/active pointer must NOT be updated to the target account.
-
-    Steps 1–2 (writeback + oauthAccount merge) complete, but step 3
-    (_write_keychain_credentials) raises RuntimeError.  The active-dir pointer
-    (step 6) must stay pointing at the *previous* account — or be absent —
-    so the system is not left advertising a partially-installed account.
-    """
+def test_get_active_email_falls_back_to_home_without_pointer(fake_home, fake_keychain):
+    """Cold-start: no pointer yet, HOME has an oauthAccount — that is the
+    email the service reports until the first switch runs."""
     from backend.services import account_service as ac
 
-    # Create two account dirs: 'prev' is currently active, 'new' is the target.
-    prev = make_account_dir(fake_home, "prev", "prev@x.com", "tok-prev", fake_keychain)
-    new  = make_account_dir(fake_home, "new",  "new@x.com",  "tok-new",  fake_keychain)
+    home_json = fake_home / ".claude.json"
+    home_json.write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "cold@x.com"},
+    }))
 
-    # Activate the 'prev' account so the pointer file exists and points at it.
-    ac.activate_account_config(str(prev))
-    ptr_path = fake_home / ".claude-multi" / "active"
-    assert ptr_path.read_text().strip() == str(prev)
+    # Pointer path should not exist yet.
+    ptr = fake_home / ".claude-multi" / "active"
+    if ptr.exists():
+        ptr.unlink()
 
-    # Now make the Keychain write fail for ANY write.
-    def failing_write(credentials: dict, service: str) -> bool:
-        raise RuntimeError("keychain write failed")
-
-    monkeypatch.setattr(
-        "backend.services.account_service._write_keychain_credentials",
-        failing_write,
-    )
-
-    # activate_account_config raises (because _write_keychain_credentials raises).
-    # The exact propagation path: step 3 raises → no try/except wraps it →
-    # the exception escapes activate_account_config before step 6 runs.
-    # If the implementation swallows the error (logs a warning instead of
-    # raising), the pointer is still not supposed to advance because step 6
-    # is only reached when credential operations succeed.
-    try:
-        ac.activate_account_config(str(new))
-    except Exception:
-        pass  # An exception is acceptable (and expected in the raise path)
-
-    # Regardless of whether an exception was raised or swallowed, the active
-    # pointer must NOT have been advanced to the new account.
-    current_ptr = ptr_path.read_text().strip() if ptr_path.exists() else None
-    assert current_ptr != str(new), (
-        "active pointer was advanced to the new account despite a Keychain write failure"
-    )
+    assert ac.get_active_email() == "cold@x.com"

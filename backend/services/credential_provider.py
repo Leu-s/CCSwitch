@@ -14,6 +14,10 @@ from ..config import settings
 
 logger = logging.getLogger(__name__)
 
+# The legacy (no-hash) Keychain service name used by Claude Code when
+# CLAUDE_CONFIG_DIR is unset.  Defined once here so both credential_provider
+# and account_service reference the same constant.
+LEGACY_KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 # Serializes every mutation to the four shared credential artefacts:
 #   1. HOME .claude.json                            (written by activate_account_config)
@@ -261,6 +265,6 @@ def _save_refreshed_token_locked(
             except Exception:
                 pass
             if active_dir and os.path.abspath(active_dir) == os.path.abspath(config_dir):
-                _write_keychain_credentials(kc, service="Claude Code-credentials")
+                _write_keychain_credentials(kc, service=LEGACY_KEYCHAIN_SERVICE)
     except Exception as e:
         logger.warning("Failed to update Keychain after token refresh for %s: %s", config_dir, e)
