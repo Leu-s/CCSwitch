@@ -6,7 +6,6 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from sqlalchemy import select
@@ -22,17 +21,13 @@ from .routers import accounts, settings, tmux, service
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-_MIN_POLL_INTERVAL = 120    # never faster than 2 min — Anthropic API rate-limits
+_MIN_POLL_INTERVAL = 120    # floor when nobody is watching
 _DEFAULT_POLL_INTERVAL = 300
-
-# Stored at module level so the websocket handler can read it
-_poll_interval: int = _DEFAULT_POLL_INTERVAL
-
-scheduler = AsyncIOScheduler()
+_ACTIVE_POLL_INTERVAL = 15  # poll every 15 s while any client is connected
 
 
-async def _get_poll_interval() -> int:
-    """Read usage_poll_interval_seconds from DB, clamped to a safe minimum."""
+async def _get_idle_interval() -> int:
+    """Read usage_poll_interval_seconds from DB for the no-client fallback."""
     try:
         async with AsyncSessionLocal() as db:
             row = await db.execute(
@@ -41,39 +36,48 @@ async def _get_poll_interval() -> int:
             s = row.scalars().first()
             if s:
                 val = int(s.value)
-                if val < _MIN_POLL_INTERVAL:
-                    logger.warning(
-                        "usage_poll_interval_seconds=%d is below minimum %d; using %d",
-                        val, _MIN_POLL_INTERVAL, _MIN_POLL_INTERVAL,
-                    )
-                    return _MIN_POLL_INTERVAL
-                return val
+                return max(val, _MIN_POLL_INTERVAL)
     except Exception as e:
         logger.warning("Could not read poll interval from DB: %s", e)
     return _DEFAULT_POLL_INTERVAL
 
 
+async def _poll_loop(idle_interval: int) -> None:
+    """
+    Smart polling loop:
+    - While clients are connected: poll every _ACTIVE_POLL_INTERVAL seconds.
+    - While no client is watching: poll every idle_interval seconds (fallback).
+    """
+    while True:
+        if ws_manager.active_connections:
+            await poll_usage_and_switch(ws_manager)
+            await asyncio.sleep(_ACTIVE_POLL_INTERVAL)
+        else:
+            # Nobody watching — sleep in small chunks so we react quickly
+            # when a client connects, but still refresh data occasionally.
+            elapsed = 0
+            while elapsed < idle_interval and not ws_manager.active_connections:
+                await asyncio.sleep(5)
+                elapsed += 5
+            # If a client just connected the WS handler will send cached data;
+            # do a fresh poll so the next broadcast has up-to-date numbers.
+            await poll_usage_and_switch(ws_manager)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _poll_interval
     await init_db()
 
-    _poll_interval = await _get_poll_interval()
-    logger.info("Usage poll interval: %d seconds", _poll_interval)
+    idle_interval = await _get_idle_interval()
+    logger.info("Poll intervals — active: %ds, idle: %ds", _ACTIVE_POLL_INTERVAL, idle_interval)
 
-    scheduler.add_job(
-        poll_usage_and_switch,
-        "interval",
-        seconds=_poll_interval,
-        args=[ws_manager],
-        id="usage_poll",
-        replace_existing=True,
-        next_run_time=datetime.now(),  # poll immediately on startup
-    )
-    scheduler.start()
+    # Run one immediate poll so cache is populated before first WS connect
+    asyncio.create_task(poll_usage_and_switch(ws_manager))
+    # Start the smart polling loop
+    asyncio.create_task(_poll_loop(idle_interval))
+
     logger.info("Server running on port %d", cfg.server_port)
     yield
-    scheduler.shutdown()
 
 
 app = FastAPI(title="Claude Multi-Account Manager", lifespan=lifespan)
@@ -99,12 +103,8 @@ async def root():
 async def websocket_endpoint(websocket: WebSocket):
     await ws_manager.connect(websocket)
     try:
-        age = time.monotonic() - bg.last_poll_time
-        if age > _poll_interval - 10:
-            # Data is stale (or never fetched) — kick off an immediate poll
-            asyncio.create_task(poll_usage_and_switch(ws_manager))
-        elif bg.usage_cache:
-            # Send cached snapshot immediately so the UI renders without waiting
+        # Send cached data immediately so the UI renders without waiting 15 s
+        if bg.usage_cache:
             snapshot = [
                 {"id": None, "email": email, "usage": usage, "error": usage.get("error")}
                 for email, usage in bg.usage_cache.items()

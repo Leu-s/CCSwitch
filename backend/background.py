@@ -38,10 +38,7 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
         except (json.JSONDecodeError, TypeError):
             service_enabled = False
 
-        if not service_enabled:
-            return  # service is OFF — don't touch credentials or auto-switch
-
-        # ── Poll usage for every account ──────────────────────────────────────
+        # ── Poll usage for every account (always, even if service is OFF) ──────
         accounts_result = await db.execute(select(Account))
         accounts = accounts_result.scalars().all()
 
@@ -52,9 +49,7 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                 if not token:
                     raise ValueError("No access token found in config directory")
 
-                # Refresh token if near expiry
-                # (check expiresAt if available; try refresh a minute before)
-                usage = await anthropic_api.fetch_usage(token)
+                usage = await anthropic_api.probe_usage(token)
                 usage_cache[account.email] = usage
                 updated.append({
                     "id": account.id,
@@ -63,36 +58,36 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                     "error": None,
                 })
             except Exception as e:
-                err_str = str(e)
-                # Simplify HTTP error messages
                 import httpx as _httpx
+                err_str = str(e)
                 if isinstance(e, _httpx.HTTPStatusError):
                     err_str = f"HTTP {e.response.status_code}"
                     try:
                         body = e.response.json()
                         msg = (body.get("error") or {}).get("message") or body.get("message")
-                        if msg: err_str = msg
+                        if msg:
+                            err_str = msg
                     except Exception:
                         pass
                 logger.warning("Usage fetch failed for %s: %s", account.email, err_str)
-                # On 429 (rate limited) keep previous usage data — only update the error flag
                 is_rate_limited = "429" in str(e) or "rate_limit" in str(e).lower()
                 prev = usage_cache.get(account.email, {})
                 if is_rate_limited and prev and "error" not in prev:
-                    # Preserve last good usage, mark as rate limited
                     usage_cache[account.email] = {**prev, "rate_limited": True}
-                    error_str = "Rate limited"
+                    err_str = "Rate limited"
                 else:
                     usage_cache[account.email] = {"error": err_str}
-                    error_str = err_str
                 updated.append({
                     "id": account.id,
                     "email": account.email,
                     "usage": usage_cache[account.email],
-                    "error": error_str,
+                    "error": err_str if "error" in usage_cache.get(account.email, {}) else None,
                 })
 
         await ws.broadcast({"type": "usage_updated", "accounts": updated})
+
+        if not service_enabled:
+            return  # service is OFF — skip auto-switch
 
         # ── Auto-switch logic ─────────────────────────────────────────────────
         auto_row = await db.execute(
