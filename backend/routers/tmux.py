@@ -3,7 +3,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from ..database import get_db
 from ..models import TmuxMonitor
@@ -14,12 +14,14 @@ router = APIRouter(prefix="/api/tmux", tags=["tmux"])
 
 @router.get("/sessions", response_model=list[TmuxPane])
 async def list_sessions():
-    return tmux_service.list_panes()
+    return await tmux_service.list_panes()
 
 @router.get("/capture")
 async def capture_session(target: str, lines: int = Query(50, ge=1, le=500)):
+    if not re.match(r"^[A-Za-z0-9_\-:.]+$", target):
+        raise HTTPException(400, f"Invalid tmux target format: {target!r}")
     try:
-        output = tmux_service.capture_pane(target, lines)
+        output = await tmux_service.capture_pane(target, lines)
         return {"target": target, "output": output}
     except Exception as e:
         return {"target": target, "output": f"(error: {e})"}
@@ -29,10 +31,17 @@ class SendKeysPayload(BaseModel):
     text: str
     press_enter: bool = True
 
+    @field_validator("target")
+    @classmethod
+    def validate_target(cls, v: str) -> str:
+        if not re.match(r"^[A-Za-z0-9_\-:.]+$", v):
+            raise ValueError(f"Invalid tmux target format: {v!r}")
+        return v
+
 @router.post("/send")
 async def send_keys(payload: SendKeysPayload):
     try:
-        tmux_service.send_keys(payload.target, payload.text, payload.press_enter)
+        await tmux_service.send_keys(payload.target, payload.text, payload.press_enter)
         return {"ok": True}
     except Exception as e:
         raise HTTPException(400, str(e))

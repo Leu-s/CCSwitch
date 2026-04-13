@@ -6,12 +6,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
-from sqlalchemy import select
 
 from . import background as bg
+from .auth import TokenAuthMiddleware
 from .config import settings as cfg
 from .database import init_db, AsyncSessionLocal
-from .models import Account
 from .routers import accounts, settings, tmux, service
 from .services import account_service as ac
 from .services.account_service import build_usage
@@ -68,8 +67,7 @@ async def lifespan(app: FastAPI):
     active_email = ac.get_active_email()
     if active_email:
         async with AsyncSessionLocal() as db:
-            row = await db.execute(select(Account).where(Account.email == active_email))
-            acc = row.scalars().first()
+            acc = await ac.get_account_by_email(active_email, db)
             if acc:
                 ac.write_active_config_dir(acc.config_dir)
                 logger.info("Synced ~/.claude-multi/active → %s", acc.config_dir)
@@ -77,19 +75,31 @@ async def lifespan(app: FastAPI):
     idle_interval = await _get_idle_interval()
     logger.info("Poll intervals — active: %ds, idle: %ds", cfg.poll_interval_active, idle_interval)
 
-    poll_task = asyncio.create_task(_poll_loop(idle_interval))
+    async def _cleanup_sessions_loop() -> None:
+        """Periodically clean up expired login sessions (every 5 minutes)."""
+        while True:
+            await asyncio.sleep(300)
+            ac._cleanup_expired_sessions()
+
+    tasks = [
+        asyncio.create_task(_poll_loop(idle_interval)),
+        asyncio.create_task(_cleanup_sessions_loop()),
+    ]
     logger.info("Server running on port %d", cfg.server_port)
     yield
-    # Shutdown: cancel the background poll task
-    poll_task.cancel()
-    try:
-        await poll_task
-    except asyncio.CancelledError:
-        pass
-    logger.info("Background poll task stopped")
+    # Shutdown: cancel all background tasks
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    logger.info("Background tasks stopped")
 
 
 app = FastAPI(title="Claude Multi-Account Manager", lifespan=lifespan)
+app.add_middleware(TokenAuthMiddleware, api_token=cfg.api_token)
 
 app.include_router(accounts.router)
 app.include_router(settings.router)
@@ -109,32 +119,43 @@ async def root():
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, since: int = 0):
     await ws_manager.connect(websocket)
     try:
-        # Send cached data immediately so the UI renders without waiting 15 s.
-        # Snapshot under the cache lock to avoid "dictionary changed size during
-        # iteration" when a poll fires concurrently.
-        cache_snapshot = await bg.snapshot_usage_cache()
-        if cache_snapshot:
-            async with AsyncSessionLocal() as db:
-                id_map = await ac.get_email_to_id_map(db)
-            snapshot = []
-            for email, usage in cache_snapshot.items():
-                acct_id = id_map.get(email)
-                if acct_id is None:
-                    continue
-                token_info = token_info_cache.get(email, {})
-                flat = build_usage(usage, token_info)
-                snapshot.append({
-                    "id": acct_id,
-                    "email": email,
-                    "usage": flat.model_dump() if flat else {},
-                    "error": usage.get("error"),
-                })
-            await websocket.send_text(
-                json.dumps({"type": "usage_updated", "accounts": snapshot})
-            )
+        # If the client supplies ?since=N, replay buffered events they missed.
+        # Falls back to a full-state snapshot when the buffer does not cover the gap.
+        if since > 0:
+            missed = ws_manager.replay_since(since)
+            if missed is None:
+                # Buffer gap — send full snapshot so the client can resync.
+                since = 0
+            else:
+                for text in missed:
+                    await websocket.send_text(text)
+
+        # Send the full state snapshot on first connect or after a buffer gap.
+        if since == 0:
+            cache_snapshot = await bg.snapshot_usage_cache()
+            if cache_snapshot:
+                async with AsyncSessionLocal() as db:
+                    id_map = await ac.get_email_to_id_map(db)
+                snapshot = []
+                for email, usage in cache_snapshot.items():
+                    acct_id = id_map.get(email)
+                    if acct_id is None:
+                        continue
+                    token_info = token_info_cache.get(email, {})
+                    flat = build_usage(usage, token_info)
+                    snapshot.append({
+                        "id": acct_id,
+                        "email": email,
+                        "usage": flat.model_dump() if flat else {},
+                        "error": usage.get("error"),
+                    })
+                await websocket.send_text(
+                    json.dumps({"type": "usage_updated", "accounts": snapshot})
+                )
+
         while True:
             await websocket.receive_text()
     except (WebSocketDisconnect, Exception):

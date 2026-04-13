@@ -5,6 +5,7 @@ ON  — service_enabled flag is set; credential switching is handled separately.
 OFF — service_enabled flag is cleared; credentials are left untouched.
 """
 
+import asyncio
 import json
 import logging
 
@@ -34,7 +35,7 @@ async def get_service_status(db: AsyncSession = Depends(get_db)):
 
     return ServiceStatus(
         enabled=bool(enabled),
-        active_email=ac.get_active_email(),
+        active_email=await asyncio.to_thread(ac.get_active_email),
         default_account_id=default_id,
     )
 
@@ -47,7 +48,7 @@ async def enable_service(db: AsyncSession = Depends(get_db)):
     # Idempotency: if already enabled, no-op
     already_enabled = await ss.get_bool("service_enabled", False, db)
     if already_enabled:
-        return {"ok": True, "active_email": ac.get_active_email()}
+        return {"ok": True, "active_email": await asyncio.to_thread(ac.get_active_email)}
 
     enabled_accounts = await ac.get_enabled_accounts(db)
 
@@ -71,7 +72,7 @@ async def enable_service(db: AsyncSession = Depends(get_db)):
     # OR when the file cannot be read (permission error, etc.).  In the latter
     # case restore_config_from_backup() will silently no-op, losing the ability
     # to roll back on disable.  Log a warning so the risk is visible.
-    backup = ac.backup_active_config()
+    backup = await asyncio.to_thread(ac.backup_active_config)
     if not backup:
         logger.warning(
             "backup_active_config() returned empty — either no active credentials "
@@ -100,7 +101,7 @@ async def disable_service(db: AsyncSession = Depends(get_db)):
     if backup_raw:
         try:
             backup = json.loads(backup_raw)
-            ac.restore_config_from_backup(backup)
+            await asyncio.to_thread(ac.restore_config_from_backup, backup)
         except Exception as e:
             logger.warning("Failed to restore credentials backup: %s", e)
 

@@ -31,9 +31,12 @@ def test_app():
     TestSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async def init_db():
+        from backend.services.settings_service import ensure_defaults
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
+        async with TestSessionLocal() as session:
+            await ensure_defaults(session)
 
     asyncio.run(init_db())
 

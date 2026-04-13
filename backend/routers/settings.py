@@ -7,6 +7,8 @@ from ..database import get_db
 from ..models import Setting
 from ..schemas import SettingOut, SettingUpdate
 from ..services.settings_service import ensure_defaults
+from ..services import account_service as ac
+from ..config import settings as cfg
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -18,28 +20,33 @@ ALLOWED_KEYS = {
 }
 
 
+def _shell_snippet_path() -> str:
+    """Unexpanded path string embedded in the shell snippet — keeps the tilde
+    so the snippet sourced from a user's rc file resolves at runtime."""
+    return f"{cfg.state_dir.rstrip('/')}/active"
+
+
 @router.get("", response_model=list[SettingOut])
 async def get_settings(db: AsyncSession = Depends(get_db)):
-    await ensure_defaults(db)
     result = await db.execute(select(Setting).where(Setting.key.notin_(INTERNAL_KEYS)))
     return result.scalars().all()
 
 @router.get("/shell-status")
 async def shell_status():
     """
-    Check whether the shell is configured to use ~/.claude-multi/active
-    and whether the active config file exists.
+    Check whether the shell is configured to use the active-dir pointer and
+    whether that pointer file currently exists.
     """
-    active_file = os.path.expanduser("~/.claude-multi/active")
-    active_file_exists = os.path.isfile(active_file)
+    active_file_exists = os.path.isfile(ac.active_dir_pointer_path())
 
+    snippet_path = _shell_snippet_path()
     shell_configured = False
     for rc_name in [".zshrc", ".bashrc"]:
         path = os.path.expanduser(f"~/{rc_name}")
         if os.path.exists(path):
             try:
                 with open(path) as f:
-                    if "claude-multi/active" in f.read():
+                    if snippet_path in f.read():
                         shell_configured = True
                         break
             except OSError:
@@ -54,7 +61,11 @@ async def setup_shell():
     Append the CLAUDE_CONFIG_DIR one-liner to ~/.zshrc and/or ~/.bashrc
     if not already present. Returns per-file status.
     """
-    one_liner = '_d=$(cat ~/.claude-multi/active 2>/dev/null); [ -n "$_d" ] && export CLAUDE_CONFIG_DIR="$_d"; unset _d'
+    snippet_path = _shell_snippet_path()
+    one_liner = (
+        f'_d=$(cat {snippet_path} 2>/dev/null); '
+        f'[ -n "$_d" ] && export CLAUDE_CONFIG_DIR="$_d"; unset _d'
+    )
     block = f'\n# Claude Code multi-account — active account isolation\n{one_liner}\n'
 
     results = {}
@@ -66,7 +77,7 @@ async def setup_shell():
         try:
             with open(path) as f:
                 content = f.read()
-            if "claude-multi/active" in content:
+            if snippet_path in content:
                 results[rc_name] = "already_configured"
                 continue
             with open(path, "a") as f:

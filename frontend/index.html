@@ -1613,6 +1613,10 @@ function attachDragHandlers(card) {
       await loadAccounts();
     } finally {
       isSavingPriorities = false;
+      if (pendingRenderAfterDrag) {
+        pendingRenderAfterDrag = false;
+        renderAccounts();
+      }
     }
   });
 }
@@ -1778,6 +1782,13 @@ function openAddModal() {
   qs("#add-step-1").style.display = "";
   qs("#add-step-2").style.display = "none";
   qs("#add-step-3").style.display = "none";
+  // Reset stale state from previous session
+  const termInput = qs("#add-term-input");
+  if (termInput) termInput.value = "";
+  const termOutput = qs("#add-term-output");
+  if (termOutput) termOutput.textContent = "";
+  const termTarget = qs("#add-term-target");
+  if (termTarget) termTarget.textContent = "—";
 }
 
 function closeAddModal() {
@@ -2334,11 +2345,12 @@ function prependEvent(msg) {
 // =============================================================
 let ws = null;
 let wsReconnectAttempts = 0;
+let _lastSeq = 0; // last server seq received; sent as ?since= on reconnect
 
 function connectWs() {
   if (_wsPingInterval) { clearInterval(_wsPingInterval); _wsPingInterval = null; }
   const proto = location.protocol==="https:"?"wss:":"ws:";
-  const url = `${proto}//${location.host}/ws`;
+  const url = `${proto}//${location.host}/ws?since=${_lastSeq}`;
   try { ws = new WebSocket(url); } catch(e) { scheduleReconnect(); return; }
   ws.onopen = () => {
     qs("#ws-dot").classList.remove("disconnected");
@@ -2354,6 +2366,7 @@ function connectWs() {
       console.warn("WS: invalid JSON received", err);
       return;
     }
+    if (msg.seq) _lastSeq = Math.max(_lastSeq, msg.seq);
     switch(msg.type) {
       case "account_switched":
         prependSwitchLogRow(msg);
@@ -2461,8 +2474,7 @@ document.addEventListener("keydown", e => {
 // Init
 // =============================================================
 (async () => {
-  loadTmuxData();
-  await Promise.all([loadAccounts(), loadServiceStatus(), loadAutoSwitchSetting(), loadSwitchLog()]);
+  await Promise.all([loadAccounts(), loadServiceStatus(), loadAutoSwitchSetting(), loadSwitchLog(), loadTmuxData()]);
   connectWs();
 })();
 </script>

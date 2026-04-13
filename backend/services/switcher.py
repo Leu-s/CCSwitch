@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -30,10 +31,9 @@ async def switch_if_active_disabled(
     If the given account is the currently active account, switch away from it.
     Called when an account is disabled via the API.
     """
-    from . import account_service as ac
     from . import settings_service as ss
 
-    if account.email != ac.get_active_email():
+    if account.email != await asyncio.to_thread(ac.get_active_email):
         return
     service_enabled = await ss.get_bool("service_enabled", False, db)
     if not service_enabled:
@@ -49,16 +49,15 @@ async def perform_switch(
     db: AsyncSession,
     ws: WebSocketManager,
 ) -> None:
-    current_email = ac.get_active_email()
+    current_email = await asyncio.to_thread(ac.get_active_email)
 
     # Copy the target account's config dir to ~/.claude/
-    ac.activate_account_config(target.config_dir)
+    await asyncio.to_thread(ac.activate_account_config, target.config_dir)
 
     # Log the switch
     from_acc = None
     if current_email:
-        result = await db.execute(select(Account).where(Account.email == current_email))
-        from_acc = result.scalars().first()
+        from_acc = await ac.get_account_by_email(current_email, db)
 
     log = SwitchLog(
         from_account_id=from_acc.id if from_acc else None,

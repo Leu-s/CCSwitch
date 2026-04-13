@@ -9,7 +9,15 @@ import logging
 import os
 import subprocess
 
+from ..config import settings
+
 logger = logging.getLogger(__name__)
+
+
+def _active_dir_pointer_path() -> str:
+    """Same path as account_service.active_dir_pointer_path(); inlined here
+    to avoid a circular import (account_service imports this module)."""
+    return os.path.join(os.path.expanduser(settings.state_dir), "active")
 
 
 def _load_json_safe(path: str) -> dict:
@@ -205,7 +213,7 @@ def save_refreshed_token(config_dir: str, access_token: str, expires_at: int | N
             # credentials in the shared "Claude Code-credentials" entry.
             active_dir = ""
             try:
-                with open(os.path.expanduser("~/.claude-multi/active")) as f:
+                with open(_active_dir_pointer_path()) as f:
                     active_dir = f.read().strip()
             except Exception:
                 pass

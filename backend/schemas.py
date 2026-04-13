@@ -166,10 +166,3 @@ class TmuxMonitorOut(BaseModel):
 class TmuxPane(BaseModel):
     target: str
     command: str
-
-
-class TmuxEvalResult(BaseModel):
-    monitor_id: int
-    target: str
-    status: str
-    explanation: str
