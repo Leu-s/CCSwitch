@@ -13,41 +13,25 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import Account, Setting
+from ..models import Account
 from ..schemas import ServiceStatus
 from ..services import account_service as ac
+from ..services import settings_service as ss
+from ..services import switcher as sw
+from ..ws import ws_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/service", tags=["service"])
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-async def _get_setting(key: str, default: str, db: AsyncSession) -> str:
-    row = await db.execute(select(Setting).where(Setting.key == key))
-    s = row.scalars().first()
-    return s.value if s else default
-
-
-async def _set_setting(key: str, value: str, db: AsyncSession) -> None:
-    row = await db.execute(select(Setting).where(Setting.key == key))
-    s = row.scalars().first()
-    if s:
-        s.value = value
-    else:
-        db.add(Setting(key=key, value=value))
-    await db.commit()
-
-
 # ── Status ─────────────────────────────────────────────────────────────────────
 
 @router.get("", response_model=ServiceStatus)
 async def get_service_status(db: AsyncSession = Depends(get_db)):
-    enabled_raw = await _get_setting("service_enabled", "false", db)
-    enabled = json.loads(enabled_raw) if enabled_raw else False
+    enabled = await ss.get_bool("service_enabled", False, db)
 
-    default_raw = await _get_setting("default_account_id", "", db)
+    default_raw = await ss.get_setting("default_account_id", "", db)
     default_id = int(default_raw) if default_raw.isdigit() else None
 
     return ServiceStatus(
@@ -61,9 +45,34 @@ async def get_service_status(db: AsyncSession = Depends(get_db)):
 
 @router.post("/enable")
 async def enable_service(db: AsyncSession = Depends(get_db)):
-    """Enable the service by setting the service_enabled flag."""
-    await _set_setting("service_enabled", "true", db)
-    active_email = ac.get_active_email()
+    """Enable the service. Always activates the default or first enabled account."""
+    result = await db.execute(
+        select(Account).where(Account.enabled == True).order_by(Account.priority.asc(), Account.id.asc())
+    )
+    enabled_accounts = result.scalars().all()
+
+    if not enabled_accounts:
+        raise HTTPException(400, "No enabled accounts available")
+
+    await ss.set_setting("service_enabled", "true", db)
+
+    # Determine which account to activate (default or first)
+    default_raw = await ss.get_setting("default_account_id", "", db)
+    default_id = int(default_raw) if default_raw.isdigit() else None
+    target = None
+    if default_id:
+        target = next((a for a in enabled_accounts if a.id == default_id), None)
+    if not target:
+        target = enabled_accounts[0]
+
+    # Backup current credentials before switching
+    backup = ac.backup_active_config()
+    await ss.set_setting("original_credentials_backup", json.dumps(backup), db)
+
+    # Activate the target account
+    await sw.perform_switch(target, "manual", db, ws_manager)
+    active_email = target.email
+
     logger.info("Service enabled — current active email: %s", active_email)
     return {"ok": True, "active_email": active_email}
 
@@ -72,8 +81,18 @@ async def enable_service(db: AsyncSession = Depends(get_db)):
 
 @router.post("/disable")
 async def disable_service(db: AsyncSession = Depends(get_db)):
-    """Disable the service by clearing the service_enabled flag."""
-    await _set_setting("service_enabled", "false", db)
+    """Disable the service. Restore original credentials if backup exists."""
+    await ss.set_setting("service_enabled", "false", db)
+
+    # Restore original credentials from backup if it exists
+    backup_raw = await ss.get_setting("original_credentials_backup", "", db)
+    if backup_raw:
+        try:
+            backup = json.loads(backup_raw)
+            ac.restore_config_from_backup(backup)
+        except Exception as e:
+            logger.warning("Failed to restore credentials backup: %s", e)
+
     logger.info("Service disabled")
     return {"ok": True}
 
@@ -88,5 +107,5 @@ async def set_default_account(account_id: int, db: AsyncSession = Depends(get_db
     if not account:
         raise HTTPException(404, "Account not found")
 
-    await _set_setting("default_account_id", str(account_id), db)
+    await ss.set_setting("default_account_id", str(account_id), db)
     return {"ok": True, "default_account_id": account_id, "email": account.email}

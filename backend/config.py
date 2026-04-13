@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env")
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="CLAUDE_MULTI_")
 
     database_url: str = "sqlite+aiosqlite:///./claude_multi_account.db"
     server_port: int = 8765

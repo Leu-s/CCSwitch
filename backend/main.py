@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -12,8 +11,10 @@ from sqlalchemy import select
 
 from .config import settings as cfg
 from .database import init_db, AsyncSessionLocal
-from .models import Setting
+from .models import Account
 from .ws import ws_manager
+from .services import account_service as ac
+from .services import settings_service as ss
 import backend.background as bg
 from .background import poll_usage_and_switch
 from .routers import accounts, settings, tmux, service
@@ -30,13 +31,8 @@ async def _get_idle_interval() -> int:
     """Read usage_poll_interval_seconds from DB for the no-client fallback."""
     try:
         async with AsyncSessionLocal() as db:
-            row = await db.execute(
-                select(Setting).where(Setting.key == "usage_poll_interval_seconds")
-            )
-            s = row.scalars().first()
-            if s:
-                val = int(s.value)
-                return max(val, _MIN_POLL_INTERVAL)
+            val = await ss.get_int("usage_poll_interval_seconds", _DEFAULT_POLL_INTERVAL, db)
+            return max(val, _MIN_POLL_INTERVAL)
     except Exception as e:
         logger.warning("Could not read poll interval from DB: %s", e)
     return _DEFAULT_POLL_INTERVAL
@@ -68,16 +64,31 @@ async def _poll_loop(idle_interval: int) -> None:
 async def lifespan(app: FastAPI):
     await init_db()
 
+    # Sync ~/.claude-multi/active on startup so CLAUDE_CONFIG_DIR works in new terminals
+    # even before the first switch event occurs.
+    active_email = ac.get_active_email()
+    if active_email:
+        async with AsyncSessionLocal() as db:
+            row = await db.execute(select(Account).where(Account.email == active_email))
+            acc = row.scalars().first()
+            if acc:
+                ac._write_active_config_dir(acc.config_dir)
+                logger.info("Synced ~/.claude-multi/active → %s", acc.config_dir)
+
     idle_interval = await _get_idle_interval()
     logger.info("Poll intervals — active: %ds, idle: %ds", _ACTIVE_POLL_INTERVAL, idle_interval)
 
-    # Run one immediate poll so cache is populated before first WS connect
-    asyncio.create_task(poll_usage_and_switch(ws_manager))
-    # Start the smart polling loop
-    asyncio.create_task(_poll_loop(idle_interval))
-
+    tasks = [
+        asyncio.create_task(poll_usage_and_switch(ws_manager)),
+        asyncio.create_task(_poll_loop(idle_interval)),
+    ]
     logger.info("Server running on port %d", cfg.server_port)
     yield
+    # Shutdown: cancel background tasks
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    logger.info("Background tasks stopped")
 
 
 app = FastAPI(title="Claude Multi-Account Manager", lifespan=lifespan)
@@ -105,9 +116,19 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         # Send cached data immediately so the UI renders without waiting 15 s
         if bg.usage_cache:
+            # Build an email→id map so the frontend can match by id (not just email)
+            async with AsyncSessionLocal() as db:
+                rows = await db.execute(select(Account.id, Account.email))
+                id_map = {row[1]: row[0] for row in rows.all()}
             snapshot = [
-                {"id": None, "email": email, "usage": usage, "error": usage.get("error")}
+                {
+                    "id": id_map[email],
+                    "email": email,
+                    "usage": usage,
+                    "error": usage.get("error"),
+                }
                 for email, usage in bg.usage_cache.items()
+                if id_map.get(email) is not None
             ]
             await websocket.send_text(
                 json.dumps({"type": "usage_updated", "accounts": snapshot})

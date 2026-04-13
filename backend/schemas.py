@@ -1,6 +1,7 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 from typing import Any, Optional
+import re as re_module
 
 
 # ── Accounts ──────────────────────────────────────────────────────────────────
@@ -9,6 +10,7 @@ class AccountOut(BaseModel):
     id: int
     email: str
     display_name: Optional[str] = None
+    config_dir: str
     threshold_pct: float
     enabled: bool
     priority: int
@@ -20,7 +22,7 @@ class AccountUpdate(BaseModel):
     display_name: Optional[str] = None
     enabled: Optional[bool] = None
     priority: Optional[int] = None
-    threshold_pct: Optional[float] = None
+    threshold_pct: Optional[float] = Field(None, ge=0.0, le=100.0)
 
 
 class UsageData(BaseModel):
@@ -93,6 +95,17 @@ class TmuxMonitorCreate(BaseModel):
     pattern_type: str = "manual"
     pattern: str
     enabled: bool = True
+
+    @field_validator("pattern")
+    @classmethod
+    def validate_pattern(cls, v, info):
+        pattern_type = (info.data or {}).get("pattern_type", "manual")
+        if pattern_type == "regex":
+            try:
+                re_module.compile(v)
+            except re_module.error as e:
+                raise ValueError(f"Invalid regex pattern: {e}") from e
+        return v
 
 
 class TmuxMonitorOut(BaseModel):

@@ -9,7 +9,6 @@ an empty (fresh) directory it will run a new OAuth flow, storing all credentials
 and config in that directory without touching ~/.claude/.
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -18,6 +17,16 @@ import subprocess
 import uuid
 
 from ..config import settings
+from .credential_provider import (
+    _keychain_service_name,
+    _read_keychain_credentials,
+    _write_keychain_credentials,
+    _write_keychain_credentials_legacy,
+    get_access_token_from_config_dir,
+    get_refresh_token_from_config_dir,
+    get_token_info,
+    save_refreshed_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,168 +60,6 @@ def get_email_from_config_dir(config_dir: str) -> str | None:
         return None
 
 
-def _load_json_safe(path: str) -> dict:
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _keychain_service_name(config_dir: str) -> str:
-    """Claude Code uses sha256(config_dir)[:8] as the Keychain service suffix."""
-    h = hashlib.sha256(config_dir.encode()).hexdigest()[:8]
-    return f"Claude Code-credentials-{h}"
-
-
-def _read_keychain_credentials(config_dir: str) -> dict:
-    """
-    On macOS, Claude Code stores OAuth tokens in the Keychain under a service
-    name derived from sha256(CLAUDE_CONFIG_DIR)[:8].  Returns the parsed JSON
-    or {} on any failure.
-    """
-    service = _keychain_service_name(config_dir)
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", service, "-w"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout.strip())
-    except Exception as e:
-        logger.debug("Keychain lookup failed for %s: %s", service, e)
-    return {}
-
-
-def get_token_info(config_dir: str) -> dict:
-    """
-    Return non-secret token metadata: token expiry timestamp and subscription type.
-    Does NOT return access/refresh tokens or rate limit tier.
-    Falls back to file-based credentials if Keychain is unavailable.
-    """
-    kc = _read_keychain_credentials(config_dir)
-    oauth = kc.get("claudeAiOauth", kc)
-    result = {}
-    if oauth.get("expiresAt"):
-        result["token_expires_at"] = oauth["expiresAt"]
-    if oauth.get("subscriptionType"):
-        result["subscription_type"] = oauth["subscriptionType"]
-    if result:
-        return result
-
-    # Fall back to file-based credentials
-    for filename in [".credentials.json", "credentials.json", ".claude.json"]:
-        path = os.path.join(config_dir, filename)
-        data = _load_json_safe(path)
-        oauth_data = data.get("claudeAiOauth", data)
-        if oauth_data.get("expiresAt"):
-            result["token_expires_at"] = oauth_data["expiresAt"]
-        if oauth_data.get("subscriptionType"):
-            result["subscription_type"] = oauth_data["subscriptionType"]
-        if result:
-            return result
-    return {}
-
-
-def get_access_token_from_config_dir(config_dir: str) -> str | None:
-    """
-    Try several locations Claude Code may use to persist the OAuth access token
-    when CLAUDE_CONFIG_DIR is set to a custom path.
-
-    On macOS (native build) Claude Code stores tokens in the Keychain.
-    On other platforms it writes credential files to the config directory.
-    """
-    # 1. macOS Keychain (primary location for native Claude Code)
-    kc = _read_keychain_credentials(config_dir)
-    if kc:
-        token = kc.get("claudeAiOauth", {}).get("accessToken")
-        if token:
-            return token
-        if kc.get("accessToken"):
-            return kc["accessToken"]
-
-    # 2. Fall back to credential files (Linux / older versions)
-    candidates = [
-        os.path.join(config_dir, ".credentials.json"),
-        os.path.join(config_dir, "credentials.json"),
-        os.path.join(config_dir, ".claude.json"),
-    ]
-    for path in candidates:
-        if not os.path.exists(path):
-            continue
-        data = _load_json_safe(path)
-        if "claudeAiOauth" in data:
-            token = data["claudeAiOauth"].get("accessToken")
-            if token:
-                return token
-        if "accessToken" in data:
-            return data["accessToken"]
-    return None
-
-
-def get_refresh_token_from_config_dir(config_dir: str) -> str | None:
-    # 1. macOS Keychain
-    kc = _read_keychain_credentials(config_dir)
-    if kc:
-        token = kc.get("claudeAiOauth", {}).get("refreshToken")
-        if token:
-            return token
-        if kc.get("refreshToken"):
-            return kc["refreshToken"]
-
-    # 2. Credential files
-    candidates = [
-        os.path.join(config_dir, ".credentials.json"),
-        os.path.join(config_dir, "credentials.json"),
-        os.path.join(config_dir, ".claude.json"),
-    ]
-    for path in candidates:
-        if not os.path.exists(path):
-            continue
-        data = _load_json_safe(path)
-        if "claudeAiOauth" in data:
-            token = data["claudeAiOauth"].get("refreshToken")
-            if token:
-                return token
-        if "refreshToken" in data:
-            return data["refreshToken"]
-    return None
-
-
-def save_refreshed_token(config_dir: str, access_token: str, expires_at: int | None = None) -> None:
-    """Persist a refreshed access token back into the config dir."""
-    for filename in [".credentials.json", "credentials.json"]:
-        path = os.path.join(config_dir, filename)
-        if not os.path.exists(path):
-            continue
-        data = _load_json_safe(path)
-        if "claudeAiOauth" in data:
-            data["claudeAiOauth"]["accessToken"] = access_token
-            if expires_at is not None:
-                data["claudeAiOauth"]["expiresAt"] = expires_at
-            with open(path, "w") as f:
-                json.dump(data, f, indent=2)
-            return
-        if "accessToken" in data:
-            data["accessToken"] = access_token
-            if expires_at is not None:
-                data["expiresAt"] = expires_at
-            with open(path, "w") as f:
-                json.dump(data, f, indent=2)
-            return
-
-    # Also try .claude.json
-    path = os.path.join(config_dir, ".claude.json")
-    if os.path.exists(path):
-        data = _load_json_safe(path)
-        if "claudeAiOauth" in data:
-            data["claudeAiOauth"]["accessToken"] = access_token
-            if expires_at is not None:
-                data["claudeAiOauth"]["expiresAt"] = expires_at
-            with open(path, "w") as f:
-                json.dump(data, f, indent=2)
-
-
 # ── Active (system) config helpers ────────────────────────────────────────────
 
 def get_active_email() -> str | None:
@@ -232,36 +79,38 @@ def backup_active_config() -> dict:
 def restore_config_from_backup(backup: dict) -> None:
     if not backup.get("claude_json"):
         return
-    os.makedirs(active_claude_dir(), exist_ok=True)
-    with open(os.path.join(active_claude_dir(), ".claude.json"), "w") as f:
+    dst = active_claude_dir()
+    os.makedirs(dst, exist_ok=True)
+    with open(os.path.join(dst, ".claude.json"), "w") as f:
         f.write(backup["claude_json"])
+    # Point the active-config file at ~/.claude/ so new terminals fall back
+    # to the restored credentials rather than a now-stale per-account dir.
+    _write_active_config_dir(dst)
 
 
 # ── Activation ────────────────────────────────────────────────────────────────
 
-def _write_keychain_credentials(config_dir: str, credentials: dict) -> None:
+def _write_active_config_dir(config_dir: str) -> None:
     """
-    Write a credentials dict into the macOS Keychain entry that Claude Code
-    will read for the given config_dir.
+    Write the active account's isolated config_dir to ~/.claude-multi/active.
+    Users can add to their shell profile:
+        _d=$(cat ~/.claude-multi/active 2>/dev/null); [ -n "$_d" ] && export CLAUDE_CONFIG_DIR="$_d"; unset _d
+    This ensures new terminal sessions use the correct account without Keychain gymnastics.
+    File is written with mode 0o600 (owner-read/write only) since the path is sensitive.
     """
-    import getpass
-    service = _keychain_service_name(config_dir)
-    acct = getpass.getuser()
-    cred_json = json.dumps(credentials)
-
-    # Remove existing entry (ignore errors — may not exist yet)
-    subprocess.run(
-        ["security", "delete-generic-password", "-s", service, "-a", acct],
-        capture_output=True, timeout=5,
-    )
-    result = subprocess.run(
-        ["security", "add-generic-password", "-s", service, "-a", acct, "-w", cred_json],
-        capture_output=True, text=True, timeout=5,
-    )
-    if result.returncode != 0:
-        logger.warning("Keychain write failed for %s: %s", service, result.stderr.strip())
-    else:
-        logger.debug("Keychain credentials written for %s", service)
+    state_dir = os.path.expanduser("~/.claude-multi")
+    active_path = os.path.join(state_dir, "active")
+    import threading
+    tmp_path = f"{active_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(config_dir + "\n")
+        os.replace(tmp_path, active_path)
+        logger.debug("Active config dir written to %s", active_path)
+    except Exception as e:
+        logger.warning("Failed to write active config dir file: %s", e)
 
 
 def activate_account_config(config_dir: str) -> None:
@@ -269,30 +118,46 @@ def activate_account_config(config_dir: str) -> None:
     Activate an account so Claude Code CLI (run without CLAUDE_CONFIG_DIR)
     uses it.
 
-    Two things must happen together:
-    1. Copy credential / config files into ~/.claude/  (Linux + older builds)
-    2. Copy the Keychain entry to the ~/.claude/ service name  (macOS)
-
-    Without step 2 the CLI still reads the OLD token from Keychain even
-    though .claude.json says the new email.
+    Four things happen:
+    1. Copy credential / config files into ~/.claude/  (file-based fallback)
+    2. Copy the Keychain entry to the ~/.claude/ service name  (hashed, macOS)
+    3. Update the legacy no-hash 'Claude Code-credentials' entry so that
+       Claude Code versions that don't use CLAUDE_CONFIG_DIR isolation pick up
+       the switch immediately.
+    4. Write the active config_dir path to ~/.claude-multi/active so users can
+       set CLAUDE_CONFIG_DIR in their shell profile for guaranteed new-terminal
+       isolation.
     """
     dst = active_claude_dir()
     os.makedirs(dst, exist_ok=True)
 
-    # ── 1. File-based credentials (Linux / older Claude Code) ─────────────────
+    # ── 1. File-based credentials (file-based fallback) ───────────────────────
     for filename in [".claude.json", "credentials.json", ".credentials.json"]:
         src = os.path.join(config_dir, filename)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(dst, filename))
             logger.debug("Copied %s → %s", src, os.path.join(dst, filename))
 
-    # ── 2. macOS Keychain ──────────────────────────────────────────────────────
+    # ── 2. macOS Keychain (hashed entry for ~/.claude/) ───────────────────────
     kc = _read_keychain_credentials(config_dir)
     if kc:
-        _write_keychain_credentials(dst, kc)
-        logger.debug("Keychain credentials copied %s → %s",
-                     _keychain_service_name(config_dir),
-                     _keychain_service_name(dst))
+        ok_hashed = _write_keychain_credentials(dst, kc)
+        if ok_hashed:
+            logger.debug("Keychain credentials copied %s → %s",
+                         _keychain_service_name(config_dir),
+                         _keychain_service_name(dst))
+
+        # ── 3. Legacy no-hash entry (picked up by fresh `claude` sessions) ────
+        ok_legacy = _write_keychain_credentials_legacy(kc)
+        if not ok_hashed and not ok_legacy:
+            logger.warning(
+                "Both Keychain writes failed for %s — new terminal sessions may "
+                "not pick up the account switch until Keychain is accessible again.",
+                config_dir,
+            )
+
+    # ── 4. Write active config dir for shell CLAUDE_CONFIG_DIR trick ──────────
+    _write_active_config_dir(config_dir)
 
 
 # ── Login session ─────────────────────────────────────────────────────────────

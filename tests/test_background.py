@@ -6,8 +6,7 @@ background.py now:
 - calls account_service.get_access_token_from_config_dir(account.config_dir)
 - calls account_service.get_active_email() (no args)
 - gates all work behind service_enabled setting (not auto_switch_enabled)
-- _notify_tmux_monitors is a module-private helper; tests reference it via the
-  public alias notify_tmux_monitors only for the tmux monitor test.
+- notify_monitors is now in tmux_service; tests import it from there directly.
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -92,7 +91,7 @@ async def test_poll_does_nothing_when_service_disabled():
 
 @pytest.mark.asyncio
 async def test_notify_tmux_monitors_manual_pattern():
-    from backend.background import _notify_tmux_monitors
+    from backend.services.tmux_service import notify_monitors
 
     mock_ws = AsyncMock()
     monitor = MagicMock()
@@ -107,7 +106,7 @@ async def test_notify_tmux_monitors_manual_pattern():
                return_value={"status": "SUCCESS", "explanation": "All good", "raw": "SUCCESS All good"}):
         import asyncio
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            await _notify_tmux_monitors([monitor], mock_ws, "claude-haiku-4-5-20251001")
+            await notify_monitors([monitor], mock_ws, "claude-haiku-4-5-20251001")
 
     mock_send.assert_called_once_with("main:0.0")
     mock_ws.broadcast.assert_called_once()

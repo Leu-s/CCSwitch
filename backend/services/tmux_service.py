@@ -1,5 +1,8 @@
 import asyncio
+import re
 import subprocess
+
+from ..ws import WebSocketManager
 
 def list_panes() -> list[dict]:
     try:
@@ -61,3 +64,43 @@ async def evaluate_with_haiku(capture: str, model: str) -> dict:
             break
     explanation = output.replace(status, "").strip(" .\n") or "No explanation"
     return {"status": status, "explanation": explanation, "raw": output}
+
+
+async def notify_monitors(monitors, ws: WebSocketManager, model: str) -> None:
+    """
+    For each enabled monitor, find matching tmux panes, send 'continue',
+    capture output, evaluate with Haiku, and broadcast the result.
+    """
+    all_panes = list_panes()
+    for monitor in monitors:
+        if monitor.pattern_type == "manual":
+            matching = [p for p in all_panes if p["target"] == monitor.pattern]
+        else:
+            try:
+                matching = [p for p in all_panes if re.search(monitor.pattern, p["target"])]
+            except re.error:
+                matching = []
+
+        for pane in matching:
+            try:
+                send_continue(pane["target"])
+                await asyncio.sleep(2)
+                capture = capture_pane(pane["target"])
+                eval_result = await evaluate_with_haiku(capture, model)
+                await ws.broadcast({
+                    "type": "tmux_result",
+                    "monitor_id": monitor.id,
+                    "target": pane["target"],
+                    "status": eval_result["status"],
+                    "explanation": eval_result["explanation"],
+                    "capture": capture,
+                })
+            except Exception as e:
+                await ws.broadcast({
+                    "type": "tmux_result",
+                    "monitor_id": monitor.id,
+                    "target": pane["target"],
+                    "status": "FAILED",
+                    "explanation": str(e),
+                    "capture": "",
+                })

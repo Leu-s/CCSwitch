@@ -10,6 +10,8 @@ probe_usage()  — POST a minimal Haiku message and read rate-limit
 
 import httpx
 
+from ..config import settings
+
 MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 REFRESH_URL = "https://platform.claude.com/v1/oauth/token"
 
@@ -22,9 +24,8 @@ _HEADERS = {
 }
 
 # Cheapest possible probe — haiku, 1 output token, single-character input
-_PROBE_MODEL = "claude-haiku-4-5-20251001"
 _PROBE_BODY = {
-    "model": _PROBE_MODEL,
+    "model": settings.haiku_model,
     "max_tokens": 1,
     "messages": [{"role": "user", "content": "."}],
 }
