@@ -15,7 +15,7 @@ A local dashboard for managing multiple Claude.ai subscription accounts, each in
 - **Keychain-safe credential switching** — copies credential files into `~/.claude/`, rewrites both the hashed per-config-dir and legacy Keychain entries, and updates `~/.claude-multi/active`
 - **Shell integration** — a one-liner in `.zshrc`/`.bashrc` exports `CLAUDE_CONFIG_DIR` for every new terminal; no restart needed
 - **Real-time dashboard** — vanilla-JS single-page app; account cards, drag-to-reorder priority, per-account threshold slider, switch log; no build step required
-- **tmux monitors** — watch specific panes, auto-continue paused `claude` sessions after a switch, evaluate outcomes with Claude Haiku
+- **tmux monitors** — watch specific panes, auto-continue paused `claude` sessions after a switch
 - **CLI** (`cc-acc`) — list/switch/enable/disable accounts, tail logs, manage the LaunchAgent, set up shell integration
 - **macOS LaunchAgent** — optional auto-start on login
 
@@ -248,7 +248,7 @@ After a switch, existing terminals can re-source their rc file (`source ~/.zshrc
 │   ├── status.sh                      # Server health check
 │   ├── create_system_service.sh       # macOS LaunchAgent installer
 │   └── remove_system_service.sh       # LaunchAgent removal
-└── tests/                             # 16 test files, 135 tests
+└── tests/                             # 16 test files, 147 tests
 ```
 
 ---
@@ -300,12 +300,11 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CLAUDE_MULTI_A
 | `POST` | `/api/settings/setup-shell` | Append shell snippet to `.zshrc` / `.bashrc` |
 | `GET` | `/api/tmux/sessions` | Discover tmux panes |
 | `GET` | `/api/tmux/capture` | Capture output from a pane |
-| `POST` | `/api/tmux/send-keys` | Send keys to a pane |
+| `POST` | `/api/tmux/send` | Send keys to a pane |
 | `GET` | `/api/tmux/monitors` | List monitors |
 | `POST` | `/api/tmux/monitors` | Create monitor |
 | `PATCH` | `/api/tmux/monitors/{id}` | Update monitor |
 | `DELETE` | `/api/tmux/monitors/{id}` | Delete monitor |
-| `POST` | `/api/tmux/monitors/{id}/evaluate` | Evaluate monitor output with Claude Haiku |
 | `GET` | `/health` | Health check (always public) |
 
 **WebSocket:** `ws://localhost:8765/ws?since=<seq>` — streams `usage_updated`, `account_switched`, `account_deleted`, `tmux_result`, and `error` events. The `since` parameter requests buffered events the client may have missed; the server falls back to a full snapshot if the buffer gap is too large.
@@ -315,7 +314,7 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CLAUDE_MULTI_A
 ## Testing
 
 ```bash
-uv run pytest tests/ -q                            # all 135 tests
+uv run pytest tests/ -q                            # all 147 tests
 uv run pytest tests/ -v --tb=short                 # verbose output
 uv run pytest tests/test_accounts_router.py        # single file
 ```
