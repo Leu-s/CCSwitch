@@ -8,7 +8,13 @@ import { prependEvent } from "./ui/events.js";
 
 let ws = null;
 let wsReconnectAttempts = 0;
-let _lastSeq = 0;
+// Persisted so a page reload does not replay the full backlog from seq=0,
+// which would miss any switch / delete / usage events buffered since the
+// previous tab was open.
+let _lastSeq = (() => {
+  try { return Number(sessionStorage.getItem("wsLastSeq") || 0) || 0; }
+  catch { return 0; }
+})();
 let _wsPingInterval = null;
 
 function _startWsPing() {
@@ -44,9 +50,12 @@ export function connectWs() {
 
   ws.onmessage = evt => {
     let msg;
-    try { msg = JSON.parse(evt.data); } catch (err) { console.warn("WS: invalid JSON received", err); return; }
+    try { msg = JSON.parse(evt.data); } catch { return; }
 
-    if (msg.seq) _lastSeq = Math.max(_lastSeq, msg.seq);
+    if (msg.seq) {
+      _lastSeq = Math.max(_lastSeq, msg.seq);
+      try { sessionStorage.setItem("wsLastSeq", String(_lastSeq)); } catch {}
+    }
 
     switch(msg.type) {
       case "account_switched":
@@ -60,11 +69,12 @@ export function connectWs() {
       case "account_deleted":
         state.accounts = state.accounts.filter(a => a.id !== Number(msg.id));
         renderAccounts();
+        document.dispatchEvent(new CustomEvent("app:reload-service"));
         break;
       case "usage_updated": updateUsageLive(msg.accounts||[]); break;
       case "tmux_result": prependEvent(msg); break;
       case "error": toast("Server error", msg.message, "error", 6000); break;
-      default: console.warn("WS: unknown message type", msg.type); break;
+      default: break;
     }
   };
 }

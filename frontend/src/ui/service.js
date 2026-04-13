@@ -8,9 +8,7 @@ export async function loadServiceStatus() {
     const s = await api("/api/service");
     state.service = s;
     updateServiceUI(s);
-  } catch (e) {
-    console.warn("service status:", e);
-  }
+  } catch { /* initial load — ignore */ }
 }
 
 export function updateServiceUI(s) {
@@ -41,9 +39,7 @@ export async function loadAutoSwitchSetting() {
     const enabled = entry ? entry.value !== "false" : true;
     const cb = qs("#auto-switch-cb");
     if (cb) cb.checked = enabled;
-  } catch (e) {
-    console.warn("auto-switch setting:", e);
-  }
+  } catch { /* initial load — ignore */ }
 }
 
 export function initServiceListeners() {

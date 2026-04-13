@@ -411,3 +411,230 @@ async def test_refresh_token_401_marks_permanently_expired():
     assert expires_at == 1, (
         f"save_refreshed_token should be called with expires_at=1, got: {mock_save.call_args}"
     )
+
+
+# ── Auto-switch tests (_maybe_auto_switch exercised via poll_usage_and_switch) ──
+
+
+def _make_db_for_auto_switch(account, auto_switch_enabled="true",
+                             current_account=None, next_account=None,
+                             monitors=None):
+    """Return a mock async DB for auto-switch scenarios.
+
+    DB execute calls in order:
+      1. service_enabled setting
+      2. accounts query (the one account to poll)
+      3. auto_switch_enabled setting (inside _maybe_auto_switch)
+      4. get_account_by_email (inside _maybe_auto_switch via aq)
+      5. get_next_account query (inside _maybe_auto_switch via sw)
+      6. tmux monitors query (only if switch happens)
+    """
+    mock_db = AsyncMock()
+    mock_db.commit = AsyncMock()
+
+    def make_setting(value):
+        s = MagicMock()
+        s.value = value
+        return s
+
+    call_count = [0]
+
+    def execute_side_effect(query):
+        result = MagicMock()
+        call_count[0] += 1
+        if call_count[0] == 1:          # service_enabled
+            result.scalars.return_value.first.return_value = make_setting("true")
+        elif call_count[0] == 2:        # accounts
+            result.scalars.return_value.all.return_value = [account]
+        elif call_count[0] == 3:        # auto_switch_enabled
+            result.scalars.return_value.first.return_value = make_setting(auto_switch_enabled)
+        elif call_count[0] == 4:        # get_account_by_email (current)
+            result.scalars.return_value.first.return_value = current_account
+        elif call_count[0] == 5:        # get_next_account
+            result.scalars.return_value.first.return_value = next_account
+        elif call_count[0] == 6:        # tmux monitors
+            result.scalars.return_value.all.return_value = monitors or []
+        else:
+            result.scalars.return_value.first.return_value = None
+            result.scalars.return_value.all.return_value = []
+        return result
+
+    mock_db.execute = AsyncMock(side_effect=execute_side_effect)
+    return mock_db
+
+
+@pytest.mark.asyncio
+async def test_auto_switch_triggered_when_threshold_exceeded():
+    """When usage exceeds the account's threshold_pct, perform_switch is called."""
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
+
+    active_email = "active@example.com"
+    next_email = "next@example.com"
+
+    active_account = _make_account(active_email)
+    active_account.threshold_pct = 80.0
+    active_account.stale_reason = None
+
+    next_account = _make_account(next_email, config_dir="/tmp/next", priority=1)
+    next_account.id = 2
+
+    # Pre-populate cache with usage above threshold (85% > 80%)
+    await cache.set_usage(active_email, {
+        "five_hour": {"utilization": 85.0, "resets_at": "2099-01-01T00:00:00Z"},
+    })
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_auto_switch(
+        account=active_account,
+        auto_switch_enabled="true",
+        current_account=active_account,
+        next_account=next_account,
+    )
+
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_access_token_from_config_dir", return_value="tok"), \
+         patch("backend.background.ac.get_token_info", return_value={}), \
+         patch("backend.background.ac.save_refreshed_token"), \
+         patch("backend.background.anthropic_api.probe_usage",
+               new_callable=AsyncMock, return_value={
+                   "five_hour": {"utilization": 85.0, "resets_at": "2099-01-01T00:00:00Z"},
+               }), \
+         patch("backend.background.ac.get_active_email", return_value=active_email), \
+         patch("backend.background.sw.perform_switch", new_callable=AsyncMock) as mock_switch, \
+         patch("backend.background.tmux_service.notify_monitors", new_callable=AsyncMock):
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await poll_usage_and_switch(mock_ws)
+
+    mock_switch.assert_called_once()
+    call_args = mock_switch.call_args
+    assert call_args[0][0] is next_account, "perform_switch should be called with the next account"
+    assert call_args[0][1] == "threshold", "perform_switch reason should be 'threshold'"
+
+    await cache.invalidate(active_email)
+
+
+@pytest.mark.asyncio
+async def test_auto_switch_not_triggered_below_threshold():
+    """When usage is below the account's threshold_pct, perform_switch is NOT called."""
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
+
+    active_email = "below-threshold@example.com"
+
+    active_account = _make_account(active_email)
+    active_account.threshold_pct = 80.0
+    active_account.stale_reason = None
+
+    # Pre-populate cache with usage below threshold (70% < 80%)
+    await cache.set_usage(active_email, {
+        "five_hour": {"utilization": 70.0, "resets_at": "2099-01-01T00:00:00Z"},
+    })
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_auto_switch(
+        account=active_account,
+        auto_switch_enabled="true",
+        current_account=active_account,
+    )
+
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_access_token_from_config_dir", return_value="tok"), \
+         patch("backend.background.ac.get_token_info", return_value={}), \
+         patch("backend.background.ac.save_refreshed_token"), \
+         patch("backend.background.anthropic_api.probe_usage",
+               new_callable=AsyncMock, return_value={
+                   "five_hour": {"utilization": 70.0, "resets_at": "2099-01-01T00:00:00Z"},
+               }), \
+         patch("backend.background.ac.get_active_email", return_value=active_email), \
+         patch("backend.background.sw.perform_switch", new_callable=AsyncMock) as mock_switch:
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await poll_usage_and_switch(mock_ws)
+
+    mock_switch.assert_not_called()
+
+    await cache.invalidate(active_email)
+
+
+@pytest.mark.asyncio
+async def test_auto_switch_no_eligible_next_account():
+    """When usage exceeds threshold but no next account is available,
+    perform_switch is NOT called and an error is broadcast."""
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
+
+    active_email = "no-next@example.com"
+
+    active_account = _make_account(active_email)
+    active_account.threshold_pct = 80.0
+    active_account.stale_reason = None
+
+    # Usage above threshold but no next account
+    await cache.set_usage(active_email, {
+        "five_hour": {"utilization": 90.0, "resets_at": "2099-01-01T00:00:00Z"},
+    })
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_auto_switch(
+        account=active_account,
+        auto_switch_enabled="true",
+        current_account=active_account,
+        next_account=None,  # no eligible account
+    )
+
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_access_token_from_config_dir", return_value="tok"), \
+         patch("backend.background.ac.get_token_info", return_value={}), \
+         patch("backend.background.ac.save_refreshed_token"), \
+         patch("backend.background.anthropic_api.probe_usage",
+               new_callable=AsyncMock, return_value={
+                   "five_hour": {"utilization": 90.0, "resets_at": "2099-01-01T00:00:00Z"},
+               }), \
+         patch("backend.background.ac.get_active_email", return_value=active_email), \
+         patch("backend.background.sw.perform_switch", new_callable=AsyncMock) as mock_switch:
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await poll_usage_and_switch(mock_ws)
+
+    mock_switch.assert_not_called()
+
+    # Should have broadcast an error message (second broadcast after usage_updated)
+    assert mock_ws.broadcast.call_count >= 2, "Expected at least 2 broadcasts (usage_updated + error)"
+    error_call = mock_ws.broadcast.call_args_list[-1]
+    error_data = error_call[0][0]
+    assert error_data["type"] == "error"
+    assert "no eligible" in error_data["message"].lower()
+
+    await cache.invalidate(active_email)
+
+
+@pytest.mark.asyncio
+async def test_auto_switch_disabled_skips_check():
+    """When auto_switch_enabled=false, _maybe_auto_switch exits early
+    without calling get_active_email."""
+    from backend.background import poll_usage_and_switch
+
+    active_email = "disabled-switch@example.com"
+    account = _make_account(active_email)
+    account.stale_reason = None
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_one_account(account)  # auto_switch_enabled=false
+
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_access_token_from_config_dir", return_value="tok"), \
+         patch("backend.background.ac.get_token_info", return_value={}), \
+         patch("backend.background.ac.save_refreshed_token"), \
+         patch("backend.background.anthropic_api.probe_usage",
+               new_callable=AsyncMock, return_value={
+                   "five_hour": {"utilization": 50.0},
+               }), \
+         patch("backend.background.ac.get_active_email") as mock_get_active:
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await poll_usage_and_switch(mock_ws)
+
+    # get_active_email should NOT have been called because auto_switch is disabled
+    mock_get_active.assert_not_called()

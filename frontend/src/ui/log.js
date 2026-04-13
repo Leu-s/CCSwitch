@@ -106,7 +106,7 @@ export async function loadSwitchLog(page) {
     state.logTotal = countData.total;
     state.switchLog = data;
     renderSwitchLog();
-  } catch(e) { console.warn("loadSwitchLog error", e); toast("Failed to load switch log", e.message, "error"); }
+  } catch(e) { toast("Failed to load switch log", e.message, "error"); }
 }
 
 export function prependSwitchLogRow() {

@@ -218,7 +218,7 @@ def _save_refreshed_token_locked(
                 data["expiresAt"] = expires_at
         else:
             continue
-        tmp_path = f"{path}.{os.getpid()}.tmp"
+        tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             with os.fdopen(fd, "w") as f:

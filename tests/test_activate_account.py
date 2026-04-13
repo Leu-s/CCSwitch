@@ -199,8 +199,8 @@ def test_switch_writes_back_home_state_to_previous_account(fake_home, fake_keych
 
 
 def test_activate_refuses_target_without_oauth(fake_home, fake_keychain, caplog):
-    """If the target account dir has no oauthAccount, activation is a no-op
-    (rather than silently wiping home state)."""
+    """If the target account dir has no oauthAccount, activation raises
+    ValueError (rather than silently wiping home state)."""
     from backend.services import account_service as ac
 
     # Pre-existing home state
@@ -214,7 +214,8 @@ def test_activate_refuses_target_without_oauth(fake_home, fake_keychain, caplog)
     bad.mkdir()
     (bad / ".claude.json").write_text(json.dumps({"someUnrelatedKey": 1}))
 
-    ac.activate_account_config(str(bad))
+    with pytest.raises(ValueError, match="no oauthAccount"):
+        ac.activate_account_config(str(bad))
 
     # Home unchanged
     assert ac.get_active_email() == "existing@x.com"

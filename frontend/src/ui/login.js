@@ -106,7 +106,6 @@ export function initLoginListeners() {
   qs("#add-done-btn").addEventListener("click", () => { qs("#add-modal").classList.remove("open"); });
 }
 
-export function getAddTermInterval() { return addTermInterval; }
 export function clearAddTermInterval() {
   if (addTermInterval) { clearInterval(addTermInterval); addTermInterval = null; }
 }

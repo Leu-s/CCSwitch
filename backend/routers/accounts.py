@@ -13,6 +13,7 @@ from ..config import settings
 from ..services import account_service as ac
 from ..services import account_queries as aq
 from ..services import login_session_service as ls
+from ..services import settings_service as ss
 from ..services import switcher as sw
 from ..background import cache
 from ..ws import ws_manager
@@ -86,7 +87,10 @@ async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
 @router.delete("/cancel-login")
 async def cancel_login(session_id: str):
     """Clean up a login session that was abandoned."""
-    await asyncio.to_thread(ls.cleanup_login_session, session_id)
+    try:
+        await asyncio.to_thread(ls.cleanup_login_session, session_id)
+    except Exception as e:
+        logger.warning("cleanup_login_session failed for %s: %s", session_id, e)
     return {"ok": True}
 
 
@@ -125,7 +129,10 @@ async def update_account(
     await db.refresh(account)
 
     if payload.enabled is False:
-        await sw.switch_if_active_disabled(account, db, ws_manager)
+        try:
+            await sw.switch_if_active_disabled(account, db, ws_manager)
+        except Exception as switch_err:
+            logger.warning("Auto-switch after disable failed: %s", switch_err)
 
     return account
 
@@ -147,6 +154,15 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
             await sw.perform_switch(next_acc, "manual", db, ws_manager)
         else:
             await asyncio.to_thread(ac.clear_active_config_dir)
+            # No replacement account — disable service to prevent the poll
+            # loop from running with no valid active account.
+            service_on = await ss.get_bool("service_enabled", False, db)
+            if service_on:
+                await ss.set_setting("service_enabled", "false", db)
+                try:
+                    await ws_manager.broadcast({"type": "service_disabled"})
+                except Exception:
+                    logger.warning("Failed to broadcast service_disabled after last-account delete")
 
     # Clear the default_account_id setting if this was the default
     setting_result = await db.execute(

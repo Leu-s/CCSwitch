@@ -24,7 +24,7 @@ async def capture_session(target: str, lines: int = Query(50, ge=1, le=500)):
         output = await tmux_service.capture_pane(target, lines)
         return {"target": target, "output": output}
     except Exception as e:
-        return {"target": target, "output": f"(error: {e})"}
+        raise HTTPException(500, detail=str(e))
 
 class SendKeysPayload(BaseModel):
     target: str

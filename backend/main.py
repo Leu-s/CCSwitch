@@ -165,7 +165,7 @@ async def websocket_endpoint(websocket: WebSocket, since: int = 0):
                     acct_id = id_map.get(email)
                     if acct_id is None:
                         continue
-                    token_info = bg_cache.get_token_info(email) or {}
+                    token_info = await bg_cache.get_token_info_async(email) or {}
                     flat = build_usage(usage, token_info)
                     snapshot.append({
                         "id": acct_id,

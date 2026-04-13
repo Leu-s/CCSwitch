@@ -31,7 +31,6 @@ export function closeTerminal() {
   qsa(".pane-item.selected").forEach(el => el.classList.remove("selected"));
 }
 
-export function getCaptureInterval() { return captureInterval; }
 export function clearCaptureInterval() {
   if (captureInterval) { clearInterval(captureInterval); captureInterval = null; }
 }

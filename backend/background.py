@@ -102,7 +102,7 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
                 account.email, remaining,
             )
             cached = await cache.get_usage_async(account.email)
-            token_info = cache.get_token_info(account.email) or {}
+            token_info = await cache.get_token_info_async(account.email) or {}
             try:
                 flat = build_usage(cached, token_info)
                 flat_dict = flat.model_dump() if flat else {}
@@ -138,7 +138,7 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
         _backoff_count.pop(account.email, None)
 
         await cache.set_usage(account.email, usage)
-        token_info = cache.get_token_info(account.email) or {}
+        token_info = await cache.get_token_info_async(account.email) or {}
         try:
             flat = build_usage(usage, token_info)
             flat_dict = flat.model_dump() if flat else {}
@@ -167,7 +167,7 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
         is_rate_limited = "429" in str(e) or "rate_limit" in str(e).lower()
         new_entry, err_str = await cache.set_usage_error(account.email, err_str, is_rate_limited)
 
-        token_info = cache.get_token_info(account.email) or {}
+        token_info = await cache.get_token_info_async(account.email) or {}
         try:
             flat = build_usage(new_entry, token_info)
             flat_dict = flat.model_dump() if flat else {"error": err_str}

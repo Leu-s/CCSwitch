@@ -373,12 +373,10 @@ def _activate_account_config_locked(target_config_dir: str) -> None:
     # ── 2. Merge target's oauthAccount → $HOME/.claude.json ──────────────────
     merged = _merge_oauth_into_home(target_config_dir)
     if not merged:
-        logger.error(
-            "activate_account_config: refusing to switch — target %s has no "
-            "oauthAccount in .claude.json",
-            target_config_dir,
+        raise ValueError(
+            f"Target account config has no oauthAccount — credentials may be "
+            f"corrupted (config dir: {target_config_dir})"
         )
-        return
 
     # ── 3. Legacy Keychain entry (no hash, read by new terminals) ────────────
     kc = _read_keychain_credentials(target_config_dir)
