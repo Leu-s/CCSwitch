@@ -507,6 +507,11 @@ async def build_ws_snapshot(db) -> list[dict]:
     is active — see Phase 3 review notes (build_ws_snapshot used to drop
     both and each reconnect momentarily rendered every waiting card as
     healthy until the next usage_updated broadcast arrived).
+
+    The ``waiting_for_cli`` field is gated by ``is_active`` — matching the
+    defense-in-depth guard in ``list_accounts`` — so a stale True that
+    leaked past a ``clear_waiting`` call cannot render a waiting banner on
+    a non-active card over WebSocket either.
     """
     from . import account_queries as aq
     from ..cache import cache as _cache
@@ -522,6 +527,7 @@ async def build_ws_snapshot(db) -> list[dict]:
     # on this to render stale banners without waiting for the next poll.
     result = await db.execute(_select(_Account.email, _Account.stale_reason))
     stale_by_email = {email: reason for email, reason in result.all()}
+    active_email = await get_active_email_async()
     snapshot = []
     for email, usage in cache_snapshot.items():
         acct_id = id_map.get(email)
@@ -529,12 +535,16 @@ async def build_ws_snapshot(db) -> list[dict]:
             continue
         token_info = await _cache.get_token_info_async(email) or {}
         flat = build_usage(usage, token_info)
+        waiting = (
+            email == active_email
+            and await _cache.is_waiting_async(email)
+        )
         snapshot.append({
             "id": acct_id,
             "email": email,
             "usage": flat.model_dump() if flat else {},
             "error": usage.get("error"),
-            "waiting_for_cli": await _cache.is_waiting_async(email),
+            "waiting_for_cli": waiting,
             "stale_reason": stale_by_email.get(email),
         })
     return snapshot

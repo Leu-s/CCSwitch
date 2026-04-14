@@ -271,3 +271,84 @@ async def test_perform_switch_serialized_by_lock():
     assert second_start >= first_end - 1e-6, (
         "Second perform_switch started before first finished — lock not working"
     )
+
+
+@pytest.mark.asyncio
+async def test_perform_switch_clears_waiting_for_both_sides():
+    """Regression guard for the active-ownership refresh model (E2).
+
+    perform_switch MUST clear ``cache._waiting`` for both the outgoing and
+    the incoming account.  The outgoing account is no longer waiting on the
+    CLI (CCSwitch owns its refresh from now on); the incoming account gets
+    a clean slate until its own poll cycle decides whether to re-enter
+    waiting.  Without this clear, a stale waiting flag can leak past a
+    switch and leave a yellow badge on a non-active card for up to one
+    poll cycle before the next probe clears it.
+    """
+    from backend.services.switcher import perform_switch
+    from backend.cache import cache
+
+    outgoing_email = "outgoing@example.com"
+    incoming_email = "incoming@example.com"
+
+    # Seed both sides as waiting so we can verify BOTH are cleared.
+    await cache.set_waiting(outgoing_email)
+    await cache.set_waiting(incoming_email)
+    assert await cache.is_waiting_async(outgoing_email) is True
+    assert await cache.is_waiting_async(incoming_email) is True
+
+    target = make_account(7, incoming_email, 2, config_dir="/tmp/incoming-dir")
+
+    mock_db = MagicMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.first.return_value = None
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    mock_db.commit = AsyncMock()
+
+    mock_ws = AsyncMock()
+
+    with patch("backend.services.account_service.get_active_email",
+               return_value=outgoing_email), \
+         patch("backend.services.credential_targets.enabled_canonical_paths",
+               AsyncMock(return_value=[])), \
+         patch("backend.services.account_service.activate_account_config",
+               return_value={"mirror": {"written": [], "skipped": [], "errors": []},
+                             "keychain_written": False,
+                             "system_default_enabled": False}):
+        await perform_switch(target, "manual", mock_db, mock_ws)
+
+    # Both sides must have been cleared by perform_switch — neither can
+    # still carry a waiting flag in the cache.
+    assert await cache.is_waiting_async(outgoing_email) is False
+    assert await cache.is_waiting_async(incoming_email) is False
+
+    # Cleanup
+    await cache.invalidate(outgoing_email)
+    await cache.invalidate(incoming_email)
+
+
+@pytest.mark.asyncio
+async def test_cache_invalidate_drops_waiting_flag():
+    """``cache.invalidate(email)`` must also remove the email from
+    ``_waiting`` — otherwise a deleted account's stale waiting flag would
+    linger forever and a re-added account with the same email would see a
+    phantom waiting badge until its next probe."""
+    from backend.cache import cache
+
+    email = "invalidate-waiting@example.com"
+
+    # Seed usage, token_info, AND waiting so we verify invalidate wipes all three.
+    await cache.set_usage(email, {"five_hour": {"utilization": 42}})
+    await cache.set_token_info(email, {"token_expires_at": 9999})
+    await cache.set_waiting(email)
+
+    assert await cache.is_waiting_async(email) is True
+    assert await cache.get_usage_async(email) != {}
+    assert await cache.get_token_info_async(email) is not None
+
+    await cache.invalidate(email)
+
+    # Every cache surface for this email must now be empty.
+    assert await cache.is_waiting_async(email) is False
+    assert await cache.get_usage_async(email) == {}
+    assert await cache.get_token_info_async(email) is None

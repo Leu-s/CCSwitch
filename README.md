@@ -6,7 +6,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Tests](https://img.shields.io/badge/tests-227%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-229%20passing-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#requirements)
 [![Status](https://img.shields.io/badge/status-stable-success.svg)](#project-status)
 [![Build](https://img.shields.io/badge/frontend-no%20build%20step-orange.svg)](#architecture)
@@ -383,7 +383,7 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CCSWITCH_API_T
 ## Testing
 
 ```bash
-uv run pytest tests/ -q                            # all 227 tests
+uv run pytest tests/ -q                            # all 229 tests
 uv run pytest tests/ -v --tb=short                 # verbose output
 uv run pytest tests/test_accounts_router.py        # single file
 ```
@@ -442,7 +442,7 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 
 ## Project Status
 
-**Stable** — running 24/7 as a personal LaunchAgent on the maintainer's machine. The codebase has been through several rounds of audited refactoring (227 tests covering routers, services, background loop, schemas, and an end-to-end smoke suite). The public API and database schema are considered stable; breaking changes ship with an Alembic migration.
+**Stable** — running 24/7 as a personal LaunchAgent on the maintainer's machine. The codebase has been through several rounds of audited refactoring (229 tests covering routers, services, background loop, schemas, and an end-to-end smoke suite). The public API and database schema are considered stable; breaking changes ship with an Alembic migration.
 
 What is intentionally **not** done:
 - No multi-tenant support — one user per machine
