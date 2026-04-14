@@ -30,15 +30,31 @@ logger = logging.getLogger(__name__)
 # and needs a nudge to continue".  Matched case-insensitively against the last
 # few hundred lines of the pane.  Kept conservative to avoid false positives
 # on benign output that happens to contain the word "limit".
+#
+# Confirmed against real messages surfaced by Claude Code in its terminal UI
+# (Anthropic GitHub issues #2087, #5977, #6457, #6488, #9046, #9236, #35487,
+# #35704, #35785 + Claude Help Center "Troubleshoot Claude error messages"):
+#
+#   "Claude AI usage limit reached|1749924000"
+#   "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)"
+#   "⎿ 5-hour limit reached ∙ resets 18:00"
+#   "5-hour limit resets 17:00 - continuing with extra usage"
+#   "Approaching usage limit (95%)"
+#   "rate_limit_error"  /  "This request would exceed your account's rate limit"
+#   "Anthropic API Error: Overloaded Error (529)"
+#   "HTTP 529 Service Overloaded"  /  "overloaded_error"
 _STALL_PATTERNS = re.compile(
     r"("
     r"usage limit reached"
     r"|approaching usage limit"
     r"|claude usage limit"
     r"|claude.+limit reached"
+    r"|\d+-hour limit (reached|resets)"
     r"|rate limit(ed| exceeded| reached)?"
     r"|rate_limit_error"
+    r"|overloaded_error"
     r"|api error.*overloaded"
+    r"|service overloaded"
     r"|try again later"
     r")",
     re.IGNORECASE,

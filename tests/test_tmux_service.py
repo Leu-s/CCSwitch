@@ -60,12 +60,23 @@ async def test_capture_pane():
 
 
 @pytest.mark.parametrize("text", [
-    "Claude AI usage limit reached",
-    "Claude usage limit reached. Try again at 18:00.",
+    # Real Claude Code messages from Anthropic GitHub issues + Help Center.
+    # Any change here should be backed by an actual observed message, not a guess.
+    "Claude AI usage limit reached",                                 # issue #2087
+    "Claude AI usage limit reached|1760000400",                      # issue #9046 (with epoch suffix)
+    "Claude usage limit reached. Your limit will reset at 3pm",      # issue #9236
+    "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)",  # issue #5977
+    "⎿ 5-hour limit reached ∙ resets 18:00",                         # issue #6488
+    "5-hour limit reached",                                          # issue #6457
+    "5-hour limit resets 17:00 - continuing with extra usage",       # extra-usage variant
+    "Approaching usage limit (95%)",                                 # Pro tier warning
     "  rate limit exceeded — please wait",
-    "RATE_LIMIT_ERROR returned by API",
-    "Approaching usage limit (95%)",
-    "API Error: Overloaded — try again later",
+    "RATE_LIMIT_ERROR returned by API",                              # 429 error code
+    "This request would exceed your account's rate limit",           # Anthropic API raw
+    "Anthropic API Error: Overloaded Error (529)",                   # issue #35487
+    "API Error: 529 Overloaded — try again later",                   # issue #35704
+    "HTTP 529 Service Overloaded",                                   # issue #35785
+    "overloaded_error",                                              # bare API code
 ])
 def test_looks_stalled_matches_known_messages(text):
     from backend.services.tmux_service import looks_stalled
