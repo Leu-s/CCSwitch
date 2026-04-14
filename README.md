@@ -6,7 +6,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Tests](https://img.shields.io/badge/tests-199%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-218%20passing-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#requirements)
 [![Status](https://img.shields.io/badge/status-stable-success.svg)](#project-status)
 [![Build](https://img.shields.io/badge/frontend-no%20build%20step-orange.svg)](#architecture)
@@ -57,7 +57,8 @@ You're refactoring a service. The dashboard sits in a tab. Around hour 4, the ac
 ## Features
 
 - **Live usage monitoring** — polls `/v1/messages` rate-limit headers every 15 s while the dashboard is open, every 5 min otherwise
-- **Auto-switch** — when the active account's five-hour utilization reaches a configurable threshold (default 95 %), the next enabled account is activated automatically
+- **Auto-switch** — when the active account's five-hour utilization reaches a configurable threshold (default 95 %), or a stale credential is detected, the next enabled account is activated automatically
+- **Stale-account relogin** — if a refresh token is revoked or expires, the dashboard marks the account stale and offers a one-click re-login flow (opens a tmux pane with `claude`, verifies new credentials, clears `stale_reason`)
 - **Opt-in credential targets** — the dashboard auto-discovers every `.claude.json` location on the machine and lets you tick which ones the switcher should mirror into. Nothing outside the isolated account dirs is touched unless you explicitly opt in.
 - **Two switch modes per target**:
   - *Identity-only mirror* — the default for any user-enabled target: only `oauthAccount` and `userID` are mirrored, no credentials leave the account dir
@@ -242,11 +243,11 @@ What a switch *does* touch is determined by the **credential targets** the user 
 
 ### Data flow
 
-1. **Startup** — `init_db()` runs Alembic migrations (creates the DB on first run), syncs `~/.claude-multi/active`, then spawns two background tasks: the poll loop and a login-session cleanup loop.
+1. **Startup** — `init_db()` runs Alembic migrations (creates the DB on first run), seeds default settings, syncs `~/.claude-multi/active`, then spawns two background tasks: the poll loop and a login-session cleanup loop (reaps expired add-account sessions every 5 min).
 
-2. **Poll cycle** — Every 15 s with active clients, every 5 min when idle. Per account: reads the access token from the isolated config dir, refreshes it if expiring within 5 min, POSTs a near-empty request to `/v1/messages` purely to read the `anthropic-ratelimit-unified-*` response headers (five-hour and seven-day utilization + reset times). Results are cached in memory and broadcast over WebSocket.
+2. **Poll cycle** — Every 15 s with active WebSocket clients, every 5 min when idle. Per account: reads the access token from the isolated config dir, refreshes it if expiring within 5 min, POSTs a near-empty request to `/v1/messages` purely to read the `anthropic-ratelimit-unified-*` response headers (five-hour and seven-day utilization + reset times). Accounts that return 429 enter per-account exponential backoff (120 s → 3600 s cap). Results are cached in memory and broadcast over WebSocket.
 
-3. **Auto-switch** — If the active account's five-hour utilization ≥ `threshold_pct`, `perform_switch()` runs `activate_account_config()` under a credential lock (so a concurrent token refresh cannot interleave). For the chosen account it:
+3. **Auto-switch** — If the active account's five-hour utilization ≥ `threshold_pct` (or it returned 429, or has a `stale_reason`), `perform_switch()` runs `activate_account_config()` under a credential lock (so a concurrent token refresh cannot interleave). For the chosen account it:
    - **Mirrors `oauthAccount` + `userID`** from the account's `.claude.json` into every user-enabled credential target — identity only, no tokens
    - **If a system-default target is enabled** (`~/.claude.json` or `~/.claude/.claude.json`), additionally writes the legacy `Claude Code-credentials` Keychain entry, cleans stale legacy Keychain entries left by older Claude Code versions, and copies `.credentials.json` into `~/.claude/` as a plaintext fallback
    - **Updates `~/.claude-multi/active`** *after* all credential operations succeed (so the pointer is never advanced to a half-installed state)
@@ -269,21 +270,21 @@ What a switch *does* touch is determined by the **credential targets** the user 
 │   ├── schemas.py                     # Pydantic request/response models
 │   ├── cache.py                       # Thread-safe in-memory usage + token_info cache
 │   ├── auth.py                        # Optional Bearer token middleware
-│   ├── ws.py                          # WebSocketManager (broadcast + replay buffer)
-│   ├── background.py                  # Per-account poll, token refresh, auto-switch
+│   ├── ws.py                          # WebSocketManager (broadcast, replay_since, seq stamping)
+│   ├── background.py                  # Per-account poll, token refresh, rate-limit backoff, auto-switch
 │   ├── routers/
-│   │   ├── accounts.py                # /api/accounts CRUD + login flow
+│   │   ├── accounts.py                # /api/accounts CRUD + login flow (add + relogin)
 │   │   ├── service.py                 # /api/service enable/disable/default-account
 │   │   ├── settings.py                # /api/settings + shell snippet
 │   │   └── credential_targets.py      # /api/credential-targets list/rescan/toggle/sync
 │   └── services/
 │       ├── account_service.py         # Account lifecycle, activation, backup/restore
 │       ├── account_queries.py         # DB query helpers
-│       ├── login_session_service.py   # tmux-based login session start/verify/cleanup
-│       ├── credential_provider.py     # Keychain read/write + credential file I/O
+│       ├── login_session_service.py   # Add-account + relogin sessions (tmux, auto-expiry)
+│       ├── credential_provider.py     # Keychain read/write, token get/save/wipe, _credential_lock
 │       ├── credential_targets.py      # Auto-discover .claude.json targets + enable state
 │       ├── anthropic_api.py           # probe_usage() + refresh_access_token()
-│       ├── switcher.py                # get_next_account() + perform_switch() + maybe_auto_switch
+│       ├── switcher.py                # get_next_account, perform_switch, maybe_auto_switch, relogin helpers
 │       ├── settings_service.py        # Typed get/set for Setting DB rows
 │       └── tmux_service.py            # tmux pane ops + wake_stalled_sessions + fire_nudge
 ├── frontend/
@@ -356,6 +357,8 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CLAUDE_MULTI_A
 | `PATCH` | `/api/accounts/{id}` | Update account (`enabled`, `threshold_pct`, `priority`) |
 | `DELETE` | `/api/accounts/{id}` | Delete account |
 | `POST` | `/api/accounts/{id}/switch` | Manual switch to account |
+| `POST` | `/api/accounts/{id}/relogin` | Open tmux pane to re-authenticate a stale account |
+| `POST` | `/api/accounts/{id}/relogin/verify` | Verify re-login completed, clear `stale_reason` |
 | `GET` | `/api/accounts/log` | Paginated switch log |
 | `GET` | `/api/accounts/log/count` | Total switch log entry count |
 | `GET` | `/api/service` | Service status (`enabled`, `active_email`, `default_account_id`) |
@@ -379,7 +382,7 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CLAUDE_MULTI_A
 ## Testing
 
 ```bash
-uv run pytest tests/ -q                            # all 199 tests
+uv run pytest tests/ -q                            # all 218 tests
 uv run pytest tests/ -v --tb=short                 # verbose output
 uv run pytest tests/test_accounts_router.py        # single file
 ```
@@ -438,7 +441,7 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 
 ## Project Status
 
-**Stable** — running 24/7 as a personal LaunchAgent on the maintainer's machine. The codebase has been through several rounds of audited refactoring (199 tests covering routers, services, background loop, schemas, and an end-to-end smoke suite). The public API and database schema are considered stable; breaking changes ship with an Alembic migration.
+**Stable** — running 24/7 as a personal LaunchAgent on the maintainer's machine. The codebase has been through several rounds of audited refactoring (218 tests covering routers, services, background loop, schemas, and an end-to-end smoke suite). The public API and database schema are considered stable; breaking changes ship with an Alembic migration.
 
 What is intentionally **not** done:
 - No multi-tenant support — one user per machine

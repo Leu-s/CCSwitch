@@ -24,35 +24,43 @@ freshly-mirrored credentials.
 
 ```
 backend/
-  main.py              FastAPI app + lifespan + /ws endpoint + single poll loop
-  background.py        poll_usage_and_switch() — the only polling routine
+  main.py              FastAPI app + lifespan + /ws endpoint + two background
+                       tasks (_poll_loop + _cleanup_sessions_loop) + static serving
+  background.py        poll_usage_and_switch() — per-account probe, token refresh,
+                       per-account rate-limit backoff (exponential, 120 s → 3600 s cap)
   cache.py             _UsageCache class + module-level cache singleton
   config.py            Pydantic settings (env prefix: CLAUDE_MULTI_)
   database.py          async SQLAlchemy engine + init_db (Alembic-backed)
   models.py            Account, SwitchLog, Setting (with indexes)
-  schemas.py           Pydantic request/response models
-  ws.py                Minimal WebSocketManager (broadcast + connection list)
-  auth.py              Optional Bearer/WS token middleware
+  schemas.py           Pydantic request/response models (17 schemas for accounts,
+                       login flow, service, settings, credential targets, switch log)
+  ws.py                WebSocketManager — broadcast, replay_since (bounded deque),
+                       connection lifecycle, seq stamping
+  auth.py              TokenAuthMiddleware — optional Bearer (HTTP) / query-param (WS)
+                       auth; exempt paths: /, /src/*, /health
   routers/
-    accounts.py            /api/accounts CRUD + login flow
+    accounts.py            /api/accounts CRUD + login flow (add + relogin)
     service.py             /api/service enable/disable + default-account
     settings.py            /api/settings get/patch + shell-setup helper
     credential_targets.py  /api/credential-targets list/rescan/toggle/sync
   services/
-    credential_provider.py  CANONICAL: Keychain read/write, _load_json_safe,
-                            active_dir_pointer_path, _credential_lock (RLock)
+    credential_provider.py  Keychain read/write (get/save token, wipe credentials),
+                            _load_json_safe, active_dir_pointer_path,
+                            get_token_info, LEGACY_KEYCHAIN_SERVICE constant,
+                            _credential_lock (RLock) — shared by account_service
     account_service.py      activate_account_config (credentials→mirror→pointer),
-                            backup/restore, path helpers — imports shared utils
-                            from credential_provider
+                            sync_active_to_targets, build_ws_snapshot,
+                            backup/restore, path helpers
     account_queries.py      DB query helpers (get_by_id, get_by_email, etc.)
-    login_session_service.py  isolated add-account login sessions (+RLock,
-                              subprocess timeouts)
+    login_session_service.py  add-account + relogin sessions (+RLock for
+                              _active_login_sessions dict, 10 s subprocess
+                              timeouts, 30-min auto-expiry)
     credential_targets.py   discover .claude.json targets, JSON settings row,
                             mirror_oauth_into_targets — validated opt-in list
     anthropic_api.py   probe_usage() + refresh_access_token()
     switcher.py        get_next_account() + perform_switch() + maybe_auto_switch
-                       (+ _switch_lock asyncio); fires tmux_service.fire_nudge()
-                       after every switch
+                       + switch_if_active_disabled + perform_sync_to_targets
+                       (+ _switch_lock asyncio); calls fire_nudge() after switch
     settings_service.py  typed get/set for Setting rows (bool/int/int_or_none/json)
     tmux_service.py    list_panes, send_keys, capture_pane, looks_stalled,
                         wake_stalled_sessions, fire_nudge — nudges only panes
@@ -105,13 +113,15 @@ tests/
    `/v1/messages` for rate-limit headers, stores the result in `cache`
    (a `_UsageCache` singleton in `cache.py`), and caches `token_info` so
    `GET /api/accounts` does not fan out Keychain subprocess calls per row.
+   Accounts that return 429 enter per-account exponential backoff
+   (120 s initial, doubling up to 3600 s cap; cleared on next success).
 4. After polling, it delegates to `switcher.maybe_auto_switch`, which
    **does** gate on `service_enabled`: if the master toggle is off it
    returns immediately.  Otherwise, if the active account crosses its
-   `threshold_pct` (or came back 429), it picks the next enabled
-   **non-stale** account by priority, calls `switcher.perform_switch`, and
-   then fires `tmux_service.fire_nudge()` as a background task to kick any
-   stalled claude panes.
+   `threshold_pct` (or came back 429, or has a `stale_reason`), it picks
+   the next enabled **non-stale** account by priority, calls
+   `switcher.perform_switch`, and then calls `tmux_service.fire_nudge()`
+   to kick any stalled claude panes.
 5. Every outcome is broadcast over `/ws` so the SPA updates live.
 
 ## Account switching = four artefacts (ordered!)
@@ -168,6 +178,9 @@ end up inside the tmp dir instead of polluting the repo root.
   Both `activate_account_config` and `save_refreshed_token` acquire it.
 - `_switch_lock` (asyncio.Lock, in switcher.py): serializes concurrent
   `perform_switch` calls so two auto-switches can't overlap.
+- `_sessions_lock` (threading.RLock, in login_session_service.py): protects the
+  `_active_login_sessions` dict.  Reentrant so `_cleanup_expired_sessions` can
+  iterate the dict and then call `cleanup_login_session` (which also acquires it).
 - `_UsageCache` (cache.py): asyncio.Lock protects in-memory usage + token_info
   dicts.  All reads from outside the cache use `_async` variants.
 
