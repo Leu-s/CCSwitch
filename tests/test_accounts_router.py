@@ -2,7 +2,7 @@
 import asyncio
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 
 from backend.models import Account
 
@@ -492,3 +492,152 @@ def test_relogin_verify_active_account_triggers_sync(client):
     assert resp.status_code == 200
     assert resp.json()["success"] is True
     mock_sync.assert_awaited_once()
+
+
+# ── Force-refresh endpoint (E2 / Phase 2) ─────────────────────────────────────
+
+def _insert_healthy_account(email: str, config_dir: str) -> int:
+    """Helper: drop a non-stale account row and return its id."""
+    engine = create_async_engine(TEST_DB_URL, echo=False)
+    SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def _go():
+        async with SessionLocal() as session:
+            acc = Account(email=email, config_dir=config_dir, priority=85)
+            session.add(acc)
+            await session.commit()
+            await session.refresh(acc)
+            return acc.id
+
+    return asyncio.run(_go())
+
+
+def test_force_refresh_success_clears_waiting_and_broadcasts(client):
+    """Happy path: POST /force-refresh returns 200, clears the cache waiting
+    flag, and fires a single-account usage_updated broadcast so the UI flips
+    out of waiting state immediately."""
+    from backend.cache import cache
+
+    account_id = _insert_healthy_account(
+        "force-refresh-happy@example.com",
+        "/tmp/force-refresh-happy-dir",
+    )
+
+    # Seed the waiting flag so we can verify it is cleared by the success path.
+    asyncio.run(cache.set_waiting("force-refresh-happy@example.com"))
+
+    fresh_token_info = {
+        "token_expires_at": 9999999999999,
+        "subscription_type": "max",
+    }
+
+    with patch(
+        "backend.routers.accounts.ac.force_refresh_config_dir",
+        new_callable=AsyncMock,
+        return_value=fresh_token_info,
+    ) as mock_force, patch(
+        "backend.ws.ws_manager.broadcast",
+        new_callable=AsyncMock,
+    ) as mock_broadcast:
+        resp = client.post(f"/api/accounts/{account_id}/force-refresh")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+    mock_force.assert_awaited_once_with("/tmp/force-refresh-happy-dir")
+
+    # The cache's waiting flag must be cleared so a follow-up GET /api/accounts
+    # does NOT still say waiting=True.
+    assert asyncio.run(
+        cache.is_waiting_async("force-refresh-happy@example.com")
+    ) is False
+
+    # A single-account WS broadcast must have fired so other tabs flip out
+    # of the waiting state without waiting for the next poll cycle.
+    assert mock_broadcast.await_count >= 1
+    payload = mock_broadcast.await_args_list[0][0][0]
+    assert payload["type"] == "usage_updated"
+    # Single-account payload — exactly one entry for this account.
+    assert len(payload["accounts"]) == 1
+    entry = payload["accounts"][0]
+    assert entry["email"] == "force-refresh-happy@example.com"
+    assert entry["waiting_for_cli"] is False
+    assert entry["stale_reason"] is None
+
+    asyncio.run(cache.invalidate("force-refresh-happy@example.com"))
+
+
+def test_force_refresh_401_marks_stale_and_returns_409(client):
+    """Upstream 401 on refresh means the refresh_token is revoked.  The
+    router must mark the account stale with the same wording the poll loop
+    uses for the same status code, fire a WS broadcast so other tabs see
+    the transition, and return 409 to the caller."""
+    import httpx
+    from backend.cache import cache
+
+    account_id = _insert_healthy_account(
+        "force-refresh-401@example.com",
+        "/tmp/force-refresh-401-dir",
+    )
+
+    resp_mock = MagicMock()
+    resp_mock.status_code = 401
+    http_err = httpx.HTTPStatusError(
+        "401", request=MagicMock(), response=resp_mock
+    )
+
+    with patch(
+        "backend.routers.accounts.ac.force_refresh_config_dir",
+        new_callable=AsyncMock,
+        side_effect=http_err,
+    ), patch(
+        "backend.ws.ws_manager.broadcast",
+        new_callable=AsyncMock,
+    ) as mock_broadcast:
+        resp = client.post(f"/api/accounts/{account_id}/force-refresh")
+
+    assert resp.status_code == 409
+    # Must match the poll-loop wording so the UI shows a consistent message
+    # regardless of which code path marked the account stale.
+    assert resp.json()["detail"] == "Refresh token revoked — re-login required"
+
+    # The account row must now carry the stale reason.
+    with patch("backend.services.account_service.get_active_email", return_value=None), \
+         patch("backend.services.account_service.get_token_info", return_value={}):
+        list_resp = client.get("/api/accounts")
+    row = next(a for a in list_resp.json() if a["id"] == account_id)
+    assert row["stale_reason"] == "Refresh token revoked — re-login required"
+
+    # A broadcast must have fired on the stale-transition path so other tabs
+    # flip from Force-refresh button to Re-login button immediately.
+    assert mock_broadcast.await_count >= 1
+    payload = mock_broadcast.await_args_list[0][0][0]
+    assert payload["type"] == "usage_updated"
+    entry = payload["accounts"][0]
+    assert entry["stale_reason"] == "Refresh token revoked — re-login required"
+
+    asyncio.run(cache.invalidate("force-refresh-401@example.com"))
+
+
+def test_force_refresh_already_stale_returns_409_without_upstream_call(client):
+    """Double-click / retry protection: if the account row already has a
+    stale_reason set (e.g. a prior force-refresh just failed), the router
+    must 409 WITHOUT calling the upstream refresh helper at all — otherwise
+    a second click could burn a second refresh token."""
+    account_id = _insert_stale_account(
+        "force-refresh-already-stale@example.com",
+        "/tmp/force-refresh-already-stale-dir",
+        "Refresh token rejected (400) — re-login required",
+    )
+
+    with patch(
+        "backend.routers.accounts.ac.force_refresh_config_dir",
+        new_callable=AsyncMock,
+    ) as mock_force:
+        resp = client.post(f"/api/accounts/{account_id}/force-refresh")
+
+    assert resp.status_code == 409
+    # The pre-check must fire BEFORE force_refresh_config_dir is called.
+    mock_force.assert_not_called()
+    # Detail should surface the existing stale_reason so the UI can toast it.
+    assert "Refresh token rejected (400)" in resp.json()["detail"]

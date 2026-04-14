@@ -370,7 +370,14 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
         updated = []
         stale_changed = False
         for account, result in zip(accounts, results):
-            if isinstance(result, Exception):
+            # ``asyncio.gather(return_exceptions=True)`` captures both
+            # Exception and BaseException subclasses (notably
+            # ``asyncio.CancelledError`` during lifespan shutdown), so the
+            # check must be against BaseException — not Exception — or a
+            # cancelled per-account coroutine lands in the ``else`` branch
+            # and crashes on the ``usage_entry, new_stale_reason = result``
+            # unpack.
+            if isinstance(result, BaseException):
                 logger.exception(
                     "_process_single_account raised for %s: %s", account.email, result
                 )

@@ -717,3 +717,331 @@ async def test_non_stale_account_triggers_token_refresh():
     mock_refresh.assert_called_once_with("old-refresh-token")
 
     await cache.invalidate(email)
+
+
+# ── Active-ownership refresh model (E2) ───────────────────────────────────────
+#
+# The poll loop must not refresh the access token of the account whose
+# config_dir matches ``~/.ccswitch/active`` — that refresh lifecycle belongs
+# to Claude Code CLI.  When the active account's access token has expired
+# and no CLI is running, a probe returns 401 and the poll loop enters a
+# "soft waiting" state (no stale_reason, no error broadcast) until either
+# Claude Code refreshes via its own lifecycle or the user clicks Force
+# refresh in the dashboard.  These tests protect that invariant and the
+# waiting-flag bookkeeping that drives the UI.
+
+
+@pytest.mark.asyncio
+async def test_active_account_skipped_from_refresh():
+    """The active account's token refresh is OWNED by Claude Code CLI — the
+    poll loop must skip calling refresh_access_token even when the stored
+    token is about to expire.  Instead the probe runs directly with the
+    existing access token and whatever outcome that yields is what the UI
+    sees for that cycle."""
+    import httpx
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
+
+    email = "active-no-refresh@example.com"
+    await cache.invalidate(email)
+
+    account = _make_account(email, config_dir="/tmp/active-dir")
+    account.stale_reason = None
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_one_account(account)
+    mock_db.commit = AsyncMock()
+
+    future_expires = int(time.time() * 1000) + 60_000  # 60 s — inside refresh buffer
+
+    # The active_cfg_dir pointer resolves to THIS account's config dir, so the
+    # poll loop classifies this account as active and must skip refresh.
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_active_config_dir_pointer",
+               return_value="/tmp/active-dir"), \
+         patch("backend.background.ac.get_access_token_from_config_dir",
+               return_value="existing-token"), \
+         patch("backend.background.ac.get_token_info",
+               return_value={"token_expires_at": future_expires}), \
+         patch("backend.background.ac.get_refresh_token_from_config_dir",
+               return_value="rt"), \
+         patch("backend.background.ac.save_refreshed_token"), \
+         patch("backend.background.anthropic_api.refresh_access_token",
+               new_callable=AsyncMock) as mock_refresh, \
+         patch("backend.background.anthropic_api.probe_usage",
+               new_callable=AsyncMock,
+               return_value={"five_hour": {"utilization": 10}}), \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await poll_usage_and_switch(mock_ws)
+
+    # The active-ownership invariant: the poll loop must NOT refresh the
+    # active account — that is Claude Code CLI's job.
+    mock_refresh.assert_not_called()
+
+    await cache.invalidate(email)
+
+
+@pytest.mark.asyncio
+async def test_active_account_401_enters_waiting_state():
+    """Active account + expired access token + no CLI: the probe 401s, the
+    Keychain re-read retry also 401s, and the poll loop must enter the soft
+    waiting state — NOT mark the account stale.  The broadcast usage_entry
+    must have waiting_for_cli=True, and cache.is_waiting_async(email) must
+    return True so a subsequent GET /api/accounts also sees waiting."""
+    import httpx
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
+
+    email = "active-waiting@example.com"
+    await cache.invalidate(email)
+
+    account = _make_account(email, config_dir="/tmp/waiting-dir")
+    account.stale_reason = None
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_one_account(account)
+    mock_db.commit = AsyncMock()
+
+    probe_resp = MagicMock()
+    probe_resp.status_code = 401
+    probe_resp.json = MagicMock(return_value={"error": {"message": "expired"}})
+    probe_401 = httpx.HTTPStatusError("401", request=MagicMock(), response=probe_resp)
+
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_active_config_dir_pointer",
+               return_value="/tmp/waiting-dir"), \
+         patch("backend.background.ac.get_access_token_from_config_dir",
+               return_value="stale-token"), \
+         patch("backend.background.ac.get_token_info",
+               return_value={}), \
+         patch("backend.background.anthropic_api.probe_usage",
+               new_callable=AsyncMock, side_effect=probe_401), \
+         patch("backend.services.switcher.ac.get_active_email", return_value=email):
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await poll_usage_and_switch(mock_ws)
+
+    # Soft waiting: the account must NOT be marked stale.
+    assert account.stale_reason is None, (
+        "active account with 401 probe must stay non-stale — stale_reason "
+        "would prevent re-probe on the next cycle"
+    )
+    # The cache-backed flag must be set so GET /api/accounts returns True.
+    assert await cache.is_waiting_async(email) is True, (
+        "cache waiting flag should be set by the active-401 branch"
+    )
+    # The WS broadcast must carry waiting_for_cli=True for the active account.
+    broadcast_args = mock_ws.broadcast.call_args_list[0][0][0]
+    assert broadcast_args["type"] == "usage_updated"
+    entry = next(
+        e for e in broadcast_args["accounts"] if e["email"] == email
+    )
+    assert entry["waiting_for_cli"] is True
+
+    await cache.invalidate(email)
+
+
+@pytest.mark.asyncio
+async def test_inactive_account_401_still_marks_stale():
+    """Active-ownership only defers refresh for the ACTIVE account.  An
+    inactive account that returns 401 from the probe must still be marked
+    stale (CCSwitch is the sole refresh consumer for inactive accounts —
+    a persistent 401 means the refresh token is dead)."""
+    import httpx
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
+
+    email = "inactive-stale@example.com"
+    await cache.invalidate(email)
+
+    account = _make_account(email, config_dir="/tmp/inactive-dir")
+    account.stale_reason = None
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_one_account(account)
+    mock_db.commit = AsyncMock()
+
+    probe_resp = MagicMock()
+    probe_resp.status_code = 401
+    probe_resp.json = MagicMock(return_value={"error": {"message": "expired"}})
+    probe_401 = httpx.HTTPStatusError("401", request=MagicMock(), response=probe_resp)
+
+    # Active pointer resolves to a DIFFERENT config dir, so this account is
+    # NOT active → the waiting branch must not fire.
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_active_config_dir_pointer",
+               return_value="/tmp/some-other-active-dir"), \
+         patch("backend.background.ac.get_access_token_from_config_dir",
+               return_value="stale-token"), \
+         patch("backend.background.ac.get_token_info",
+               return_value={}), \
+         patch("backend.background.ac.get_refresh_token_from_config_dir",
+               return_value="rt"), \
+         patch("backend.background.ac.save_refreshed_token"), \
+         patch("backend.background.anthropic_api.probe_usage",
+               new_callable=AsyncMock, side_effect=probe_401), \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await poll_usage_and_switch(mock_ws)
+
+    # The inactive-401 path must set stale_reason.
+    assert account.stale_reason is not None
+    # And must NOT set the waiting flag — waiting is reserved for active.
+    assert await cache.is_waiting_async(email) is False
+
+    await cache.invalidate(email)
+
+
+@pytest.mark.asyncio
+async def test_successful_probe_clears_waiting_flag():
+    """When a previously-waiting account's next probe succeeds, the cache's
+    waiting flag must be cleared (otherwise the card would show both a
+    green usage bar AND a yellow Waiting pill on the same cycle)."""
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
+
+    email = "recovered-from-waiting@example.com"
+    await cache.invalidate(email)
+    # Seed the waiting flag so we can verify it clears.
+    await cache.set_waiting(email)
+    assert await cache.is_waiting_async(email) is True
+
+    account = _make_account(email, config_dir="/tmp/recovered-dir")
+    account.stale_reason = None
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_one_account(account)
+    mock_db.commit = AsyncMock()
+
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_active_config_dir_pointer",
+               return_value="/tmp/recovered-dir"), \
+         patch("backend.background.ac.get_access_token_from_config_dir",
+               return_value="fresh-token"), \
+         patch("backend.background.ac.get_token_info",
+               return_value={}), \
+         patch("backend.background.ac.save_refreshed_token"), \
+         patch("backend.background.anthropic_api.probe_usage",
+               new_callable=AsyncMock,
+               return_value={"five_hour": {"utilization": 10}}), \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await poll_usage_and_switch(mock_ws)
+
+    # Waiting flag must be cleared on the success path.
+    assert await cache.is_waiting_async(email) is False
+
+    await cache.invalidate(email)
+
+
+@pytest.mark.asyncio
+async def test_top_level_exception_clears_waiting_flag():
+    """Regression: if ``_process_single_account`` raises before its own
+    inner except clause can clean up, the top-level ``isinstance(result,
+    Exception)`` branch in ``poll_usage_and_switch`` must also clear the
+    waiting flag — otherwise a subsequent ``GET /api/accounts`` would see
+    a stale True while the WS broadcast said False, and the two surfaces
+    would disagree."""
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
+
+    email = "waiting-then-crash@example.com"
+    await cache.invalidate(email)
+    # Seed the waiting flag as if a prior cycle had set it.
+    await cache.set_waiting(email)
+    assert await cache.is_waiting_async(email) is True
+
+    account = _make_account(email, config_dir="/tmp/crash-dir")
+    account.stale_reason = None
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_one_account(account)
+    mock_db.commit = AsyncMock()
+
+    # Crash inside _process_single_account BEFORE its inner except can fire:
+    # get_access_token_from_config_dir raises a bare-SystemError (escapes
+    # every except-Exception handler because SystemError is not Exception).
+    #
+    # Actually SystemError IS an Exception — pick something even more
+    # exotic: asyncio.CancelledError, which most except-Exception blocks do
+    # NOT catch post-3.8.  That is a realistic crash during lifespan
+    # shutdown and is exactly the scenario the top-level clear guards.
+    async def _raise_cancelled():
+        raise asyncio.CancelledError("lifespan shutdown mid-probe")
+
+    # Wrap the mock in a coroutine so to_thread fires it correctly.
+    import asyncio as _aio
+
+    def _crashy_get_token(_cfg_dir):
+        raise _aio.CancelledError("lifespan shutdown")
+
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_active_config_dir_pointer",
+               return_value="/tmp/crash-dir"), \
+         patch("backend.background.ac.get_access_token_from_config_dir",
+               side_effect=_crashy_get_token), \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        # poll_usage_and_switch catches the gather exceptions — no raise.
+        await poll_usage_and_switch(mock_ws)
+
+    # The top-level exception branch must have cleared the waiting flag.
+    assert await cache.is_waiting_async(email) is False, (
+        "top-level exception branch must clear _waiting so WS and REST agree"
+    )
+
+    await cache.invalidate(email)
+
+
+@pytest.mark.asyncio
+async def test_usage_entry_carries_stale_reason_in_broadcast():
+    """The poll-loop broadcast must include ``stale_reason`` on every
+    usage_entry so other open tabs can flip footer buttons immediately on
+    a waiting→stale transition, instead of waiting for a full reload."""
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
+
+    email = "broadcast-stale-reason@example.com"
+    await cache.invalidate(email)
+
+    account = _make_account(email, config_dir="/tmp/stale-broadcast-dir")
+    account.stale_reason = "Previously stale — re-login required"  # seed
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_one_account(account)
+    mock_db.commit = AsyncMock()
+
+    # A successful probe clears stale_reason on the DB row; the broadcast
+    # must carry the NEW (None) value so other tabs see the transition.
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_active_config_dir_pointer",
+               return_value=None), \
+         patch("backend.background.ac.get_access_token_from_config_dir",
+               return_value="tok"), \
+         patch("backend.background.ac.get_token_info",
+               return_value={}), \
+         patch("backend.background.ac.save_refreshed_token"), \
+         patch("backend.background.anthropic_api.probe_usage",
+               new_callable=AsyncMock,
+               return_value={"five_hour": {"utilization": 10}}), \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await poll_usage_and_switch(mock_ws)
+
+    broadcast_args = mock_ws.broadcast.call_args_list[0][0][0]
+    entry = next(
+        e for e in broadcast_args["accounts"] if e["email"] == email
+    )
+    # stale_reason key must exist on every entry, and the success path must
+    # have cleared it to None in the broadcast AND on the DB row.
+    assert "stale_reason" in entry
+    assert entry["stale_reason"] is None
+    assert account.stale_reason is None
+
+    await cache.invalidate(email)
