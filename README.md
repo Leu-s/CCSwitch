@@ -6,7 +6,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Tests](https://img.shields.io/badge/tests-218%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-227%20passing-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#requirements)
 [![Status](https://img.shields.io/badge/status-stable-success.svg)](#project-status)
 [![Build](https://img.shields.io/badge/frontend-no%20build%20step-orange.svg)](#architecture)
@@ -58,6 +58,7 @@ You're refactoring a service. The dashboard sits in a tab. Around hour 4, the ac
 
 - **Live usage monitoring** — polls `/v1/messages` rate-limit headers every 15 s while the dashboard is open, every 5 min otherwise
 - **Auto-switch** — when the active account's five-hour utilization reaches a configurable threshold (default 95 %), or a stale credential is detected, the next enabled account is activated automatically
+- **Active-ownership refresh model** — CCSwitch never refreshes the token of the currently-active account; Claude Code CLI owns that refresh lifecycle.  When the CLI isn't running and the active account's token has expired, the card shows a **Waiting for Claude Code** badge and a **Force refresh** button for the one-click escape hatch.  This removes the single-use-refresh-token race that used to brick an account if CCSwitch and the CLI hit `/oauth/token` simultaneously.
 - **Stale-account relogin** — if a refresh token is revoked or expires, the dashboard marks the account stale and offers a one-click re-login flow (opens a tmux pane with `claude`, verifies new credentials, clears `stale_reason`)
 - **Opt-in credential targets** — the dashboard auto-discovers every `.claude.json` location on the machine and lets you tick which ones the switcher should mirror into. Nothing outside the isolated account dirs is touched unless you explicitly opt in.
 - **Two switch modes per target**:
@@ -245,7 +246,7 @@ What a switch *does* touch is determined by the **credential targets** the user 
 
 1. **Startup** — `init_db()` runs Alembic migrations (creates the DB on first run), seeds default settings, syncs `~/.ccswitch/active`, then spawns two background tasks: the poll loop and a login-session cleanup loop (reaps expired add-account sessions every 5 min).
 
-2. **Poll cycle** — Every 15 s with active WebSocket clients, every 5 min when idle. Per account: reads the access token from the isolated config dir, refreshes it if expiring within 5 min, POSTs a near-empty request to `/v1/messages` purely to read the `anthropic-ratelimit-unified-*` response headers (five-hour and seven-day utilization + reset times). Accounts that return 429 enter per-account exponential backoff (120 s → 3600 s cap). Results are cached in memory and broadcast over WebSocket.
+2. **Poll cycle** — Every 15 s with active WebSocket clients, every 5 min when idle. Per account: reads the access token from the isolated config dir, refreshes it if expiring within 20 min — but only for *inactive* accounts. The currently-active account's refresh lifecycle is owned by Claude Code CLI (see **Active-ownership refresh model** in `CLAUDE.md`), so a poll never races the CLI on Anthropic's single-use `/oauth/token` endpoint. POSTs a near-empty request to `/v1/messages` purely to read the `anthropic-ratelimit-unified-*` response headers (five-hour and seven-day utilization + reset times). Accounts that return 429 enter per-account exponential backoff (120 s → 3600 s cap). Results are cached in memory and broadcast over WebSocket.
 
 3. **Auto-switch** — If the active account's five-hour utilization ≥ `threshold_pct` (or it returned 429, or has a `stale_reason`), `perform_switch()` runs `activate_account_config()` under a credential lock (so a concurrent token refresh cannot interleave). For the chosen account it:
    - **Mirrors `oauthAccount` + `userID`** from the account's `.claude.json` into every user-enabled credential target — identity only, no tokens
@@ -356,6 +357,7 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CCSWITCH_API_T
 | `PATCH` | `/api/accounts/{id}` | Update account (`enabled`, `threshold_pct`, `priority`) |
 | `DELETE` | `/api/accounts/{id}` | Delete account |
 | `POST` | `/api/accounts/{id}/switch` | Manual switch to account |
+| `POST` | `/api/accounts/{id}/force-refresh` | Force-refresh OAuth tokens when the active account is waiting for Claude Code (active-ownership escape hatch) |
 | `POST` | `/api/accounts/{id}/relogin` | Open tmux pane to re-authenticate a stale account |
 | `POST` | `/api/accounts/{id}/relogin/verify` | Verify re-login completed, clear `stale_reason` |
 | `GET` | `/api/accounts/log` | Paginated switch log |
@@ -381,7 +383,7 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CCSWITCH_API_T
 ## Testing
 
 ```bash
-uv run pytest tests/ -q                            # all 218 tests
+uv run pytest tests/ -q                            # all 227 tests
 uv run pytest tests/ -v --tb=short                 # verbose output
 uv run pytest tests/test_accounts_router.py        # single file
 ```
@@ -440,7 +442,7 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 
 ## Project Status
 
-**Stable** — running 24/7 as a personal LaunchAgent on the maintainer's machine. The codebase has been through several rounds of audited refactoring (218 tests covering routers, services, background loop, schemas, and an end-to-end smoke suite). The public API and database schema are considered stable; breaking changes ship with an Alembic migration.
+**Stable** — running 24/7 as a personal LaunchAgent on the maintainer's machine. The codebase has been through several rounds of audited refactoring (227 tests covering routers, services, background loop, schemas, and an end-to-end smoke suite). The public API and database schema are considered stable; breaking changes ship with an Alembic migration.
 
 What is intentionally **not** done:
 - No multi-tenant support — one user per machine

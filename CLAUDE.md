@@ -108,12 +108,14 @@ tests/
    independent of the `service_enabled` master toggle so the dashboard's
    rate-limit bars stay live even when auto-switching is off.  For each
    account it reads the access token, skips token refresh for already-stale
-   accounts, refreshes otherwise if expiry is within 5 minutes, probes
-   `/v1/messages` for rate-limit headers, stores the result in `cache`
-   (a `_UsageCache` singleton in `cache.py`), and caches `token_info` so
-   `GET /api/accounts` does not fan out Keychain subprocess calls per row.
-   Accounts that return 429 enter per-account exponential backoff
-   (120 s initial, doubling up to 3600 s cap; cleared on next success).
+   accounts AND for the currently-active account (active-ownership — see
+   next section), refreshes otherwise if expiry is within 20 minutes,
+   probes `/v1/messages` for rate-limit headers, stores the result in
+   `cache` (a `_UsageCache` singleton in `cache.py`), and caches
+   `token_info` so `GET /api/accounts` does not fan out Keychain subprocess
+   calls per row.  Accounts that return 429 enter per-account exponential
+   backoff (120 s initial, doubling up to 3600 s cap; cleared on next
+   success).
 4. After polling, it delegates to `switcher.maybe_auto_switch`, which
    **does** gate on `service_enabled`: if the master toggle is off it
    returns immediately.  Otherwise, if the active account crosses its
@@ -122,6 +124,55 @@ tests/
    `switcher.perform_switch`, and then calls `tmux_service.fire_nudge()`
    to kick any stalled claude panes.
 5. Every outcome is broadcast over `/ws` so the SPA updates live.
+
+## Active-ownership refresh model
+
+Anthropic's OAuth refresh tokens are **single-use**: the server rotates them on
+every `/oauth/token` call, and the previous token immediately returns HTTP 400
+on reuse.  That means two concurrent refreshers racing on the same account
+lose one of the rotation steps and the loser's credentials are dead.
+
+CCSwitch and Claude Code CLI can both refresh tokens — so they used to race on
+whichever account the CLI was actively using.  The active-ownership model
+makes that impossible by assigning ownership of each refresh lifecycle to
+exactly one side:
+
+- **The account pointed at by `~/.ccswitch/active`** is owned by Claude Code
+  CLI.  CCSwitch's poll loop never calls `refresh_access_token` for it.  If
+  that account's access token has expired and the CLI is running, the CLI
+  will refresh on its next API call and the next poll cycle picks up the
+  fresh token.  If no CLI is running, the card enters a "soft waiting" state
+  (the Waiting pill + banner on the UI) until either the CLI starts or the
+  user clicks **Force refresh** on the card, which calls
+  `POST /api/accounts/{id}/force-refresh`.
+- **Every other (inactive) account** is owned by CCSwitch — it is the sole
+  consumer of those refresh tokens, so the refresh loop is race-free and
+  the expiry window is widened from 5 → 20 minutes for defense in depth.
+
+Implementation details:
+
+- `cache._waiting: set[str]` tracks which emails are in the soft waiting
+  state.  The flag is set from the active-401-retry-failed branch of
+  `_process_single_account` and cleared by every success / backoff /
+  terminal-refresh / generic-error / top-level-exception path, plus by
+  `perform_switch` for both sides of a switch.
+- `GET /api/accounts` reads the flag and is gated by `is_active` as
+  defense-in-depth, so a stale `True` that leaks past a `clear_waiting`
+  cannot render on a non-active card.
+- `build_ws_snapshot` carries `waiting_for_cli` + `stale_reason` so a
+  freshly-connected tab does not flash a healthy card for up to one poll
+  cycle.
+- `force_refresh_config_dir` (account_service.py) acquires a per-config-dir
+  `asyncio.Lock` around the read → HTTP → Keychain-write sequence so two
+  concurrent force-refresh callers cannot burn the same refresh_token.  It
+  raises `ValueError` for "no token stored", `RuntimeError` for "malformed
+  upstream response", and propagates `httpx.HTTPStatusError` for 4xx/5xx.
+  The router maps 400/401 → 409 (+ sets stale_reason matching the poll loop
+  wording), ValueError → 409, RuntimeError/other → 502.
+- Stale always wins over waiting in the UI (`isWaiting = !isStale && …`).
+
+See `docs/superpowers/specs/2026-04-14-active-ownership-refresh-fix-design.md`
+for the full design rationale.
 
 ## Account switching = four artefacts (ordered!)
 
@@ -181,7 +232,12 @@ end up inside the tmp dir instead of polluting the repo root.
   `_active_login_sessions` dict.  Reentrant so `_cleanup_expired_sessions` can
   iterate the dict and then call `cleanup_login_session` (which also acquires it).
 - `_UsageCache` (cache.py): asyncio.Lock protects in-memory usage + token_info
-  dicts.  All reads from outside the cache use `_async` variants.
+  dicts and the `_waiting: set[str]` flag set.  All reads from outside the
+  cache use `_async` variants.
+- `_force_refresh_locks: dict[str, asyncio.Lock]` (account_service.py):
+  per-config-dir lock serializing concurrent force-refresh callers so the
+  read → HTTP → Keychain-write sequence cannot race on Anthropic's
+  single-use refresh_token.
 
 ## Things that are intentionally NOT done
 
