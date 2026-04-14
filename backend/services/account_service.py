@@ -30,6 +30,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 
 
 from ..config import settings
@@ -404,6 +405,86 @@ def sync_active_to_targets(
         return _activate_account_config_locked(
             pointer, list(enabled_credential_targets or [])
         )
+
+
+# ── Manual refresh ─────────────────────────────────────────────────────────────
+
+# Per-config-dir async locks serializing concurrent force-refresh callers.
+# Anthropic rotates refresh_tokens on every /oauth/token call and the old one
+# immediately 404s on reuse, so two concurrent force-refreshes would race:
+# the first rotates the stored token, the second — still holding the old one
+# in memory — fails and (without this lock) would mark the now-fresh
+# credentials stale.  Safe without a threading guard because all callers are
+# dispatched on the FastAPI event-loop thread; the dict get + assign runs
+# atomically between awaits.
+_force_refresh_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_force_refresh_lock(config_dir: str) -> asyncio.Lock:
+    lock = _force_refresh_locks.get(config_dir)
+    if lock is None:
+        lock = asyncio.Lock()
+        _force_refresh_locks[config_dir] = lock
+    return lock
+
+
+async def force_refresh_config_dir(config_dir: str) -> dict:
+    """Force-refresh OAuth tokens for ``config_dir`` and persist the new pair.
+
+    Intended for the "CCSwitch enabled, Claude Code not running" case where
+    the user explicitly asks us to refresh an account whose access token has
+    expired.  Under the active-ownership model the poll loop never refreshes
+    the active account by itself — this endpoint is the escape hatch.
+
+    Caller's responsibility: only call this when you are confident no other
+    process (e.g., a running Claude Code CLI) is about to refresh the same
+    refresh token.  The button in the UI is surfaced only while the active
+    card is in the ``waiting_for_cli`` soft state, so the user has already
+    acknowledged no CLI is running.
+
+    Returns the freshly-read ``token_info`` dict (including the new
+    ``token_expires_at``) on success.  Raises:
+
+    * ``ValueError`` — no refresh token stored for this config dir.  The
+      router maps this to ``409`` (user must re-login).
+    * ``RuntimeError`` — upstream responded 200 but without an
+      ``access_token`` field.  Mapped to ``502`` (upstream bug, retryable).
+    * ``httpx.HTTPStatusError`` — upstream 4xx/5xx.  The router maps 400/401
+      to ``409`` + stale_reason; everything else is ``502``.
+    * Any other exception surfaces untouched.
+
+    Concurrency: acquires a per-``config_dir`` ``asyncio.Lock`` across the
+    full read → HTTP → Keychain-write sequence so two simultaneous callers
+    cannot burn the same refresh_token.  The underlying Keychain write still
+    uses ``_credential_lock`` inside ``save_refreshed_token``.
+    """
+    from . import anthropic_api  # local import avoids cycle
+
+    async with _get_force_refresh_lock(config_dir):
+        refresh_token = await asyncio.to_thread(
+            get_refresh_token_from_config_dir, config_dir
+        )
+        if not refresh_token:
+            raise ValueError("No refresh token stored for this account — re-login required")
+
+        resp = await anthropic_api.refresh_access_token(refresh_token)
+        new_token = resp.get("access_token")
+        if not new_token:
+            raise RuntimeError("Refresh response missing access_token")
+
+        expires_in = resp.get("expires_in")
+        new_expires_at_ms = (
+            int(time.time() * 1000) + int(expires_in) * 1000 if expires_in else None
+        )
+        new_refresh = resp.get("refresh_token")
+
+        await asyncio.to_thread(
+            save_refreshed_token, config_dir, new_token,
+            new_expires_at_ms, new_refresh,
+        )
+        logger.info("Force-refreshed access token for %s", config_dir)
+
+        return await asyncio.to_thread(get_token_info, config_dir)
 
 
 # ── Usage helpers ──────────────────────────────────────────────────────────────

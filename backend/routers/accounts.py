@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -268,6 +269,122 @@ async def manual_switch(account_id: int, db: AsyncSession = Depends(get_db)):
         return {"ok": True, "already_active": True}
     await sw.perform_switch(account, "manual", db, ws_manager)
     return {"ok": True, "already_active": False}
+
+
+async def _broadcast_single_account(account: Account) -> None:
+    """Broadcast a single-account ``usage_updated`` so connected clients
+    patch this one card without waiting for the next poll cycle.
+
+    Reads the current cache state (usage + token_info) and the live
+    ``account.stale_reason`` to build a usage_entry with the same shape the
+    poll loop emits.  Used after ``force-refresh`` to give immediate visual
+    feedback on both success and stale-on-failure paths.
+    """
+    usage_raw = await cache.get_usage_async(account.email)
+    if not isinstance(usage_raw, dict):
+        usage_raw = {}
+    token_info = await cache.get_token_info_async(account.email) or {}
+    try:
+        flat = ac.build_usage(usage_raw, token_info)
+        flat_dict = flat.model_dump() if flat else {}
+    except Exception as _bu_err:
+        logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
+        flat_dict = {}
+    usage_entry = {
+        "id": account.id,
+        "email": account.email,
+        "usage": flat_dict,
+        "error": account.stale_reason,
+        "waiting_for_cli": False,
+    }
+    try:
+        await ws_manager.broadcast({"type": "usage_updated", "accounts": [usage_entry]})
+    except Exception as _bc_err:
+        logger.warning("WS broadcast failed after force refresh: %s", _bc_err)
+
+
+@router.post("/{account_id}/force-refresh", status_code=200)
+async def force_refresh_account(account_id: int, db: AsyncSession = Depends(get_db)):
+    """Force-refresh the OAuth token for an account.
+
+    Intended for the "CCSwitch enabled, Claude Code CLI not running" case
+    where the active account's access token has expired and the soft
+    ``waiting_for_cli`` state would otherwise persist.  The button that
+    invokes this endpoint is only surfaced while the card is in that
+    soft state, so the caller is acknowledging no concurrent refresher.
+
+    Error model:
+
+    * 404 — account not found.
+    * 409 — account already carries a ``stale_reason`` (user must re-login
+      first); refresh token is missing; or upstream rejected the refresh
+      token (400/401).  In the last case the account is marked stale and a
+      single-account ``usage_updated`` broadcast fires so the card flips
+      from "waiting" to stale.
+    * 502 — any other upstream error (network, 5xx, malformed response)
+      without mutating state; the user can retry.
+    """
+    account = await aq.get_account_by_id(account_id, db)
+    if not account:
+        raise HTTPException(404, "Account not found")
+
+    # Already stale: re-login is the only path forward.  Returning 409 here
+    # also protects against a user double-clicking the button after the
+    # first click burned their refresh token and marked them stale.
+    if account.stale_reason:
+        raise HTTPException(409, f"Account already stale: {account.stale_reason}")
+
+    try:
+        new_token_info = await ac.force_refresh_config_dir(account.config_dir)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    except RuntimeError as e:
+        logger.warning("Force refresh malformed response for %s: %s", account.email, e)
+        raise HTTPException(502, str(e))
+    except httpx.HTTPStatusError as e:
+        status_code = e.response.status_code
+        if status_code in (400, 401):
+            # Match the stale_reason wording the poll loop uses for the same
+            # status codes so the UI shows a consistent message regardless of
+            # which path marked the account stale.
+            reason_detail = "revoked" if status_code == 401 else "rejected (400)"
+            reason = f"Refresh token {reason_detail} — re-login required"
+            # Bookkeeping wrap: a DB hiccup or cache-invalidate crash here
+            # must not hide the 409 the caller needs to see — raising from a
+            # stale-branch failure would downgrade to 500.
+            try:
+                account.stale_reason = reason
+                await db.commit()
+                await cache.invalidate_token_info(account.email)
+                await _broadcast_single_account(account)
+            except Exception as _bk_err:
+                logger.warning(
+                    "Post-stale bookkeeping failed for %s: %s",
+                    account.email, _bk_err,
+                )
+            raise HTTPException(409, reason)
+        logger.warning(
+            "Force refresh upstream error for %s: HTTP %d",
+            account.email, status_code,
+        )
+        raise HTTPException(502, f"Upstream HTTP {status_code}")
+    except Exception as e:
+        logger.exception("Force refresh failed for %s", account.email)
+        raise HTTPException(502, f"Force refresh failed: {e}")
+
+    # Success: hydrate token_info cache and broadcast so clients see fresh
+    # expiry metadata immediately instead of waiting for the next poll cycle.
+    # A failure here must NOT downgrade the 200 — the refresh already
+    # succeeded and is persisted in the Keychain.
+    try:
+        await cache.set_token_info(account.email, new_token_info)
+        await _broadcast_single_account(account)
+    except Exception as _post_err:
+        logger.warning(
+            "Post-force-refresh cache/broadcast failed for %s: %s",
+            account.email, _post_err,
+        )
+    return {"ok": True}
 
 
 # ── Re-login flow (existing account whose credentials have gone stale) ───────
