@@ -221,7 +221,7 @@ def test_keychain_write_failure_does_not_advance_pointer(fake_home, fake_keychai
 
     targets = [_home_canonical(fake_home)]
     ac.activate_account_config(str(prev), targets)
-    ptr_path = fake_home / ".claude-multi" / "active"
+    ptr_path = fake_home / ".ccswitch" / "active"
     assert ptr_path.read_text().strip() == str(prev)
 
     # Force shutil.copy2 to raise during the plaintext copy step.
@@ -254,7 +254,7 @@ def test_copy_failure_leaves_mirror_identity_untouched(fake_home, fake_keychain,
     targets = [_home_canonical(fake_home)]
     # Activate A so HOME .claude.json + pointer + legacy Keychain hold A.
     ac.activate_account_config(str(prev), targets)
-    ptr_path = fake_home / ".claude-multi" / "active"
+    ptr_path = fake_home / ".ccswitch" / "active"
     home_json = fake_home / ".claude.json"
     assert ptr_path.read_text().strip() == str(prev)
     assert json.loads(home_json.read_text())["oauthAccount"]["emailAddress"] == "prev@x.com"
@@ -312,7 +312,7 @@ def test_activate_with_no_targets_still_updates_pointer(fake_home, fake_keychain
     a = make_account_dir(fake_home, "a", "a@x.com", "tok-a", fake_keychain)
     ac.activate_account_config(str(a), [])
 
-    ptr = fake_home / ".claude-multi" / "active"
+    ptr = fake_home / ".ccswitch" / "active"
     assert ptr.exists()
     assert ptr.read_text().strip() == str(a)
 
@@ -346,7 +346,7 @@ def test_get_active_email_falls_back_to_home_without_pointer(fake_home, fake_key
     }))
 
     # Pointer path should not exist yet.
-    ptr = fake_home / ".claude-multi" / "active"
+    ptr = fake_home / ".ccswitch" / "active"
     if ptr.exists():
         ptr.unlink()
 

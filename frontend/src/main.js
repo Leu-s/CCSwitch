@@ -93,7 +93,7 @@ async function checkShellStatus() {
       warn.classList.add("hidden");
     } else {
       desc.textContent = shell_configured
-        ? "The active account file (~/.claude-multi/active) has not been created yet. Switch to an account or restart the server to create it."
+        ? "The active account file (~/.ccswitch/active) has not been created yet. Switch to an account or restart the server to create it."
         : "Your shell is not configured to use CLAUDE_CONFIG_DIR. Without this, new terminal sessions may open with the wrong Claude account.";
       warn.classList.remove("hidden");
     }

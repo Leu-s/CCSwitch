@@ -138,7 +138,7 @@ def test_cleanup_relogin_session_preserves_config_dir():
     svc._active_login_sessions[session_id] = {
         "created_at": 1.0,
         "pane_target": "add-accounts:10.0",
-        "config_dir": "/Users/test/.claude-multi-accounts/account-real1",
+        "config_dir": "/Users/test/.ccswitch-accounts/account-real1",
         "kind": "relogin",
     }
 
@@ -160,7 +160,7 @@ def test_start_relogin_session_rejects_duplicate_for_same_config_dir():
     import backend.services.login_session_service as svc
 
     existing_sid = "rel0dup0"
-    config_dir = "/Users/test/.claude-multi-accounts/account-dup1"
+    config_dir = "/Users/test/.ccswitch-accounts/account-dup1"
     svc._active_login_sessions[existing_sid] = {
         "created_at": 99999.0,  # far in the future so _cleanup_expired_sessions does not reap it
         "pane_target": "add-accounts:11.0",

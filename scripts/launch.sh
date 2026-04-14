@@ -7,7 +7,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 PYTHON="$REPO_ROOT/.venv/bin/python"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-multi"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ccswitch"
 PID_FILE="$STATE_DIR/server.pid"
 LOG_FILE="$STATE_DIR/server.log"
 
@@ -47,8 +47,8 @@ trap cleanup EXIT
 
 echo $$ > "$PID_FILE"
 
-HOST="${CLAUDE_MULTI_SERVER_HOST:-127.0.0.1}"
-PORT="${CLAUDE_MULTI_SERVER_PORT:-41924}"
+HOST="${CCSWITCH_SERVER_HOST:-127.0.0.1}"
+PORT="${CCSWITCH_SERVER_PORT:-41924}"
 
 echo "Starting CCSwitch on http://${HOST}:${PORT}"
 echo "Logs: $LOG_FILE"

@@ -2,7 +2,7 @@
 Account lifecycle service.
 
 Each managed account has an isolated Claude config directory under
-``~/.claude-multi-accounts/account-{uuid}/``.  Claude Code reads credentials
+``~/.ccswitch-accounts/account-{uuid}/``.  Claude Code reads credentials
 from whatever ``CLAUDE_CONFIG_DIR`` points at, and every isolated dir has its
 own Keychain entry keyed by ``sha256(config_dir)[:8]``.
 
@@ -103,7 +103,7 @@ async def get_active_email_async() -> str | None:
 
 
 def get_active_config_dir_pointer() -> str | None:
-    """Read ~/.claude-multi/active to find which isolated account dir is
+    """Read ~/.ccswitch/active to find which isolated account dir is
     currently marked active. Returns None if the file is missing or empty."""
     try:
         with open(active_dir_pointer_path()) as f:
@@ -152,7 +152,7 @@ def restore_config_from_backup(backup: dict) -> None:
 
 def clear_active_config_dir() -> None:
     """
-    Remove the ~/.claude-multi/active pointer file so that new terminal
+    Remove the ~/.ccswitch/active pointer file so that new terminal
     sessions do not export CLAUDE_CONFIG_DIR pointing at a stale or deleted
     account directory.  Called when the last (or only) account is deleted and
     there is no replacement to switch to.
@@ -168,9 +168,9 @@ def clear_active_config_dir() -> None:
 
 def write_active_config_dir(config_dir: str) -> None:
     """
-    Write the active account's isolated config_dir to ~/.claude-multi/active.
+    Write the active account's isolated config_dir to ~/.ccswitch/active.
     Users can add to their shell profile:
-        _d=$(cat ~/.claude-multi/active 2>/dev/null); [ -n "$_d" ] && export CLAUDE_CONFIG_DIR="$_d"; unset _d
+        _d=$(cat ~/.ccswitch/active 2>/dev/null); [ -n "$_d" ] && export CLAUDE_CONFIG_DIR="$_d"; unset _d
     This ensures new terminal sessions use the correct account without Keychain gymnastics.
     File is written with mode 0o600 (owner-read/write only) since the path is sensitive.
 
@@ -263,7 +263,7 @@ def activate_account_config(
          ``enabled_credential_targets`` (canonical paths).  With an empty
          list, no ``.claude.json`` files outside the isolated account dir
          are touched.
-      3. Update ``~/.claude-multi/active`` so the shell-profile snippet picks
+      3. Update ``~/.ccswitch/active`` so the shell-profile snippet picks
          up the new account in brand-new terminals that source it.
 
     Acquires ``credential_provider._credential_lock`` for the full body so a

@@ -63,7 +63,7 @@ You're refactoring a service. The dashboard sits in a tab. Around hour 4, the ac
 - **Two switch modes per target**:
   - *Identity-only mirror* — the default for any user-enabled target: only `oauthAccount` and `userID` are mirrored, no credentials leave the account dir
   - *System default* (`~/.claude.json` or `~/.claude/.claude.json`) — additionally writes the legacy `Claude Code-credentials` Keychain entry and copies `.credentials.json` into `~/.claude/`, so a fresh `claude` invocation immediately uses the new account
-- **Shell integration** — a one-liner in `.zshrc`/`.bashrc` exports `CLAUDE_CONFIG_DIR` from `~/.claude-multi/active`, so every new terminal picks up the active account without a restart
+- **Shell integration** — a one-liner in `.zshrc`/`.bashrc` exports `CLAUDE_CONFIG_DIR` from `~/.ccswitch/active`, so every new terminal picks up the active account without a restart
 - **Real-time dashboard** — vanilla-JS single-page app; account cards, drag-to-reorder priority, per-account threshold slider, switch log; no build step required
 - **Optional tmux nudge** — opt-in toggle on the Settings page: after every account switch, scan every `tmux` pane and send a configurable message (default `continue`) to any pane whose recent output matches a rate-limit notice (`usage limit reached`, `rate_limit_error`, HTTP 429, …). Off by default.
 - **CLI** (`ccswitch`) — list/switch/enable/disable accounts, tail logs, manage the LaunchAgent, set up shell integration
@@ -120,7 +120,7 @@ cp .env.example .env
 # Add scripts/ to your PATH first, or use the full path
 export PATH="$PATH:$(pwd)/scripts"
 
-ccswitch service install               # creates ~/Library/LaunchAgents/com.claudemulti.manager.plist
+ccswitch service install               # creates ~/Library/LaunchAgents/com.ccswitch.manager.plist
 ccswitch service remove                # uninstall
 ccswitch service remove --purge-logs   # uninstall + delete logs
 ```
@@ -129,43 +129,43 @@ The LaunchAgent:
 - starts the server **immediately** on install (`RunAtLoad: true`)
 - **auto-restarts** on crash with a 30 s throttle (`KeepAlive: {SuccessfulExit: false}`)
 - **starts automatically** on every login
-- writes logs to `~/.local/state/claude-multi/server.log`
+- writes logs to `~/.local/state/ccswitch/server.log`
 
 ```bash
 ccswitch log -f                        # tail logs
 ccswitch status                        # check if the service is running
-launchctl print gui/$(id -u)/com.claudemulti.manager  # raw launchd status
+launchctl print gui/$(id -u)/com.ccswitch.manager  # raw launchd status
 ```
 
 ---
 
 ## Configuration
 
-All settings use the `CLAUDE_MULTI_` environment variable prefix. Copy `.env.example` and adjust only what you need — all defaults work for a standard local setup.
+All settings use the `CCSWITCH_` environment variable prefix. Copy `.env.example` and adjust only what you need — all defaults work for a standard local setup.
 
 | Variable | Default | Description |
 |---|---|---|
-| `CLAUDE_MULTI_SERVER_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` to listen on all interfaces) |
-| `CLAUDE_MULTI_SERVER_PORT` | `41924` | HTTP server port |
-| `CLAUDE_MULTI_DATABASE_URL` | `sqlite+aiosqlite:///./claude_multi_account.db` | SQLite connection string (relative to working dir) |
-| `CLAUDE_MULTI_ACTIVE_CLAUDE_DIR` | `~/.claude` | System-wide Claude Code config dir |
-| `CLAUDE_MULTI_ACCOUNTS_BASE_DIR` | `~/.claude-multi-accounts` | Base dir for isolated per-account config dirs |
-| `CLAUDE_MULTI_STATE_DIR` | `~/.claude-multi` | Holds the `active` pointer file |
-| `CLAUDE_MULTI_POLL_INTERVAL_ACTIVE` | `15` | Poll interval (seconds) while browser tab is open |
-| `CLAUDE_MULTI_POLL_INTERVAL_IDLE` | `300` | Poll interval (seconds) with no active WebSocket clients |
-| `CLAUDE_MULTI_POLL_INTERVAL_MIN` | `120` | Minimum floor for the DB-overridable idle interval |
-| `CLAUDE_MULTI_DEFAULT_ACCOUNT_THRESHOLD_PCT` | `95.0` | Auto-switch threshold for newly added accounts (0–100) |
-| `CLAUDE_MULTI_HAIKU_MODEL` | `claude-haiku-4-5-20251001` | Cheapest model used for the minimal `/v1/messages` probe (the probe only reads rate-limit headers; no tokens are billed) |
-| `CLAUDE_MULTI_API_TOKEN` | *(empty)* | Optional Bearer token. **Empty = no auth** (safe for localhost). |
-| `CLAUDE_MULTI_TMUX_SESSION_NAME` | `claude-multi` | Name of the tmux session used for add-account login panes |
-| `CLAUDE_MULTI_WS_REPLAY_BUFFER_SIZE` | `100` | Recent `/ws` events buffered for reconnecting clients (see `?since=<seq>`) |
-| `CLAUDE_MULTI_LOGIN_SESSION_TIMEOUT` | `1800` | Seconds an unused add-account login terminal stays alive before cleanup |
-| `CLAUDE_MULTI_RATE_LIMIT_BACKOFF_INITIAL` | `120` | Initial backoff (seconds) after an Anthropic 429 on the usage probe |
-| `CLAUDE_MULTI_RATE_LIMIT_BACKOFF_MAX` | `3600` | Cap (seconds) for the exponential retry delay after repeated 429s |
-| `CLAUDE_MULTI_ANTHROPIC_MESSAGES_URL` | `https://api.anthropic.com/v1/messages` | Override the Messages endpoint (testing only) |
-| `CLAUDE_MULTI_ANTHROPIC_REFRESH_URL` | `https://platform.claude.com/v1/oauth/token` | Override the OAuth token-refresh endpoint (testing only) |
+| `CCSWITCH_SERVER_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` to listen on all interfaces) |
+| `CCSWITCH_SERVER_PORT` | `41924` | HTTP server port |
+| `CCSWITCH_DATABASE_URL` | `sqlite+aiosqlite:///./ccswitch.db` | SQLite connection string (relative to working dir) |
+| `CCSWITCH_ACTIVE_CLAUDE_DIR` | `~/.claude` | System-wide Claude Code config dir |
+| `CCSWITCH_ACCOUNTS_BASE_DIR` | `~/.ccswitch-accounts` | Base dir for isolated per-account config dirs |
+| `CCSWITCH_STATE_DIR` | `~/.ccswitch` | Holds the `active` pointer file |
+| `CCSWITCH_POLL_INTERVAL_ACTIVE` | `15` | Poll interval (seconds) while browser tab is open |
+| `CCSWITCH_POLL_INTERVAL_IDLE` | `300` | Poll interval (seconds) with no active WebSocket clients |
+| `CCSWITCH_POLL_INTERVAL_MIN` | `120` | Minimum floor for the DB-overridable idle interval |
+| `CCSWITCH_DEFAULT_ACCOUNT_THRESHOLD_PCT` | `95.0` | Auto-switch threshold for newly added accounts (0–100) |
+| `CCSWITCH_HAIKU_MODEL` | `claude-haiku-4-5-20251001` | Cheapest model used for the minimal `/v1/messages` probe (the probe only reads rate-limit headers; no tokens are billed) |
+| `CCSWITCH_API_TOKEN` | *(empty)* | Optional Bearer token. **Empty = no auth** (safe for localhost). |
+| `CCSWITCH_TMUX_SESSION_NAME` | `ccswitch` | Name of the tmux session used for add-account login panes |
+| `CCSWITCH_WS_REPLAY_BUFFER_SIZE` | `100` | Recent `/ws` events buffered for reconnecting clients (see `?since=<seq>`) |
+| `CCSWITCH_LOGIN_SESSION_TIMEOUT` | `1800` | Seconds an unused add-account login terminal stays alive before cleanup |
+| `CCSWITCH_RATE_LIMIT_BACKOFF_INITIAL` | `120` | Initial backoff (seconds) after an Anthropic 429 on the usage probe |
+| `CCSWITCH_RATE_LIMIT_BACKOFF_MAX` | `3600` | Cap (seconds) for the exponential retry delay after repeated 429s |
+| `CCSWITCH_ANTHROPIC_MESSAGES_URL` | `https://api.anthropic.com/v1/messages` | Override the Messages endpoint (testing only) |
+| `CCSWITCH_ANTHROPIC_REFRESH_URL` | `https://platform.claude.com/v1/oauth/token` | Override the OAuth token-refresh endpoint (testing only) |
 
-No variable is mandatory — all have sensible defaults. Set `CLAUDE_MULTI_API_TOKEN` only if you expose the server beyond localhost.
+No variable is mandatory — all have sensible defaults. Set `CCSWITCH_API_TOKEN` only if you expose the server beyond localhost.
 
 ---
 
@@ -183,7 +183,7 @@ uv run uvicorn backend.main:app --host 127.0.0.1 --port 41924 --reload
 bash scripts/launch.sh
 ```
 
-`launch.sh` checks prerequisites (tmux, `security`), manages a PID file at `~/.local/state/claude-multi/server.pid`, and writes logs to `~/.local/state/claude-multi/server.log`. It starts uvicorn without `--reload`.
+`launch.sh` checks prerequisites (tmux, `security`), manages a PID file at `~/.local/state/ccswitch/server.pid`, and writes logs to `~/.local/state/ccswitch/server.log`. It starts uvicorn without `--reload`.
 
 ### Status and logs
 
@@ -201,10 +201,10 @@ ccswitch log -n 100         # last 100 lines
 To make new terminals automatically use the currently-active account, add this one-liner to `~/.zshrc` or `~/.bashrc`:
 
 ```bash
-_d=$(cat ~/.claude-multi/active 2>/dev/null); [ -n "$_d" ] && export CLAUDE_CONFIG_DIR="$_d"; unset _d
+_d=$(cat ~/.ccswitch/active 2>/dev/null); [ -n "$_d" ] && export CLAUDE_CONFIG_DIR="$_d"; unset _d
 ```
 
-At shell startup it reads `~/.claude-multi/active` (a pointer file updated on every account switch) and exports `CLAUDE_CONFIG_DIR` to the active account's isolated directory. Claude Code reads that variable and uses the right credentials.
+At shell startup it reads `~/.ccswitch/active` (a pointer file updated on every account switch) and exports `CLAUDE_CONFIG_DIR` to the active account's isolated directory. Claude Code reads that variable and uses the right credentials.
 
 **Automated setup:**
 
@@ -229,7 +229,7 @@ After a switch, existing terminals can re-source their rc file (`source ~/.zshrc
                          ▼                           ▼                   ▼
                 ┌─────────────────┐      ┌─────────────────┐  ┌──────────────────┐
                 │ SQLite DB       │      │ Anthropic API   │  │ ~/.claude/       │
-                │ (accounts,      │      │ /v1/messages    │  │ ~/.claude-multi/ │
+                │ (accounts,      │      │ /v1/messages    │  │ ~/.ccswitch/ │
                 │  settings,      │      │ (headers only)  │  │ macOS Keychain   │
                 │  switch_log)    │      └─────────────────┘  └──────────────────┘
                 └─────────────────┘
@@ -237,23 +237,23 @@ After a switch, existing terminals can re-source their rc file (`source ~/.zshrc
 
 ### How credentials are stored
 
-Each account lives in its own isolated config dir under `~/.claude-multi-accounts/account-<uuid>/`. Inside that dir Claude Code keeps `.claude.json` (config + identity), and on macOS it also writes a Keychain entry whose service name is `Claude Code-credentials-<sha256(config_dir)[:8]>` (the *hashed per-dir entry*). Those two files plus the per-dir Keychain entry are the source of truth for an account — the dashboard never overwrites them on a switch.
+Each account lives in its own isolated config dir under `~/.ccswitch-accounts/account-<uuid>/`. Inside that dir Claude Code keeps `.claude.json` (config + identity), and on macOS it also writes a Keychain entry whose service name is `Claude Code-credentials-<sha256(config_dir)[:8]>` (the *hashed per-dir entry*). Those two files plus the per-dir Keychain entry are the source of truth for an account — the dashboard never overwrites them on a switch.
 
 What a switch *does* touch is determined by the **credential targets** the user has enabled in the dashboard. A target is a canonical path to a `.claude.json` file (e.g. `~/.claude.json`, `~/.claude/.claude.json`, or any other location where Claude Code looks). The dashboard auto-discovers them and shows a checkbox per target.
 
 ### Data flow
 
-1. **Startup** — `init_db()` runs Alembic migrations (creates the DB on first run), seeds default settings, syncs `~/.claude-multi/active`, then spawns two background tasks: the poll loop and a login-session cleanup loop (reaps expired add-account sessions every 5 min).
+1. **Startup** — `init_db()` runs Alembic migrations (creates the DB on first run), seeds default settings, syncs `~/.ccswitch/active`, then spawns two background tasks: the poll loop and a login-session cleanup loop (reaps expired add-account sessions every 5 min).
 
 2. **Poll cycle** — Every 15 s with active WebSocket clients, every 5 min when idle. Per account: reads the access token from the isolated config dir, refreshes it if expiring within 5 min, POSTs a near-empty request to `/v1/messages` purely to read the `anthropic-ratelimit-unified-*` response headers (five-hour and seven-day utilization + reset times). Accounts that return 429 enter per-account exponential backoff (120 s → 3600 s cap). Results are cached in memory and broadcast over WebSocket.
 
 3. **Auto-switch** — If the active account's five-hour utilization ≥ `threshold_pct` (or it returned 429, or has a `stale_reason`), `perform_switch()` runs `activate_account_config()` under a credential lock (so a concurrent token refresh cannot interleave). For the chosen account it:
    - **Mirrors `oauthAccount` + `userID`** from the account's `.claude.json` into every user-enabled credential target — identity only, no tokens
    - **If a system-default target is enabled** (`~/.claude.json` or `~/.claude/.claude.json`), additionally writes the legacy `Claude Code-credentials` Keychain entry, cleans stale legacy Keychain entries left by older Claude Code versions, and copies `.credentials.json` into `~/.claude/` as a plaintext fallback
-   - **Updates `~/.claude-multi/active`** *after* all credential operations succeed (so the pointer is never advanced to a half-installed state)
+   - **Updates `~/.ccswitch/active`** *after* all credential operations succeed (so the pointer is never advanced to a half-installed state)
    - Logs the event in `switch_log` and broadcasts `account_switched` over WebSocket
 
-4. **Shell pickup** — New terminals sourcing the rc snippet read `~/.claude-multi/active` and export `CLAUDE_CONFIG_DIR`; existing `claude` processes are unaffected until restarted.
+4. **Shell pickup** — New terminals sourcing the rc snippet read `~/.ccswitch/active` and export `CLAUDE_CONFIG_DIR`; existing `claude` processes are unaffected until restarted.
 
 > **Note on the hashed per-dir Keychain entry:** the switcher does **not** rewrite it. It is owned by the account and updated only by `save_refreshed_token` when that account's own access token is refreshed. This is intentional — each account keeps its own credentials in its own slot, and a switch only touches the *system-default* entry that fresh `claude` invocations look for.
 
@@ -264,7 +264,7 @@ What a switch *does* touch is determined by the **credential targets** the user 
 ```
 ├── backend/
 │   ├── main.py                        # FastAPI app, lifespan, /ws, static serving
-│   ├── config.py                      # Pydantic settings (CLAUDE_MULTI_ prefix)
+│   ├── config.py                      # Pydantic settings (CCSWITCH_ prefix)
 │   ├── models.py                      # ORM: Account, SwitchLog, Setting
 │   ├── database.py                    # Async SQLAlchemy engine + Alembic init_db()
 │   ├── schemas.py                     # Pydantic request/response models
@@ -337,13 +337,13 @@ ccswitch service install                 # Install macOS LaunchAgent (auto-start
 ccswitch service remove [--purge-logs]   # Uninstall LaunchAgent (optionally delete logs)
 ```
 
-The CLI connects to `http://127.0.0.1:41924` by default. Override with `CLAUDE_MULTI_SERVER_HOST`/`CLAUDE_MULTI_SERVER_PORT` env vars, or `CLAUDE_MULTI_URL` for a full URL.
+The CLI connects to `http://127.0.0.1:41924` by default. Override with `CCSWITCH_SERVER_HOST`/`CCSWITCH_SERVER_PORT` env vars, or `CCSWITCH_URL` for a full URL.
 
 ---
 
 ## API
 
-All `/api/*` routes require `Authorization: Bearer <token>` when `CLAUDE_MULTI_API_TOKEN` is set. The WebSocket passes the token via `?token=<value>` (browser WebSocket API does not support custom headers). The paths `/`, `/src/*`, and `/health` are always public.
+All `/api/*` routes require `Authorization: Bearer <token>` when `CCSWITCH_API_TOKEN` is set. The WebSocket passes the token via `?token=<value>` (browser WebSocket API does not support custom headers). The paths `/`, `/src/*`, and `/health` are always public.
 
 | Method | Path | Description |
 |---|---|---|
@@ -395,13 +395,13 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 **This application is designed for localhost use only.**
 
 - The SQLite database is unencrypted and stores account metadata (emails, config paths)
-- By default, `CLAUDE_MULTI_API_TOKEN` is empty — **all local requests are accepted without authentication**, which is appropriate when the server binds to `127.0.0.1`
+- By default, `CCSWITCH_API_TOKEN` is empty — **all local requests are accepted without authentication**, which is appropriate when the server binds to `127.0.0.1`
 - There is no CORS configuration — the frontend and API share the same origin
 - If you set an API token, WebSocket connections pass it as `?token=...` in the URL, which appears in server access logs
 
 **If you need to expose the server beyond localhost:**
 
-1. Set `CLAUDE_MULTI_API_TOKEN` to a strong random value: `openssl rand -hex 32`
+1. Set `CCSWITCH_API_TOKEN` to a strong random value: `openssl rand -hex 32`
 2. Run behind a TLS-terminating reverse proxy (nginx, Caddy) for HTTPS/WSS
 3. Restrict network access via firewall rules
 
@@ -412,7 +412,7 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 **Server won't start**
 - Ensure tmux is installed: `brew install tmux`
 - Ensure `security` is available (macOS only): `which security`
-- Check for a stale PID file: `rm ~/.local/state/claude-multi/server.pid`
+- Check for a stale PID file: `rm ~/.local/state/ccswitch/server.pid`
 
 **Account switch not picked up in an existing terminal**
 - Open a new terminal tab — the shell snippet runs at startup
@@ -424,14 +424,14 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 
 **`ccswitch` reports "cannot connect"**
 - Start the server first: `ccswitch server start` or `bash scripts/launch.sh`
-- If using a non-default port: `export CLAUDE_MULTI_SERVER_PORT=PORT` or `export CLAUDE_MULTI_URL=http://localhost:PORT`
+- If using a non-default port: `export CCSWITCH_SERVER_PORT=PORT` or `export CCSWITCH_URL=http://localhost:PORT`
 
 **Usage card shows "Rate limited"**
 - Expected: the app backs off automatically and retries. No action needed.
 
 **LaunchAgent doesn't start after reboot**
 - Re-install: `ccswitch service remove && ccswitch service install`
-- Check system log: `log show --predicate 'subsystem == "com.apple.launchd"' --last 5m | grep claudemulti`
+- Check system log: `log show --predicate 'subsystem == "com.apple.launchd"' --last 5m | grep ccswitch`
 
 **Database schema error after upgrade**
 - Alembic runs `upgrade head` automatically on every server start — no manual migration step needed.
@@ -444,7 +444,7 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 
 What is intentionally **not** done:
 - No multi-tenant support — one user per machine
-- No cloud sync — everything lives in local SQLite + `~/.claude-multi/`
+- No cloud sync — everything lives in local SQLite + `~/.ccswitch/`
 - No Linux Keychain integration — file-based fallback only
 - No GUI for credential targets beyond the dashboard checkbox list
 

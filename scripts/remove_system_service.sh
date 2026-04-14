@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PLIST_PATH="$HOME/Library/LaunchAgents/com.claudemulti.manager.plist"
-LOG_DIR="$HOME/Library/Logs/claude-multi"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-multi"
+PLIST_PATH="$HOME/Library/LaunchAgents/com.ccswitch.manager.plist"
+LOG_DIR="$HOME/Library/Logs/ccswitch"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ccswitch"
 PURGE_LOGS=false
 
 for arg in "$@"; do

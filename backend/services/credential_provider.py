@@ -24,7 +24,7 @@ LEGACY_KEYCHAIN_SERVICE = "Claude Code-credentials"
 #   1. HOME .claude.json                            (written by activate_account_config)
 #   2. Legacy "Claude Code-credentials" Keychain   (written by activate_account_config and save_refreshed_token)
 #   3. Hashed per-dir Keychain                     (written by save_refreshed_token)
-#   4. ~/.claude-multi/active pointer              (written by activate_account_config)
+#   4. ~/.ccswitch/active pointer              (written by activate_account_config)
 #
 # A switch (activate_account_config) acquires this lock for the full multi-step
 # dance, and a background token refresh (save_refreshed_token) acquires it for
@@ -40,7 +40,7 @@ _credential_lock = threading.RLock()
 
 def active_dir_pointer_path() -> str:
     """Path of the file that records which isolated account dir is active.
-    Derived from settings.state_dir so users who override CLAUDE_MULTI_STATE_DIR
+    Derived from settings.state_dir so users who override CCSWITCH_STATE_DIR
     get a single, consistent location everywhere in the codebase.
 
     Canonical definition lives here (not in account_service) because

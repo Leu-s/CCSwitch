@@ -77,7 +77,7 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as db:
         await ensure_defaults(db)
 
-    # Sync ~/.claude-multi/active on startup so CLAUDE_CONFIG_DIR works in new terminals
+    # Sync ~/.ccswitch/active on startup so CLAUDE_CONFIG_DIR works in new terminals
     # even before the first switch event occurs.
     active_email = await asyncio.to_thread(ac.get_active_email)
     if active_email:
@@ -85,7 +85,7 @@ async def lifespan(app: FastAPI):
             acc = await aq.get_account_by_email(active_email, db)
             if acc:
                 await asyncio.to_thread(ac.write_active_config_dir, acc.config_dir)
-                logger.info("Synced ~/.claude-multi/active → %s", acc.config_dir)
+                logger.info("Synced ~/.ccswitch/active → %s", acc.config_dir)
 
     idle_interval = await _get_idle_interval()
     logger.info("Poll intervals — active: %ds, idle: %ds", cfg.poll_interval_active, idle_interval)

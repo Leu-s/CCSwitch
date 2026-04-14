@@ -17,11 +17,11 @@ except ImportError:
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS_DIR.parent
-_DEFAULT_HOST = os.environ.get("CLAUDE_MULTI_SERVER_HOST", "127.0.0.1")
-_DEFAULT_PORT = os.environ.get("CLAUDE_MULTI_SERVER_PORT", "41924")
-BASE_URL = os.environ.get("CLAUDE_MULTI_URL", f"http://{_DEFAULT_HOST}:{_DEFAULT_PORT}").rstrip("/")
+_DEFAULT_HOST = os.environ.get("CCSWITCH_SERVER_HOST", "127.0.0.1")
+_DEFAULT_PORT = os.environ.get("CCSWITCH_SERVER_PORT", "41924")
+BASE_URL = os.environ.get("CCSWITCH_URL", f"http://{_DEFAULT_HOST}:{_DEFAULT_PORT}").rstrip("/")
 TIMEOUT = 5.0
-STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "claude-multi"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "ccswitch"
 
 
 def api(method: str, path: str, **kwargs):
@@ -155,7 +155,7 @@ def cmd_server_start(args):
         capture_output=True, text=True
     )
     if sess.returncode != 0 or not sess.stdout.strip():
-        subprocess.run(["tmux", "new-session", "-d", "-s", "claude-multi"], capture_output=True)
+        subprocess.run(["tmux", "new-session", "-d", "-s", "ccswitch"], capture_output=True)
     # Open launch.sh in a new tmux window (non-blocking for caller)
     result = subprocess.run(
         ["tmux", "new-window", "-n", "claude-server", "-P", "-F", "#{session_name}:#{window_index}"],
@@ -172,12 +172,12 @@ def cmd_server_start(args):
 
 def cmd_server_stop(args):
     """Stop the server. Unloads LaunchAgent first if loaded."""
-    PLIST = Path.home() / "Library" / "LaunchAgents" / "com.claudemulti.manager.plist"
+    PLIST = Path.home() / "Library" / "LaunchAgents" / "com.ccswitch.manager.plist"
     uid = os.getuid()
     # Check if LaunchAgent is loaded
     if PLIST.exists():
         result = subprocess.run(
-            ["launchctl", "print", f"gui/{uid}/com.claudemulti.manager"],
+            ["launchctl", "print", f"gui/{uid}/com.ccswitch.manager"],
             capture_output=True
         )
         if result.returncode == 0:

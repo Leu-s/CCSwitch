@@ -32,14 +32,14 @@ class TestKeychainServiceName:
         assert all(c in "0123456789abcdef" for c in suffix)
 
     def test_suffix_matches_sha256(self):
-        config_dir = "/home/user/.config/claude-multi/account-abc123"
+        config_dir = "/home/user/.config/ccswitch/account-abc123"
         expected_hash = hashlib.sha256(config_dir.encode()).hexdigest()[:8]
         name = _keychain_service_name(config_dir)
         assert name == f"Claude Code-credentials-{expected_hash}"
 
     @pytest.mark.parametrize("config_dir", [
-        "/home/user/.claude-multi/account-aabbccdd",
-        "/Users/alice/.claude-multi-accounts/account-deadbeef",
+        "/home/user/.ccswitch/account-aabbccdd",
+        "/Users/alice/.ccswitch-accounts/account-deadbeef",
         "/tmp/test-dir",
     ])
     def test_deterministic_for_same_input(self, config_dir):

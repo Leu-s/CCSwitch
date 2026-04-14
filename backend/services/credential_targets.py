@@ -16,7 +16,7 @@ This module:
   ``{canonical_path: bool}``.
 * Defaults every target to *disabled*.  The user must explicitly opt-in via the
   UI before the service touches any system file beyond the isolated account
-  dirs we own under ``~/.claude-multi-accounts/``.
+  dirs we own under ``~/.ccswitch-accounts/``.
 * Exposes the list of currently-enabled targets so ``activate_account_config``
   can fan out the ``oauthAccount``/``userID`` merge across all of them.
 """

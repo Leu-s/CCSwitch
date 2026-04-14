@@ -107,7 +107,7 @@ def test_post_sync_mirrors_active_to_enabled_targets(client, fake_home, monkeypa
     )
 
     # Pretend the dashboard's pointer file points at it.
-    pointer_dir = fake_home / ".claude-multi"
+    pointer_dir = fake_home / ".ccswitch"
     pointer_dir.mkdir(parents=True, exist_ok=True)
     (pointer_dir / "active").write_text(str(active_dir))
 
@@ -149,7 +149,7 @@ def test_post_sync_mirrors_active_to_enabled_targets(client, fake_home, monkeypa
 def test_post_sync_with_no_active_pointer_reports_error(client, fake_home, monkeypatch):
     """If no active account pointer exists, /sync returns an error in the
     summary instead of crashing."""
-    pointer = fake_home / ".claude-multi" / "active"
+    pointer = fake_home / ".ccswitch" / "active"
     if pointer.exists():
         pointer.unlink()
 

@@ -1,7 +1,7 @@
 """
 Optional token-based authentication middleware.
 
-Set the CLAUDE_MULTI_API_TOKEN environment variable (or api_token in .env) to
+Set the CCSWITCH_API_TOKEN environment variable (or api_token in .env) to
 enable auth.  When set, every request must supply the token either as:
 
   • HTTP:      Authorization: Bearer <token>

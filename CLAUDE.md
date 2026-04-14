@@ -29,7 +29,7 @@ backend/
   background.py        poll_usage_and_switch() — per-account probe, token refresh,
                        per-account rate-limit backoff (exponential, 120 s → 3600 s cap)
   cache.py             _UsageCache class + module-level cache singleton
-  config.py            Pydantic settings (env prefix: CLAUDE_MULTI_)
+  config.py            Pydantic settings (env prefix: CCSWITCH_)
   database.py          async SQLAlchemy engine + init_db (Alembic-backed)
   models.py            Account, SwitchLog, Setting (with indexes)
   schemas.py           Pydantic request/response models (17 schemas for accounts,
@@ -95,7 +95,7 @@ tests/
 ## Key data flow
 
 1. `main.lifespan` runs `init_db()`, seeds default settings via
-   `ensure_defaults`, syncs `~/.claude-multi/active`, then starts **two**
+   `ensure_defaults`, syncs `~/.ccswitch/active`, then starts **two**
    background tasks: `_poll_loop(idle_interval)` and
    `_cleanup_sessions_loop()` (the latter reaps expired add-account login
    sessions every 5 min via `ls._cleanup_expired_sessions`).
@@ -139,7 +139,7 @@ exception cannot leave the system in a split-brain state:
 3. **Mirror `oauthAccount` + `userID`** from the new account's `.claude.json`
    into every user-opted-in credential target file (atomic write, 0o600).
    Other keys in each target file (projects, MCP state, etc.) are preserved.
-4. **`~/.claude-multi/active` pointer** — the last write. The shell
+4. **`~/.ccswitch/active` pointer** — the last write. The shell
    integration reads this to export `CLAUDE_CONFIG_DIR` for new terminals.
    Writes are atomic and now re-raise on failure instead of silently
    swallowing — callers treat the switch as failed if this step raises.
@@ -155,7 +155,7 @@ written once at account creation, not per switch, and is read by
   or may not work depending on the Claude Code build.
 - **Local only**.  The `/ws` endpoint has no authentication — the app is
   intended to run on `127.0.0.1:41924` behind your browser.  Host and port
-  are configurable via `CLAUDE_MULTI_SERVER_HOST` / `CLAUDE_MULTI_SERVER_PORT`.
+  are configurable via `CCSWITCH_SERVER_HOST` / `CCSWITCH_SERVER_PORT`.
 - **tmux required** for the Add-Account login flow.  The tmux nudge
   (`wake_stalled_sessions`) is an opt-in feature on the Settings page — off by default.
 - **Python 3.12+** (the repo's `.venv` runs on 3.14).

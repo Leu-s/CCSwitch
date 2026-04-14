@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Serializes every call to perform_switch.  activate_account_config touches
 # several shared artefacts (enabled mirror targets, legacy Keychain,
-# ~/.claude-multi/active) that must move together — two concurrent switches
+# ~/.ccswitch/active) that must move together — two concurrent switches
 # can interleave and leave the system with one account's oauthAccount in one
 # file and a different account's Keychain entry.
 _switch_lock = asyncio.Lock()

@@ -4,10 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON="$REPO_ROOT/.venv/bin/python"
-PLIST_PATH="$HOME/Library/LaunchAgents/com.claudemulti.manager.plist"
-LOG_DIR="$HOME/Library/Logs/claude-multi"
+PLIST_PATH="$HOME/Library/LaunchAgents/com.ccswitch.manager.plist"
+LOG_DIR="$HOME/Library/Logs/ccswitch"
 # Unified log — same location as manual launch.sh
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-multi"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ccswitch"
 LOG_FILE="$STATE_DIR/server.log"
 
 if [[ ! -x "$PYTHON" ]]; then
@@ -31,7 +31,7 @@ mkdir -p "$STATE_DIR"
 
 # Unload existing service if loaded (idempotent install)
 # Use bootout (modern) with fallback to unload
-if launchctl print "gui/$(id -u)/com.claudemulti.manager" &>/dev/null 2>&1; then
+if launchctl print "gui/$(id -u)/com.ccswitch.manager" &>/dev/null 2>&1; then
     echo "Unloading existing service..."
     launchctl bootout "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || \
         launchctl unload "$PLIST_PATH" 2>/dev/null || true
@@ -44,7 +44,7 @@ cat > "$PLIST_PATH" << EOF
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.claudemulti.manager</string>
+    <string>com.ccswitch.manager</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -53,9 +53,9 @@ cat > "$PLIST_PATH" << EOF
         <string>uvicorn</string>
         <string>backend.main:app</string>
         <string>--host</string>
-        <string>${CLAUDE_MULTI_SERVER_HOST:-127.0.0.1}</string>
+        <string>${CCSWITCH_SERVER_HOST:-127.0.0.1}</string>
         <string>--port</string>
-        <string>${CLAUDE_MULTI_SERVER_PORT:-41924}</string>
+        <string>${CCSWITCH_SERVER_PORT:-41924}</string>
         <string>--log-level</string>
         <string>warning</string>
     </array>
@@ -103,4 +103,4 @@ launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || \
 
 echo "Service installed and started."
 echo "Logs: $LOG_FILE"
-echo "Status: launchctl print gui/$(id -u)/com.claudemulti.manager"
+echo "Status: launchctl print gui/$(id -u)/com.ccswitch.manager"

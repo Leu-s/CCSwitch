@@ -10,13 +10,13 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-multi"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ccswitch"
 PID_FILE="$STATE_DIR/server.pid"
 # Unified log path: both launch.sh and plist write here
 LOG_FILE="$STATE_DIR/server.log"
-LAUNCHAGENT_PLIST="$HOME/Library/LaunchAgents/com.claudemulti.manager.plist"
-_HOST="${CLAUDE_MULTI_SERVER_HOST:-127.0.0.1}"
-_PORT="${CLAUDE_MULTI_SERVER_PORT:-41924}"
+LAUNCHAGENT_PLIST="$HOME/Library/LaunchAgents/com.ccswitch.manager.plist"
+_HOST="${CCSWITCH_SERVER_HOST:-127.0.0.1}"
+_PORT="${CCSWITCH_SERVER_PORT:-41924}"
 API="http://${_HOST}:${_PORT}"
 
 echo "=== CCSwitch Status ==="
@@ -53,7 +53,7 @@ fi
 
 # 3. LaunchAgent status
 if [[ -f "$LAUNCHAGENT_PLIST" ]]; then
-    if launchctl print "gui/$(id -u)/com.claudemulti.manager" &>/dev/null 2>&1; then
+    if launchctl print "gui/$(id -u)/com.ccswitch.manager" &>/dev/null 2>&1; then
         echo -e "${GREEN}✓ LaunchAgent loaded${NC} (auto-start enabled)"
     else
         echo -e "${YELLOW}⚠ LaunchAgent plist exists but not loaded${NC}"
@@ -63,7 +63,7 @@ else
 fi
 
 # 4. Active account
-ACTIVE_FILE="$HOME/.claude-multi/active"
+ACTIVE_FILE="$HOME/.ccswitch/active"
 if [[ -f "$ACTIVE_FILE" ]]; then
     ACTIVE_DIR=$(cat "$ACTIVE_FILE" | tr -d '[:space:]')
     if [[ -n "$ACTIVE_DIR" && -d "$ACTIVE_DIR" ]]; then
@@ -86,7 +86,7 @@ fi
 SHELL_OK=false
 for rc in ".zshrc" ".bashrc" ".zprofile" ".bash_profile"; do
     rc_path="$HOME/$rc"
-    if [[ -f "$rc_path" ]] && grep -q "claude-multi/active" "$rc_path" 2>/dev/null; then
+    if [[ -f "$rc_path" ]] && grep -q "ccswitch/active" "$rc_path" 2>/dev/null; then
         echo -e "${GREEN}✓ Shell configured${NC} ($rc_path)"
         SHELL_OK=true
         break
