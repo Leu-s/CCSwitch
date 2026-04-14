@@ -273,6 +273,13 @@ def _save_refreshed_token_locked(
             # one currently active system-wide; otherwise a background refresh
             # of a non-active account would clobber the active account's
             # credentials in the shared "Claude Code-credentials" entry.
+            #
+            # Under the active-ownership refresh model the poll loop never
+            # refreshes the currently-active account — so the only caller
+            # that actually reaches this branch is ``force_refresh_config_dir``
+            # (the user-triggered escape hatch).  The predicate stays as
+            # defense in depth against future refactors that might put the
+            # poll loop back in the active-account refresh business.
             active_dir = ""
             try:
                 with open(active_dir_pointer_path()) as f:

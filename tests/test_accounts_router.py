@@ -641,3 +641,454 @@ def test_force_refresh_already_stale_returns_409_without_upstream_call(client):
     mock_force.assert_not_called()
     # Detail should surface the existing stale_reason so the UI can toast it.
     assert "Refresh token rejected (400)" in resp.json()["detail"]
+
+
+# ── E2 audit-round-2 regression tests ────────────────────────────────────────
+#
+# The tests below guard invariants that were added during the second-round
+# audit pass: the is_active gate on the single-account broadcast, the
+# JSON-parse-error → 502 mapping in anthropic_api, the commit-failure
+# ordering in the 400/401 bookkeeping block, concurrency of the per-cfg-dir
+# force-refresh lock, and the is_active gate in build_ws_snapshot.
+
+
+def test_force_refresh_malformed_json_response_returns_502(client):
+    """Regression for the second-round audit finding: when Anthropic returns
+    200 with an unparseable body, ``refresh_access_token`` must raise
+    ``RuntimeError`` (not the raw ``json.JSONDecodeError``/``ValueError``) so
+    the router maps it to 502 "upstream malformed" — NOT 409 "re-login
+    required", which would be the semantically wrong answer for a transient
+    upstream hiccup."""
+    import json
+    import httpx
+    from backend.cache import cache
+    from backend.services import anthropic_api
+
+    account_id = _insert_healthy_account(
+        "force-refresh-bad-json@example.com",
+        "/tmp/force-refresh-bad-json-dir",
+    )
+
+    async def _fake_post(*_a, **_kw):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.raise_for_status = MagicMock(return_value=None)
+        # json() raises json.JSONDecodeError (a ValueError subclass) on bad
+        # bodies — same as httpx's actual behaviour for an empty response.
+        resp.json = MagicMock(
+            side_effect=json.JSONDecodeError("Expecting value", "", 0)
+        )
+        return resp
+
+    class _FakeClient:
+        def __init__(self, *_a, **_kw):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_):
+            return False
+        post = AsyncMock(side_effect=_fake_post)
+
+    with patch.object(anthropic_api.httpx, "AsyncClient", _FakeClient), \
+         patch(
+             "backend.services.account_service.get_refresh_token_from_config_dir",
+             return_value="rt-bad-json",
+         ), \
+         patch(
+             "backend.services.account_service.save_refreshed_token",
+         ), \
+         patch(
+             "backend.services.account_service.get_token_info",
+             return_value={},
+         ), \
+         patch(
+             "backend.ws.ws_manager.broadcast",
+             new_callable=AsyncMock,
+         ):
+        resp = client.post(f"/api/accounts/{account_id}/force-refresh")
+
+    # Malformed upstream → 502, NOT 409.  The whole point of the fix is that
+    # a raw JSONDecodeError does NOT leak to the router as a ValueError and
+    # mis-route as "re-login required".
+    assert resp.status_code == 502
+    assert "not valid JSON" in resp.json()["detail"]
+
+    asyncio.run(cache.invalidate("force-refresh-bad-json@example.com"))
+
+
+def test_force_refresh_401_commit_failure_still_clears_cache_waiting():
+    """Regression for the second-round audit finding: in the 400/401
+    bookkeeping block, cache ops must run BEFORE ``db.commit`` so a commit
+    failure (e.g. SQLite 'database is locked') cannot leave a ghost waiting
+    flag in the cache pointing at an uncommitted DB row.  Without this
+    ordering, the next ``GET /api/accounts`` sees ``stale_reason=None`` in
+    the DB but ``_waiting=True`` in the cache, and the card renders the
+    waiting pill forever.
+
+    Invokes the async router handler directly with a mock DB so we can
+    make ``commit`` raise without upsetting SQLAlchemy's greenlet machinery.
+    """
+    import httpx
+    from fastapi import HTTPException
+    from backend.cache import cache
+    from backend.routers.accounts import force_refresh_account
+
+    email = "force-refresh-commit-fail@example.com"
+
+    # Seed the waiting flag — this is the state the user saw before clicking.
+    asyncio.run(cache.set_waiting(email))
+    assert asyncio.run(cache.is_waiting_async(email)) is True
+
+    account = MagicMock()
+    account.id = 42
+    account.email = email
+    account.stale_reason = None
+    account.config_dir = "/tmp/force-refresh-commit-fail-dir"
+
+    # DB that fails on commit but succeeds on rollback (the except-branch
+    # fallback).  execute is not called because we patch the account lookup.
+    mock_db = MagicMock()
+    mock_db.commit = AsyncMock(side_effect=RuntimeError("database is locked"))
+    mock_db.rollback = AsyncMock()
+
+    resp_mock = MagicMock()
+    resp_mock.status_code = 401
+    http_err = httpx.HTTPStatusError(
+        "401", request=MagicMock(), response=resp_mock
+    )
+
+    with patch(
+        "backend.routers.accounts.aq.get_account_by_id",
+        new_callable=AsyncMock,
+        return_value=account,
+    ), patch(
+        "backend.routers.accounts.ac.force_refresh_config_dir",
+        new_callable=AsyncMock,
+        side_effect=http_err,
+    ), patch(
+        "backend.routers.accounts.ws_manager.broadcast",
+        new_callable=AsyncMock,
+    ):
+        raised = None
+        try:
+            asyncio.run(force_refresh_account(42, mock_db))
+        except HTTPException as e:
+            raised = e
+
+    # The 409 must still surface to the caller — a commit hiccup does not
+    # downgrade the terminal refresh error to 500.
+    assert raised is not None, "force_refresh_account must raise HTTPException on 401"
+    assert raised.status_code == 409
+
+    # The router MUST have attempted a rollback on the commit failure so
+    # the dirty in-memory attribute does not leak into a subsequent request.
+    mock_db.rollback.assert_awaited_once()
+
+    # CRITICAL: the cache waiting flag must be cleared even though commit
+    # failed, or the next GET /api/accounts will render the waiting pill
+    # against a clean DB row.
+    assert asyncio.run(cache.is_waiting_async(email)) is False, (
+        "cache _waiting flag leaked past the 400/401 branch when db.commit "
+        "raised — reorder ops so cache clear runs BEFORE commit"
+    )
+
+    asyncio.run(cache.invalidate(email))
+
+
+def test_force_refresh_401_clear_waiting_survives_invalidate_crash():
+    """Regression for a concern surfaced in the re-audit of FIX-3: the two
+    cache ops in the 400/401 bookkeeping block must be INDEPENDENT — a
+    failure inside ``invalidate_token_info`` must NOT skip
+    ``clear_waiting``, or the ghost-waiting leak returns by a different
+    path (cache lock cancelled mid-acquire during shutdown, etc.)."""
+    import httpx
+    from fastapi import HTTPException
+    from backend.cache import cache
+    from backend.routers.accounts import force_refresh_account
+
+    email = "force-refresh-chain-break@example.com"
+    # Seed the waiting flag — the point of the test is verifying this gets
+    # cleared even when its sibling op crashes.
+    asyncio.run(cache.set_waiting(email))
+    assert asyncio.run(cache.is_waiting_async(email)) is True
+
+    account = MagicMock()
+    account.id = 77
+    account.email = email
+    account.stale_reason = None
+    account.config_dir = "/tmp/force-refresh-chain-break-dir"
+
+    mock_db = MagicMock()
+    mock_db.commit = AsyncMock()
+    mock_db.rollback = AsyncMock()
+
+    resp_mock = MagicMock()
+    resp_mock.status_code = 401
+    http_err = httpx.HTTPStatusError(
+        "401", request=MagicMock(), response=resp_mock
+    )
+
+    # Make invalidate_token_info crash with a synthetic error.  The fix
+    # requires clear_waiting to still run afterward in its own try block.
+    async def _crash(_email):
+        raise RuntimeError("synthetic cache-internal failure")
+
+    with patch(
+        "backend.routers.accounts.aq.get_account_by_id",
+        new_callable=AsyncMock,
+        return_value=account,
+    ), patch(
+        "backend.routers.accounts.ac.force_refresh_config_dir",
+        new_callable=AsyncMock,
+        side_effect=http_err,
+    ), patch(
+        "backend.routers.accounts.cache.invalidate_token_info",
+        side_effect=_crash,
+    ), patch(
+        "backend.routers.accounts.ws_manager.broadcast",
+        new_callable=AsyncMock,
+    ):
+        raised = None
+        try:
+            asyncio.run(force_refresh_account(77, mock_db))
+        except HTTPException as e:
+            raised = e
+
+    assert raised is not None
+    assert raised.status_code == 409
+
+    # The critical assertion: clear_waiting ran in its own try even though
+    # its sibling invalidate_token_info raised.  Coupling these would leak
+    # the very ghost flag this fix is meant to prevent.
+    assert asyncio.run(cache.is_waiting_async(email)) is False, (
+        "clear_waiting was skipped because invalidate_token_info raised — "
+        "the cache-clear ops in the 401 branch are coupled when they must "
+        "be independent"
+    )
+
+    asyncio.run(cache.invalidate(email))
+
+
+def test_broadcast_single_account_gates_waiting_by_is_active():
+    """Regression for the second-round audit finding: _broadcast_single_account
+    must gate ``waiting_for_cli`` by ``email == active_email`` just like
+    ``list_accounts`` and ``build_ws_snapshot`` do.  Without this gate, a
+    future caller that invokes the helper for a non-active account whose
+    cache entry still carries a stale waiting flag would broadcast a
+    contradictory payload to every connected tab."""
+    from backend.routers.accounts import _broadcast_single_account
+    from backend.cache import cache
+
+    email = "broadcast-non-active@example.com"
+
+    # Simulate leaked waiting flag for a non-active account.
+    asyncio.run(cache.set_waiting(email))
+
+    account = MagicMock()
+    account.id = 99999
+    account.email = email
+    account.stale_reason = None
+
+    captured: list[dict] = []
+
+    class _FakeWsManager:
+        async def broadcast(self, payload):
+            captured.append(payload)
+
+    with patch("backend.routers.accounts.ws_manager", _FakeWsManager()), \
+         patch(
+             "backend.routers.accounts.ac.get_active_email_async",
+             new_callable=AsyncMock,
+             # A DIFFERENT account is active — ours is not.
+             return_value="someone-else@example.com",
+         ):
+        asyncio.run(_broadcast_single_account(account))
+
+    assert len(captured) == 1
+    entry = captured[0]["accounts"][0]
+    assert entry["email"] == email
+    # The critical assertion: defense-in-depth — even though cache._waiting
+    # carries a stale True for this email, the broadcast MUST gate on is_active
+    # and emit False, matching list_accounts / build_ws_snapshot.
+    assert entry["waiting_for_cli"] is False
+
+    asyncio.run(cache.invalidate(email))
+
+
+def test_force_refresh_locks_serialize_concurrent_same_cfg_dir():
+    """Regression for a coverage gap surfaced in the second-round audit:
+    ``_force_refresh_locks`` serializes two coroutines racing on the same
+    config_dir so they cannot both burn Anthropic's single-use refresh
+    token simultaneously.  This is the single most important concurrency
+    guarantee in the force-refresh feature and had no direct test before.
+    """
+    import time as _time
+    import asyncio as _asyncio
+    from backend.services import account_service as _ac
+
+    call_log: list[tuple[str, float]] = []
+
+    async def _slow_refresh(_rt):
+        call_log.append(("start", _time.monotonic()))
+        await _asyncio.sleep(0.05)
+        call_log.append(("end", _time.monotonic()))
+        return {
+            "access_token": "new-token",
+            "expires_in": 3600,
+            "refresh_token": "rotated-rt",
+        }
+
+    async def _run():
+        # Reset the lock dict so a stale entry from a previous test does not
+        # interfere with this one's timing.
+        _ac._force_refresh_locks.clear()
+        await _asyncio.gather(
+            _ac.force_refresh_config_dir("/tmp/serialize-cfg-a"),
+            _ac.force_refresh_config_dir("/tmp/serialize-cfg-a"),
+        )
+
+    with patch(
+        "backend.services.account_service.get_refresh_token_from_config_dir",
+        return_value="rt",
+    ), patch(
+        "backend.services.account_service.save_refreshed_token",
+    ), patch(
+        "backend.services.account_service.get_token_info",
+        return_value={"token_expires_at": 9999999999999},
+    ), patch(
+        "backend.services.anthropic_api.refresh_access_token",
+        side_effect=_slow_refresh,
+    ):
+        asyncio.run(_run())
+
+    # Two refreshes = two (start, end) pairs.
+    starts = [t for ev, t in call_log if ev == "start"]
+    ends = [t for ev, t in call_log if ev == "end"]
+    assert len(starts) == 2
+    assert len(ends) == 2
+
+    # Serialization: the second coroutine's start must be >= the first's end.
+    first_end = min(ends)
+    second_start = max(starts)
+    assert second_start >= first_end - 1e-6, (
+        "force_refresh_config_dir failed to serialize concurrent calls on "
+        "the same config_dir — _force_refresh_locks is not working and two "
+        "refreshes could burn the same single-use refresh_token"
+    )
+
+
+def test_force_refresh_locks_parallelize_different_cfg_dirs():
+    """Counterpart to the serialization test: force-refresh calls for
+    DIFFERENT config_dirs must NOT serialize (otherwise a slow Keychain on
+    one account would block every other account's refresh)."""
+    import time as _time
+    import asyncio as _asyncio
+    from backend.services import account_service as _ac
+
+    call_log: list[tuple[str, str, float]] = []
+
+    async def _slow_refresh(_rt):
+        call_log.append(("start", _rt, _time.monotonic()))
+        await _asyncio.sleep(0.05)
+        call_log.append(("end", _rt, _time.monotonic()))
+        return {
+            "access_token": "new-token",
+            "expires_in": 3600,
+            "refresh_token": "rotated",
+        }
+
+    # Distinguish the refresh tokens so we can track which call is which.
+    def _get_rt(cfg_dir):
+        return f"rt-for-{cfg_dir.rsplit('-', 1)[-1]}"
+
+    async def _run():
+        _ac._force_refresh_locks.clear()
+        await _asyncio.gather(
+            _ac.force_refresh_config_dir("/tmp/parallel-cfg-a"),
+            _ac.force_refresh_config_dir("/tmp/parallel-cfg-b"),
+        )
+
+    with patch(
+        "backend.services.account_service.get_refresh_token_from_config_dir",
+        side_effect=_get_rt,
+    ), patch(
+        "backend.services.account_service.save_refreshed_token",
+    ), patch(
+        "backend.services.account_service.get_token_info",
+        return_value={"token_expires_at": 9999999999999},
+    ), patch(
+        "backend.services.anthropic_api.refresh_access_token",
+        side_effect=_slow_refresh,
+    ):
+        asyncio.run(_run())
+
+    # Both starts must appear BEFORE either end — they ran in parallel.
+    starts = [t for ev, _rt, t in call_log if ev == "start"]
+    ends = [t for ev, _rt, t in call_log if ev == "end"]
+    assert len(starts) == 2 and len(ends) == 2
+    # max(starts) < min(ends) means both started before either finished.
+    assert max(starts) < min(ends), (
+        "force_refresh_config_dir serialized two different config_dirs — "
+        "the per-cfg-dir lock is over-scoped and one slow Keychain would "
+        "block every account's refresh"
+    )
+
+
+def test_build_ws_snapshot_gates_waiting_by_is_active():
+    """Regression for a coverage gap surfaced in the second-round audit:
+    ``build_ws_snapshot`` gates ``waiting_for_cli`` by ``email ==
+    active_email`` so a reconnecting tab cannot render a waiting banner on
+    a card that is no longer the active one.  Without this test, a revert
+    to the pre-gate code path ships silently."""
+    from backend.services.account_service import build_ws_snapshot
+    from backend.cache import cache
+
+    active_email = "snap-active@example.com"
+    inactive_email = "snap-inactive@example.com"
+
+    # Seed cache: both accounts have usage data, both have waiting flags.
+    # Only the active one should surface waiting=True in the snapshot.
+    asyncio.run(cache.set_usage(active_email, {"five_hour": {"utilization": 10}}))
+    asyncio.run(cache.set_usage(inactive_email, {"five_hour": {"utilization": 20}}))
+    asyncio.run(cache.set_waiting(active_email))
+    asyncio.run(cache.set_waiting(inactive_email))  # ← the leaked stale flag
+
+    # Mock DB: email→id map has both; stale_reason query returns both.
+    mock_db = AsyncMock()
+
+    def _make_result_for(query_str):
+        if "Account" in query_str and "stale_reason" in query_str:
+            r = MagicMock()
+            r.all.return_value = [(active_email, None), (inactive_email, None)]
+            return r
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = []
+        return r
+
+    async def _execute_side_effect(query):
+        return _make_result_for(str(query))
+
+    mock_db.execute = AsyncMock(side_effect=_execute_side_effect)
+
+    with patch(
+        "backend.services.account_queries.get_email_to_id_map",
+        new_callable=AsyncMock,
+        return_value={active_email: 1, inactive_email: 2},
+    ), patch(
+        "backend.services.account_service.get_active_email_async",
+        new_callable=AsyncMock,
+        return_value=active_email,
+    ):
+        snapshot = asyncio.run(build_ws_snapshot(mock_db))
+
+    by_email = {e["email"]: e for e in snapshot}
+    assert by_email[active_email]["waiting_for_cli"] is True, (
+        "active account with cache _waiting flag must surface waiting=True"
+    )
+    assert by_email[inactive_email]["waiting_for_cli"] is False, (
+        "non-active account with cache _waiting flag must surface waiting=False "
+        "— the is_active gate is missing from build_ws_snapshot"
+    )
+
+    asyncio.run(cache.invalidate(active_email))
+    asyncio.run(cache.invalidate(inactive_email))

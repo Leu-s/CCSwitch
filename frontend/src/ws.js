@@ -62,6 +62,16 @@ export function connectWs() {
     switch(msg.type) {
       case "account_switched":
         loadSwitchLog(0);
+        // Eagerly reset local is_active + waiting_for_cli on every card so
+        // any usage_updated frame that arrives before loadAccounts()
+        // completes (the HTTP round-trip is async) cannot render a waiting
+        // banner on what is no longer the active card.  Backend's
+        // list_accounts gates waiting by is_active, but state.accounts is
+        // only reconciled when the GET response lands.
+        for (const acc of state.accounts) {
+          acc.is_active = (acc.email === msg.to);
+          if (!acc.is_active) acc.waiting_for_cli = false;
+        }
         // Use custom events to reload accounts + service without importing those modules
         // (avoids circular dependency account↔service).
         document.dispatchEvent(new CustomEvent("app:reload-accounts"));

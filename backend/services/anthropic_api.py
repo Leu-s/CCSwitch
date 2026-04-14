@@ -87,10 +87,27 @@ async def probe_usage(access_token: str) -> dict:
 
 
 async def refresh_access_token(refresh_token: str) -> dict:
+    """POST to Anthropic's OAuth refresh endpoint and return the parsed body.
+
+    Raises:
+        httpx.HTTPStatusError — upstream 4xx/5xx.
+        httpx.RequestError — network / timeout / connect.
+        RuntimeError — upstream 200 but body was not valid JSON.
+
+    The caller in force_refresh_config_dir maps RuntimeError → 502 via the
+    router; returning raw ``json.JSONDecodeError`` here would propagate as a
+    ``ValueError`` and be mis-classified as 409 "re-login required", which
+    is semantically wrong for a malformed upstream response.
+    """
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.post(
             REFRESH_URL,
             json={"grant_type": "refresh_token", "refresh_token": refresh_token},
         )
         resp.raise_for_status()
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise RuntimeError(
+                f"Refresh response body was not valid JSON: {e}"
+            ) from e

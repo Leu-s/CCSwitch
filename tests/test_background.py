@@ -1045,3 +1045,97 @@ async def test_usage_entry_carries_stale_reason_in_broadcast():
     assert account.stale_reason is None
 
     await cache.invalidate(email)
+
+
+@pytest.mark.asyncio
+async def test_mid_cycle_active_flip_skips_refresh():
+    """Regression for a coverage gap surfaced in the second-round audit:
+    the mid-cycle active-flip re-check at ``background.py:95-108`` is the
+    defense against a manual switch that flips ``~/.ccswitch/active`` to
+    THIS account AFTER the poll cycle snapped its ``active_cfg_dir`` but
+    BEFORE this coroutine calls ``refresh_access_token``.  Without the
+    re-check, the poll loop would race Claude Code CLI on the newly active
+    account's refresh_token and brick it.
+
+    We simulate this by returning ``None`` on the cycle-start pointer read
+    (so the account's ``is_active`` snap = False) and then returning the
+    account's config_dir on the re-check (so ownership flipped to us
+    mid-cycle).  ``refresh_access_token`` must NOT be called.
+    """
+    from backend.background import poll_usage_and_switch
+    from backend.cache import cache
+
+    email = "mid-cycle-flip@example.com"
+    await cache.invalidate(email)
+
+    account = _make_account(email, config_dir="/tmp/mid-flip-dir")
+    account.stale_reason = None
+
+    mock_ws = AsyncMock()
+    mock_db = _make_db_for_one_account(account)
+    mock_db.commit = AsyncMock()
+
+    # Token expires in 60 s so the refresh-eligible branch is entered.
+    soon_expires = int(time.time() * 1000) + 60_000
+
+    # Simulate the cycle-start snap returning None (no active account) and
+    # the mid-cycle re-check returning THIS config_dir (ownership flipped
+    # mid-cycle to this account — CLI now owns its refresh).
+    pointer_calls = {"count": 0}
+
+    def _pointer_side_effect():
+        pointer_calls["count"] += 1
+        if pointer_calls["count"] == 1:
+            return None  # cycle-start snap: no active account
+        return "/tmp/mid-flip-dir"  # mid-cycle re-check: now active
+
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.background.ac.get_active_config_dir_pointer",
+               side_effect=_pointer_side_effect), \
+         patch("backend.background.ac.get_access_token_from_config_dir",
+               return_value="existing-token"), \
+         patch("backend.background.ac.get_token_info",
+               return_value={"token_expires_at": soon_expires}), \
+         patch("backend.background.ac.get_refresh_token_from_config_dir",
+               return_value="rt"), \
+         patch("backend.background.ac.save_refreshed_token"), \
+         patch("backend.background.anthropic_api.refresh_access_token",
+               new_callable=AsyncMock) as mock_refresh, \
+         patch("backend.background.anthropic_api.probe_usage",
+               new_callable=AsyncMock,
+               return_value={"five_hour": {"utilization": 10}}), \
+         patch("backend.services.switcher.ac.get_active_email",
+               return_value=None):
+        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        await poll_usage_and_switch(mock_ws)
+
+    # The mid-cycle re-check must have seen the pointer flip and skipped
+    # the refresh entirely — refresh_access_token must NOT be called for
+    # what is now the active account.
+    mock_refresh.assert_not_called()
+
+    # The re-check was wired to the second pointer read; if we count only
+    # one pointer read, the re-check branch never executed.
+    assert pointer_calls["count"] >= 2, (
+        "_process_single_account did not perform the mid-cycle active re-check "
+        "— the TOCTOU guard against manual switches mid-cycle is not firing"
+    )
+
+    await cache.invalidate(email)
+
+
+@pytest.mark.asyncio
+async def test_refresh_skew_constant_matches_20_minutes():
+    """Guard the named refresh-skew constant so a reversion to the pre-E2
+    5-minute window (the pre-active-ownership value) does not slip through.
+    The active-ownership model specifies 20 minutes for inactive accounts
+    since CCSwitch is the sole refresher; reducing this shifts the defense
+    margin back into the race-prone range."""
+    from backend import background as bg
+
+    assert bg._REFRESH_SKEW_MS_INACTIVE == 20 * 60 * 1000, (
+        f"_REFRESH_SKEW_MS_INACTIVE changed from 20 min to "
+        f"{bg._REFRESH_SKEW_MS_INACTIVE / 60_000:.1f} min — revisit the "
+        f"active-ownership design doc before narrowing this"
+    )

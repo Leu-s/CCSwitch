@@ -154,21 +154,36 @@ Implementation details:
 - `cache._waiting: set[str]` tracks which emails are in the soft waiting
   state.  The flag is set from the active-401-retry-failed branch of
   `_process_single_account` and cleared by every success / backoff /
-  terminal-refresh / generic-error / top-level-exception path, plus by
+  terminal-refresh / generic-error / top-level-`BaseException` path
+  (including `asyncio.CancelledError` during lifespan shutdown), plus by
   `perform_switch` for both sides of a switch.
-- `GET /api/accounts` reads the flag and is gated by `is_active` as
-  defense-in-depth, so a stale `True` that leaks past a `clear_waiting`
-  cannot render on a non-active card.
+- The inactive-account refresh skew is the named constant
+  `_REFRESH_SKEW_MS_INACTIVE` (20 minutes) in `background.py` so a future
+  tuning knob does not drift out of the design doc.
+- `GET /api/accounts`, `build_ws_snapshot`, AND `_broadcast_single_account`
+  all gate the flag by `email == active_email` as defense-in-depth, so a
+  stale `True` that leaks past a `clear_waiting` cannot render on a
+  non-active card through any surface.
 - `build_ws_snapshot` carries `waiting_for_cli` + `stale_reason` so a
   freshly-connected tab does not flash a healthy card for up to one poll
   cycle.
+- On the frontend, `ws.js`'s `account_switched` handler eagerly resets
+  `is_active` + `waiting_for_cli` across `state.accounts` before the
+  follow-up `loadAccounts()` HTTP round-trip completes, so a stale waiting
+  banner cannot render on what is no longer the active card.
 - `force_refresh_config_dir` (account_service.py) acquires a per-config-dir
   `asyncio.Lock` around the read → HTTP → Keychain-write sequence so two
   concurrent force-refresh callers cannot burn the same refresh_token.  It
   raises `ValueError` for "no token stored", `RuntimeError` for "malformed
-  upstream response", and propagates `httpx.HTTPStatusError` for 4xx/5xx.
-  The router maps 400/401 → 409 (+ sets stale_reason matching the poll loop
-  wording), ValueError → 409, RuntimeError/other → 502.
+  upstream response" (including a JSON-parse failure inside
+  `anthropic_api.refresh_access_token`, which is translated from the raw
+  `json.JSONDecodeError` so it does NOT mis-route as 409), and propagates
+  `httpx.HTTPStatusError` for 4xx/5xx.  The router maps 400/401 → 409 (+
+  sets stale_reason matching the poll loop wording), ValueError → 409,
+  RuntimeError/other → 502.  The 400/401 bookkeeping block clears the
+  cache BEFORE committing the DB row and calls `db.rollback()` on commit
+  failure so a SQLite hiccup cannot leave a ghost waiting flag against
+  a clean DB row.
 - Stale always wins over waiting in the UI (`isWaiting = !isStale && …`).
 
 See `docs/superpowers/specs/2026-04-14-active-ownership-refresh-fix-design.md`

@@ -291,10 +291,11 @@ async def _broadcast_single_account(account: Account) -> None:
     shape the poll loop emits.  Used after ``force-refresh`` to give
     immediate visual feedback on both success and stale-on-failure paths.
 
-    Both ``waiting_for_cli`` and ``stale_reason`` are read LIVE rather
-    than hard-coded so a future refactor that forgets to invalidate cache
-    state before calling this helper does not silently ship a stale
-    broadcast to every connected tab.
+    ``waiting_for_cli`` is gated by ``email == active_email`` — matching
+    the defense-in-depth rule in both ``list_accounts`` and
+    ``build_ws_snapshot``.  Without this gate a future caller that
+    broadcasts for a non-active account could silently leak a stale True,
+    contradicting the other two surfaces.
     """
     usage_raw = await cache.get_usage_async(account.email)
     if not isinstance(usage_raw, dict):
@@ -306,13 +307,15 @@ async def _broadcast_single_account(account: Account) -> None:
     except Exception as _bu_err:
         logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
         flat_dict = {}
+    active_email = await ac.get_active_email_async()
+    is_active = account.email == active_email
     usage_entry = {
         "id": account.id,
         "email": account.email,
         "usage": flat_dict,
         "error": account.stale_reason,
         "stale_reason": account.stale_reason,
-        "waiting_for_cli": await cache.is_waiting_async(account.email),
+        "waiting_for_cli": is_active and await cache.is_waiting_async(account.email),
     }
     try:
         await ws_manager.broadcast({"type": "usage_updated", "accounts": [usage_entry]})
@@ -366,16 +369,44 @@ async def force_refresh_account(account_id: int, db: AsyncSession = Depends(get_
             # which path marked the account stale.
             reason_detail = "revoked" if status_code == 401 else "rejected (400)"
             reason = f"Refresh token {reason_detail} — re-login required"
-            # Bookkeeping wrap: a DB hiccup or cache-invalidate crash here
-            # must not hide the 409 the caller needs to see — raising from a
+            # Bookkeeping: a DB hiccup or cache-internal crash here must
+            # not hide the 409 the caller needs to see — raising from a
             # stale-branch failure would downgrade to 500.
+            #
+            # Ordering: clear cache BEFORE db.commit so a failed commit
+            # cannot leave a ghost waiting flag pointing at a clean DB row.
+            # Each cache op runs in its OWN try so an exotic failure in
+            # ``invalidate_token_info`` (e.g. asyncio cancellation mid-lock)
+            # cannot skip ``clear_waiting`` — which would reintroduce the
+            # very leak this reorder was designed to prevent.  Both ops are
+            # idempotent, so running them always is safe.
+            try:
+                await cache.invalidate_token_info(account.email)
+            except Exception as _ti_err:
+                logger.debug(
+                    "invalidate_token_info failed in 401 branch for %s: %s",
+                    account.email, _ti_err,
+                )
+            try:
+                await cache.clear_waiting(account.email)
+            except Exception as _cw_err:
+                logger.debug(
+                    "clear_waiting failed in 401 branch for %s: %s",
+                    account.email, _cw_err,
+                )
+            # DB mutation + commit + broadcast in its own try.  Per-request
+            # SQLAlchemy session discards the dirty ``stale_reason`` attr
+            # on rollback, so the next GET sees DB truth even if commit
+            # raised.
             try:
                 account.stale_reason = reason
                 await db.commit()
-                await cache.invalidate_token_info(account.email)
-                await cache.clear_waiting(account.email)
                 await _broadcast_single_account(account)
             except Exception as _bk_err:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
                 logger.warning(
                     "Post-stale bookkeeping failed for %s: %s",
                     account.email, _bk_err,

@@ -29,6 +29,14 @@ _backoff_count: dict[str, int] = {}
 _BACKOFF_INITIAL = settings.rate_limit_backoff_initial
 _BACKOFF_MAX = settings.rate_limit_backoff_max
 
+# Active-ownership refresh model: CCSwitch is the SOLE refresher for every
+# INACTIVE account, so the wider 20-minute pre-expiry window is race-free
+# (no CLI is touching these credentials).  The active account is skipped
+# entirely by the gate at ``_process_single_account`` — Claude Code CLI
+# owns that account's refresh lifecycle.  Named constant so a future tuning
+# knob does not drift out of the design doc.
+_REFRESH_SKEW_MS_INACTIVE = 20 * 60 * 1000
+
 
 class _RefreshTerminal(Exception):
     """Raised when a refresh attempt returns a terminal status (400/401),
@@ -86,7 +94,7 @@ async def _process_single_account(
             try:
                 expires_at_ms = (token_info or {}).get("token_expires_at")
                 now_ms = int(time.time() * 1000)
-                if expires_at_ms and now_ms > expires_at_ms - 1_200_000:
+                if expires_at_ms and now_ms > expires_at_ms - _REFRESH_SKEW_MS_INACTIVE:
                     # Double-check ownership right before the refresh call.
                     # The ``active_cfg_dir`` snap was taken at the start of the
                     # poll cycle, but a manual switch during ``asyncio.gather``
