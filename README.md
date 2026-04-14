@@ -6,7 +6,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Tests](https://img.shields.io/badge/tests-147%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-199%20passing-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#requirements)
 [![Status](https://img.shields.io/badge/status-stable-success.svg)](#project-status)
 [![Build](https://img.shields.io/badge/frontend-no%20build%20step-orange.svg)](#architecture)
@@ -15,8 +15,7 @@
 
 If you've ever been deep in a Claude Code session and hit the 5-hour rate limit, you know the pain. **CCSwitch** is a local dashboard that watches usage across every Claude.ai subscription you own and silently swaps credentials *before* you run out — so `claude` keeps working without you noticing the switch.
 
-<!-- To add a screenshot: place it in docs/screenshot.png and uncomment below -->
-<!-- <p align="center"><img src="docs/screenshot.png" alt="Dashboard" width="800"/></p> -->
+<p align="center"><img src="preview.png" alt="CCSwitch dashboard" width="800"/></p>
 
 ### Who is this for?
 
@@ -157,6 +156,13 @@ All settings use the `CLAUDE_MULTI_` environment variable prefix. Copy `.env.exa
 | `CLAUDE_MULTI_DEFAULT_ACCOUNT_THRESHOLD_PCT` | `95.0` | Auto-switch threshold for newly added accounts (0–100) |
 | `CLAUDE_MULTI_HAIKU_MODEL` | `claude-haiku-4-5-20251001` | Cheapest model used for the minimal `/v1/messages` probe (the probe only reads rate-limit headers; no tokens are billed) |
 | `CLAUDE_MULTI_API_TOKEN` | *(empty)* | Optional Bearer token. **Empty = no auth** (safe for localhost). |
+| `CLAUDE_MULTI_TMUX_SESSION_NAME` | `claude-multi` | Name of the tmux session used for add-account login panes |
+| `CLAUDE_MULTI_WS_REPLAY_BUFFER_SIZE` | `100` | Recent `/ws` events buffered for reconnecting clients (see `?since=<seq>`) |
+| `CLAUDE_MULTI_LOGIN_SESSION_TIMEOUT` | `1800` | Seconds an unused add-account login terminal stays alive before cleanup |
+| `CLAUDE_MULTI_RATE_LIMIT_BACKOFF_INITIAL` | `120` | Initial backoff (seconds) after an Anthropic 429 on the usage probe |
+| `CLAUDE_MULTI_RATE_LIMIT_BACKOFF_MAX` | `3600` | Cap (seconds) for the exponential retry delay after repeated 429s |
+| `CLAUDE_MULTI_ANTHROPIC_MESSAGES_URL` | `https://api.anthropic.com/v1/messages` | Override the Messages endpoint (testing only) |
+| `CLAUDE_MULTI_ANTHROPIC_REFRESH_URL` | `https://platform.claude.com/v1/oauth/token` | Override the OAuth token-refresh endpoint (testing only) |
 
 No variable is mandatory — all have sensible defaults. Set `CLAUDE_MULTI_API_TOKEN` only if you expose the server beyond localhost.
 
@@ -291,15 +297,17 @@ What a switch *does* touch is determined by the **credential targets** the user 
 │       ├── utils.js                   # DOM helpers, date/time formatters
 │       ├── toast.js                   # Toast notification system
 │       ├── style.css                  # Dark/light theme, all components
+│       ├── favicon.svg                # Browser tab icon
 │       └── ui/
-│           ├── accounts.js            # Account cards, drag-reorder, threshold slider
-│           ├── service.js             # Service toggle, default account, auto-switch
+│           ├── accounts.js            # Account cards, drag-reorder, threshold slider, default-account selector
+│           ├── service.js             # Master-switch button (service enable/disable)
 │           ├── log.js                 # Switch log + pagination
 │           ├── login.js               # Add-account modal (multi-step tmux login)
 │           ├── credential_targets.js  # Settings-page Credential Targets panel
 │           └── tmux_nudge.js          # Settings-page Wake Tmux Sessions block
-├── alembic/                           # Database migrations
-│   └── versions/                      # initial + drop_display_name + drop_tmux_monitors
+├── alembic/                           # Database migrations (run on startup)
+│   └── versions/                      # initial_schema + drop_display_name
+│                                      # + drop_tmux_monitors + drop_auto_switch_enabled_setting
 ├── scripts/
 │   ├── ccswitch / ccswitch.py         # CLI tool
 │   ├── launch.sh                      # Production server launcher
@@ -343,6 +351,8 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CLAUDE_MULTI_A
 | `POST` | `/api/accounts/start-login` | Open tmux pane for new account login |
 | `POST` | `/api/accounts/verify-login` | Verify login completed, save account |
 | `DELETE` | `/api/accounts/cancel-login` | Cancel and clean up a login session |
+| `GET` | `/api/accounts/login-sessions/{session_id}/capture` | Tail recent terminal output from a login pane (`?lines=10..500`) |
+| `POST` | `/api/accounts/login-sessions/{session_id}/send` | Send keystrokes to a login pane (JSON body: `{ "text": "..." }`) |
 | `PATCH` | `/api/accounts/{id}` | Update account (`enabled`, `threshold_pct`, `priority`) |
 | `DELETE` | `/api/accounts/{id}` | Delete account |
 | `POST` | `/api/accounts/{id}/switch` | Manual switch to account |
@@ -353,7 +363,7 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CLAUDE_MULTI_A
 | `POST` | `/api/service/disable` | Disable and restore original credentials |
 | `PATCH` | `/api/service/default-account` | Set starting account for enable |
 | `GET` | `/api/settings` | List settings |
-| `PATCH` | `/api/settings/{key}` | Update a setting (`auto_switch_enabled`, `usage_poll_interval_seconds`) |
+| `PATCH` | `/api/settings/{key}` | Update a setting (`usage_poll_interval_seconds`, `tmux_nudge_*`) |
 | `GET` | `/api/settings/shell-status` | Check shell integration and active pointer status |
 | `POST` | `/api/settings/setup-shell` | Append shell snippet to `.zshrc` / `.bashrc` |
 | `GET` | `/api/credential-targets` | List auto-discovered `.claude.json` targets with enabled state |
@@ -369,7 +379,7 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CLAUDE_MULTI_A
 ## Testing
 
 ```bash
-uv run pytest tests/ -q                            # all 147 tests
+uv run pytest tests/ -q                            # all 199 tests
 uv run pytest tests/ -v --tb=short                 # verbose output
 uv run pytest tests/test_accounts_router.py        # single file
 ```
@@ -428,7 +438,7 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 
 ## Project Status
 
-**Stable** — running 24/7 as a personal LaunchAgent on the maintainer's machine. The codebase has been through five rounds of audited refactoring (147 tests, ~85 % coverage of backend services). The public API and database schema are considered stable; breaking changes ship with an Alembic migration.
+**Stable** — running 24/7 as a personal LaunchAgent on the maintainer's machine. The codebase has been through several rounds of audited refactoring (199 tests covering routers, services, background loop, schemas, and an end-to-end smoke suite). The public API and database schema are considered stable; breaking changes ship with an Alembic migration.
 
 What is intentionally **not** done:
 - No multi-tenant support — one user per machine

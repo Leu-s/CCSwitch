@@ -249,6 +249,56 @@ class TestSaveRefreshedToken:
         assert written_creds["claudeAiOauth"]["accessToken"] == "updated-token"
         assert written_creds["claudeAiOauth"]["expiresAt"] == 1234
 
+    def test_saves_rotated_refresh_token_nested(self, tmp_path):
+        cred_file = tmp_path / ".credentials.json"
+        original = {"claudeAiOauth": {"accessToken": "old", "refreshToken": "old-rt"}}
+        cred_file.write_text(json.dumps(original))
+
+        with patch("backend.services.credential_provider._read_keychain_credentials", return_value={}):
+            save_refreshed_token(str(tmp_path), "new-at", expires_at=5000, refresh_token="new-rt")
+
+        data = json.loads(cred_file.read_text())
+        assert data["claudeAiOauth"]["accessToken"] == "new-at"
+        assert data["claudeAiOauth"]["refreshToken"] == "new-rt"
+        assert data["claudeAiOauth"]["expiresAt"] == 5000
+
+    def test_saves_rotated_refresh_token_flat(self, tmp_path):
+        cred_file = tmp_path / ".credentials.json"
+        original = {"accessToken": "old", "refreshToken": "old-rt"}
+        cred_file.write_text(json.dumps(original))
+
+        with patch("backend.services.credential_provider._read_keychain_credentials", return_value={}):
+            save_refreshed_token(str(tmp_path), "new-at", refresh_token="new-rt")
+
+        data = json.loads(cred_file.read_text())
+        assert data["accessToken"] == "new-at"
+        assert data["refreshToken"] == "new-rt"
+
+    def test_preserves_refresh_token_when_not_rotated(self, tmp_path):
+        cred_file = tmp_path / ".credentials.json"
+        original = {"claudeAiOauth": {"accessToken": "old", "refreshToken": "keep-me"}}
+        cred_file.write_text(json.dumps(original))
+
+        with patch("backend.services.credential_provider._read_keychain_credentials", return_value={}):
+            save_refreshed_token(str(tmp_path), "new-at")
+
+        data = json.loads(cred_file.read_text())
+        assert data["claudeAiOauth"]["refreshToken"] == "keep-me"
+
+    def test_rotated_refresh_token_written_to_keychain(self, tmp_path):
+        claude_file = tmp_path / ".claude.json"
+        claude_file.write_text(json.dumps({"claudeAiOauth": {"accessToken": "old"}}))
+
+        kc_data = {"claudeAiOauth": {"accessToken": "kc-old", "refreshToken": "kc-old-rt"}}
+        with patch("backend.services.credential_provider._read_keychain_credentials", return_value=kc_data), \
+             patch("backend.services.credential_provider._write_keychain_credentials") as mock_write_kc:
+            save_refreshed_token(str(tmp_path), "new-at", refresh_token="new-rt")
+
+        mock_write_kc.assert_called_once()
+        written = mock_write_kc.call_args[0][0]
+        assert written["claudeAiOauth"]["accessToken"] == "new-at"
+        assert written["claudeAiOauth"]["refreshToken"] == "new-rt"
+
 
 # ── get_token_info ────────────────────────────────────────────────────────────
 

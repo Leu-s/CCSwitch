@@ -6,15 +6,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from ..database import get_db
-from ..models import SwitchLog
+from ..models import Account, SwitchLog
 from ..schemas import AccountUpdate, AccountOut, AccountWithUsage, SwitchLogOut, UsageData
 from ..schemas import LoginSessionOut, LoginVerifyResult, LogCount
+from ..schemas import LoginSessionCaptureOut, LoginSessionSendRequest
 from ..config import settings
 from ..services import account_service as ac
 from ..services import account_queries as aq
+from ..services import credential_provider
 from ..services import login_session_service as ls
 from ..services import settings_service as ss
 from ..services import switcher as sw
+from ..services import tmux_service
 from ..background import cache
 from ..ws import ws_manager
 
@@ -94,6 +97,35 @@ async def cancel_login(session_id: str):
     return {"ok": True}
 
 
+@router.get(
+    "/login-sessions/{session_id}/capture",
+    response_model=LoginSessionCaptureOut,
+)
+async def capture_login_session(
+    session_id: str,
+    lines: int = Query(default=100, ge=10, le=500),
+):
+    """Capture recent terminal output from an active login session's tmux pane."""
+    pane_target = ls.get_pane_target(session_id)
+    if not pane_target:
+        raise HTTPException(404, "Login session not found or expired")
+    output = await tmux_service.capture_pane(pane_target, lines)
+    return LoginSessionCaptureOut(output=output)
+
+
+@router.post("/login-sessions/{session_id}/send")
+async def send_to_login_session(
+    session_id: str,
+    payload: LoginSessionSendRequest,
+):
+    """Send keystrokes to an active login session's tmux pane (followed by Enter)."""
+    pane_target = ls.get_pane_target(session_id)
+    if not pane_target:
+        raise HTTPException(404, "Login session not found or expired")
+    await tmux_service.send_keys(pane_target, payload.text, press_enter=True)
+    return {"ok": True}
+
+
 # ── Switch log ─────────────────────────────────────────────────────────────────
 
 @router.get("/log/count", response_model=LogCount)
@@ -108,10 +140,43 @@ async def switch_log(
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
+    """Return paginated switch log rows, enriched with from_email / to_email.
+
+    Emails are resolved here instead of on the frontend so a switch that just
+    fired cannot render as ``#42`` while ``state.accounts`` is still being
+    reloaded in parallel over WebSocket.
+    """
     result = await db.execute(
         select(SwitchLog).order_by(SwitchLog.triggered_at.desc()).limit(limit).offset(offset)
     )
-    return result.scalars().all()
+    rows = result.scalars().all()
+
+    # Single batched lookup for every account referenced in this page.
+    referenced_ids: set[int] = set()
+    for r in rows:
+        referenced_ids.add(r.to_account_id)
+        if r.from_account_id is not None:
+            referenced_ids.add(r.from_account_id)
+
+    email_by_id: dict[int, str] = {}
+    if referenced_ids:
+        account_rows = await db.execute(
+            select(Account.id, Account.email).where(Account.id.in_(referenced_ids))
+        )
+        email_by_id = {aid: email for aid, email in account_rows.all()}
+
+    return [
+        SwitchLogOut(
+            id=r.id,
+            from_account_id=r.from_account_id,
+            to_account_id=r.to_account_id,
+            from_email=email_by_id.get(r.from_account_id) if r.from_account_id is not None else None,
+            to_email=email_by_id.get(r.to_account_id),
+            reason=r.reason,
+            triggered_at=r.triggered_at,
+        )
+        for r in rows
+    ]
 
 
 # ── Per-account CRUD ───────────────────────────────────────────────────────────
@@ -155,14 +220,11 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
         else:
             await asyncio.to_thread(ac.clear_active_config_dir)
             # No replacement account — disable service to prevent the poll
-            # loop from running with no valid active account.
-            service_on = await ss.get_bool("service_enabled", False, db)
-            if service_on:
+            # loop from running with no valid active account.  The follow-up
+            # account_deleted broadcast triggers a /api/service reload on the
+            # client, so no separate service_disabled event is needed.
+            if await ss.get_bool("service_enabled", False, db):
                 await ss.set_setting("service_enabled", "false", db)
-                try:
-                    await ws_manager.broadcast({"type": "service_disabled"})
-                except Exception:
-                    logger.warning("Failed to broadcast service_disabled after last-account delete")
 
     # Clear the default_account_id setting if this was the default
     if await ss.get_int_or_none("default_account_id", db) == account_id:
@@ -189,5 +251,110 @@ async def manual_switch(account_id: int, db: AsyncSession = Depends(get_db)):
     account = await aq.get_account_by_id(account_id, db)
     if not account:
         raise HTTPException(404, "Account not found")
+    current_email = await ac.get_active_email_async()
+    if current_email and current_email == account.email:
+        return {"ok": True, "already_active": True}
     await sw.perform_switch(account, "manual", db, ws_manager)
-    return {"ok": True}
+    return {"ok": True, "already_active": False}
+
+
+# ── Re-login flow (existing account whose credentials have gone stale) ───────
+
+@router.post("/{account_id}/relogin", response_model=LoginSessionOut)
+async def relogin_account(account_id: int, db: AsyncSession = Depends(get_db)):
+    """Open an interactive tmux login for an existing account.
+
+    Reuses the account's existing isolated config directory so the slot's
+    email, priority, threshold, and credential-target mappings all stay
+    intact — only the OAuth material inside the isolated dir is replaced
+    when the user finishes the interactive login.
+
+    Returns ``409`` if another re-login session is already in progress for
+    the same config dir (two tmux windows must not race the same Keychain).
+    """
+    account = await aq.get_account_by_id(account_id, db)
+    if not account:
+        raise HTTPException(404, "Account not found")
+    try:
+        info = await asyncio.to_thread(ls.start_relogin_session, account.config_dir)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    except Exception:
+        logger.exception("start_relogin_session failed for %s", account.email)
+        raise HTTPException(503, "Could not start re-login terminal — is tmux running?")
+    return LoginSessionOut(**info)
+
+
+@router.post("/{account_id}/relogin/verify", response_model=LoginVerifyResult)
+async def verify_relogin(
+    account_id: int,
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify a re-login session and, on success, clear ``stale_reason``.
+
+    If the user authenticated under a DIFFERENT email than the slot expects,
+    the newly written credentials are wiped from the config dir (hashed
+    Keychain entry + credential files + ``oauthAccount`` in ``.claude.json``)
+    so the slot is returned to the same "no credentials" state a stale
+    account already has.  The error message tells the user which email was
+    detected so they can retry with the right one.
+
+    If the revived account is the one currently active, the credential
+    mirror pipeline is re-run (``perform_sync_to_targets``) so the legacy
+    ``Claude Code-credentials`` Keychain entry, ``~/.claude/.credentials.json``,
+    and any enabled ``.claude.json`` mirror targets all pick up the freshly
+    written tokens — otherwise a fresh ``claude`` spawned without
+    ``CLAUDE_CONFIG_DIR`` would still see the old (dead) credentials.
+    """
+    account = await aq.get_account_by_id(account_id, db)
+    if not account:
+        # Clean up the orphaned session so its tmux pane does not linger in
+        # the tracking dict forever (the row was deleted mid-flow).
+        await asyncio.to_thread(ls.cleanup_login_session, session_id)
+        raise HTTPException(404, "Account not found")
+
+    result = await asyncio.to_thread(ls.verify_login_session, session_id)
+    if not result["success"]:
+        return LoginVerifyResult(success=False, error=result["error"])
+
+    new_email = result["email"]
+
+    if new_email != account.email:
+        # Wrong identity — wipe the new credentials so the slot is left in a
+        # clean "no credentials" state and the user can retry without a
+        # split-brain mix.  stale_reason is preserved (it was already set).
+        await asyncio.to_thread(
+            credential_provider.wipe_credentials_for_config_dir,
+            account.config_dir,
+        )
+        return LoginVerifyResult(
+            success=False,
+            error=(
+                f"Logged in as {new_email}, but this slot is for {account.email}. "
+                "The new credentials were wiped — please re-login with the correct account."
+            ),
+        )
+
+    # Email matches — mark the account healthy.
+    account.stale_reason = None
+    await db.commit()
+
+    # Drop cached usage + token_info so the next poll cycle hydrates fresh
+    # metadata (expiry, subscription tier) from the new credentials.
+    await cache.invalidate(account.email)
+
+    # If the revived account is still the active one, re-run the mirror
+    # pipeline so legacy Keychain / ~/.claude/ / credential targets all
+    # reflect the freshly written tokens.  Non-active accounts do not need
+    # this — the next switch to them will mirror on its own.
+    if account.email == await ac.get_active_email_async():
+        try:
+            await sw.perform_sync_to_targets(db)
+        except Exception:
+            logger.exception("Post-relogin mirror failed for %s", account.email)
+
+    # The initiating frontend reloads /api/accounts on its own via the
+    # app:reload-accounts custom event, so no WS broadcast is needed — other
+    # tabs catch up on the next poll cycle's usage_updated anyway.
+    return LoginVerifyResult(success=True, email=new_email)

@@ -68,16 +68,18 @@ frontend/
     utils.js           DOM helpers (qs, qsa, escapeHtml, fmtTime, etc.)
     toast.js           Toast notification system
     style.css          Full stylesheet (dark default, light via data-theme)
+    favicon.svg        Browser tab icon (served via /src/ static mount)
     ui/
-      accounts.js              Account cards, drag-reorder, threshold slider
-      service.js               Service toggle, default account
+      accounts.js              Account cards, drag-reorder, threshold slider,
+                               default-account selector (sets service.default_account_id)
+      service.js               Master-switch button (loads /api/service, toggles enable/disable)
       log.js                   Switch log with pagination
       login.js                 Add-account modal (multi-step login flow)
       credential_targets.js    Settings-page Credential Targets panel
       tmux_nudge.js            Settings-page Wake Tmux Sessions block
 alembic/
-  versions/            Schema migrations (initial + drop_display_name
-                       + drop_tmux_monitors)
+  versions/            Schema migrations (initial_schema + drop_display_name
+                       + drop_tmux_monitors + drop_auto_switch_enabled_setting)
 tests/
   conftest.py          tmp-dir isolation + make_test_app factory fixture
   test_*.py            router + service + background + schemas + e2e
@@ -85,23 +87,31 @@ tests/
 
 ## Key data flow
 
-1. `main.lifespan` runs `init_db()`, syncs `~/.claude-multi/active`, then
-   starts exactly **one** background task: `_poll_loop(idle_interval)`.
+1. `main.lifespan` runs `init_db()`, seeds default settings via
+   `ensure_defaults`, syncs `~/.claude-multi/active`, then starts **two**
+   background tasks: `_poll_loop(idle_interval)` and
+   `_cleanup_sessions_loop()` (the latter reaps expired add-account login
+   sessions every 5 min via `ls._cleanup_expired_sessions`).
 2. `_poll_loop` calls `bg.poll_usage_and_switch(ws_manager)` immediately (to
    warm caches), then alternates between a tight active cadence
    (`cfg.poll_interval_active`, default 15 s, while any WS client is
    connected) and an idle cadence (DB-configurable, floored at
    `cfg.poll_interval_min`).
-3. `poll_usage_and_switch` gates on `service_enabled` before doing any work.
-   For each account it reads the access token, skips token refresh for
-   already-stale accounts, refreshes otherwise if expiry is within 5 minutes,
-   probes `/v1/messages` for rate-limit headers, stores the result in
-   `cache` (a `_UsageCache` singleton in `cache.py`), and caches `token_info`
-   so `GET /api/accounts` does not fan out Keychain subprocess calls per row.
-4. If the active account crosses its `threshold_pct` (or came back 429), it
-   picks the next enabled **non-stale** account by priority, calls
-   `switcher.perform_switch`, and then fires `tmux_service.fire_nudge()` as
-   a background task to kick any stalled claude panes.
+3. `poll_usage_and_switch` runs **unconditionally** — usage polling is
+   independent of the `service_enabled` master toggle so the dashboard's
+   rate-limit bars stay live even when auto-switching is off.  For each
+   account it reads the access token, skips token refresh for already-stale
+   accounts, refreshes otherwise if expiry is within 5 minutes, probes
+   `/v1/messages` for rate-limit headers, stores the result in `cache`
+   (a `_UsageCache` singleton in `cache.py`), and caches `token_info` so
+   `GET /api/accounts` does not fan out Keychain subprocess calls per row.
+4. After polling, it delegates to `switcher.maybe_auto_switch`, which
+   **does** gate on `service_enabled`: if the master toggle is off it
+   returns immediately.  Otherwise, if the active account crosses its
+   `threshold_pct` (or came back 429), it picks the next enabled
+   **non-stale** account by priority, calls `switcher.perform_switch`, and
+   then fires `tmux_service.fire_nudge()` as a background task to kick any
+   stalled claude panes.
 5. Every outcome is broadcast over `/ws` so the SPA updates live.
 
 ## Account switching = four artefacts (ordered!)

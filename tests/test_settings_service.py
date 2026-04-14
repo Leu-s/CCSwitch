@@ -57,7 +57,7 @@ def test_ensure_defaults_does_not_overwrite_existing():
     from backend.services.settings_service import ensure_defaults
     from backend.models import Setting
 
-    pre_value = "false"
+    pre_value = "true"
 
     async def run():
         engine, factory = _make_engine_and_factory()
@@ -67,7 +67,7 @@ def test_ensure_defaults_does_not_overwrite_existing():
 
         # Pre-create the row with a non-default value
         async with factory() as db:
-            db.add(Setting(key="auto_switch_enabled", value=pre_value))
+            db.add(Setting(key="service_enabled", value=pre_value))
             await db.commit()
 
         # ensure_defaults must not overwrite the customised value
@@ -76,7 +76,7 @@ def test_ensure_defaults_does_not_overwrite_existing():
 
         async with factory() as db:
             result = await db.execute(
-                select(Setting).where(Setting.key == "auto_switch_enabled")
+                select(Setting).where(Setting.key == "service_enabled")
             )
             row = result.scalars().first()
             value = row.value if row else None

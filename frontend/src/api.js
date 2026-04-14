@@ -28,17 +28,3 @@ export async function withLoading(btn, fn) {
   try { return await fn(); }
   finally { btn.classList.remove("loading"); btn.disabled = false; }
 }
-
-export async function fetchTerminalCapture(target, outputEl, liveEl) {
-  if (!target) return;
-  try {
-    const d = await api(`/api/tmux/capture?target=${encodeURIComponent(target)}&lines=100`);
-    const atBottom = outputEl.scrollHeight - outputEl.scrollTop <= outputEl.clientHeight + 5;
-    outputEl.textContent = d.output || "";
-    if (atBottom) outputEl.scrollTop = outputEl.scrollHeight;
-    if (liveEl) { liveEl.className = "terminal-live"; liveEl.title = "Live"; liveEl.textContent = "live"; }
-  } catch (e) {
-    outputEl.textContent = "Error fetching terminal output: " + String(e);
-    if (liveEl) { liveEl.className = "terminal-live error"; liveEl.title = String(e); liveEl.textContent = "error"; }
-  }
-}

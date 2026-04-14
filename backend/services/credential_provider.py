@@ -3,6 +3,7 @@ Credential reading and writing helpers.
 
 Handles macOS Keychain access and file-based credential fallbacks.
 """
+import getpass
 import hashlib
 import json
 import logging
@@ -85,7 +86,6 @@ def _write_keychain_entry(service_name: str, credentials: dict) -> bool:
 
     Returns True if credentials were successfully written, False otherwise.
     """
-    import getpass
     acct = getpass.getuser()
     cred_json = json.dumps(credentials)
     try:
@@ -190,9 +190,15 @@ def get_refresh_token_from_config_dir(config_dir: str) -> str | None:
     return _get_oauth_field(config_dir, "refreshToken")
 
 
-def save_refreshed_token(config_dir: str, access_token: str, expires_at: int | None = None) -> None:
+def save_refreshed_token(
+    config_dir: str,
+    access_token: str,
+    expires_at: int | None = None,
+    refresh_token: str | None = None,
+) -> None:
     """
-    Persist a refreshed access token back into the config dir.
+    Persist a refreshed access token (and optionally a rotated refresh
+    token) back into the config dir.
 
     Writes the first applicable credentials file (.credentials.json,
     credentials.json, .claude.json) AND then updates the macOS Keychain
@@ -203,11 +209,12 @@ def save_refreshed_token(config_dir: str, access_token: str, expires_at: int | N
     cannot clobber a concurrent account switch.  See the lock's docstring.
     """
     with _credential_lock:
-        _save_refreshed_token_locked(config_dir, access_token, expires_at)
+        _save_refreshed_token_locked(config_dir, access_token, expires_at, refresh_token)
 
 
 def _save_refreshed_token_locked(
-    config_dir: str, access_token: str, expires_at: int | None
+    config_dir: str, access_token: str, expires_at: int | None,
+    refresh_token: str | None = None,
 ) -> None:
     # Update the first applicable credentials file found.  `break` (not
     # `return`) so the Keychain update below still runs.
@@ -220,10 +227,14 @@ def _save_refreshed_token_locked(
             data["claudeAiOauth"]["accessToken"] = access_token
             if expires_at is not None:
                 data["claudeAiOauth"]["expiresAt"] = expires_at
+            if refresh_token is not None:
+                data["claudeAiOauth"]["refreshToken"] = refresh_token
         elif "accessToken" in data:
             data["accessToken"] = access_token
             if expires_at is not None:
                 data["expiresAt"] = expires_at
+            if refresh_token is not None:
+                data["refreshToken"] = refresh_token
         else:
             continue
         tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -249,10 +260,14 @@ def _save_refreshed_token_locked(
                 kc["claudeAiOauth"]["accessToken"] = access_token
                 if expires_at is not None:
                     kc["claudeAiOauth"]["expiresAt"] = expires_at
+                if refresh_token is not None:
+                    kc["claudeAiOauth"]["refreshToken"] = refresh_token
             else:
                 kc["accessToken"] = access_token
                 if expires_at is not None:
                     kc["expiresAt"] = expires_at
+                if refresh_token is not None:
+                    kc["refreshToken"] = refresh_token
             _write_keychain_credentials(kc, service=_keychain_service_name(config_dir))
             # Only touch the legacy (no-hash) entry if THIS account is the
             # one currently active system-wide; otherwise a background refresh
@@ -268,3 +283,76 @@ def _save_refreshed_token_locked(
                 _write_keychain_credentials(kc, service=LEGACY_KEYCHAIN_SERVICE)
     except Exception as e:
         logger.warning("Failed to update Keychain after token refresh for %s: %s", config_dir, e)
+
+
+def wipe_credentials_for_config_dir(config_dir: str) -> None:
+    """Remove all OAuth credentials belonging to an isolated config directory.
+
+    Deletes the hashed per-dir Keychain entry, the credential files inside
+    ``config_dir`` (``.credentials.json`` / ``credentials.json``), and strips
+    the ``oauthAccount`` / ``userID`` keys from ``.claude.json`` — other keys
+    in that file (projects, MCP state, etc.) are preserved.
+
+    Used to roll back a re-login attempt where the user authenticated as a
+    different account than the slot expects — this returns the config dir
+    to the same "no credentials" state a stale account already has, so the
+    user can try again without leaving a split-brain mix (one identity in
+    ``.claude.json``, a different one in the Keychain entry).
+
+    Best-effort: individual step failures are logged but do not abort the
+    remaining steps, because a half-wiped slot is still safer than one
+    where some of the bad credentials linger.
+
+    Acquires ``_credential_lock`` for the same reason token refresh does —
+    to not race with a concurrent switch or save_refreshed_token.
+    """
+    user = getpass.getuser()
+
+    with _credential_lock:
+        # 1. Hashed per-dir Keychain entry.  `security delete-generic-password`
+        #    exits non-zero when the item does not exist; that is fine and we
+        #    do not raise on it.
+        service = _keychain_service_name(config_dir)
+        try:
+            subprocess.run(
+                ["security", "delete-generic-password", "-s", service, "-a", user],
+                capture_output=True, timeout=5,
+            )
+        except Exception as e:
+            logger.debug("Keychain wipe for %s failed: %s", service, e)
+
+        # 2. Credential files inside config_dir.
+        for fname in (".credentials.json", "credentials.json"):
+            path = os.path.join(config_dir, fname)
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                logger.warning("wipe_credentials: failed to unlink %s: %s", path, e)
+
+        # 3. Strip oauthAccount / userID from .claude.json while preserving
+        #    every other key (projects, MCP state, user prefs, etc.).
+        claude_json = os.path.join(config_dir, ".claude.json")
+        if not os.path.exists(claude_json):
+            return
+        try:
+            data = _load_json_safe(claude_json)
+            if "oauthAccount" not in data and "userID" not in data:
+                return
+            data.pop("oauthAccount", None)
+            data.pop("userID", None)
+            tmp = f"{claude_json}.{os.getpid()}.{threading.get_ident()}.wipe.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(data, f, indent=2)
+                os.replace(tmp, claude_json)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except FileNotFoundError:
+                    pass
+                raise
+        except Exception as e:
+            logger.warning("wipe_credentials: failed to strip oauthAccount from %s: %s", claude_json, e)

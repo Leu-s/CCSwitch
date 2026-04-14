@@ -16,7 +16,6 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 INTERNAL_KEYS = {"original_credentials_backup"}
 
 ALLOWED_KEYS = {
-    "auto_switch_enabled",
     "usage_poll_interval_seconds",
     "tmux_nudge_enabled",
     "tmux_nudge_message",

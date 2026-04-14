@@ -72,7 +72,6 @@ class AccountWithUsage(AccountOut):
 
 class LoginSessionOut(BaseModel):
     session_id: str
-    pane_target: str
     config_dir: str
     instructions: str
 
@@ -82,6 +81,14 @@ class LoginVerifyResult(BaseModel):
     email: Optional[str] = None
     error: Optional[str] = None
     already_exists: bool = False
+
+
+class LoginSessionCaptureOut(BaseModel):
+    output: str
+
+
+class LoginSessionSendRequest(BaseModel):
+    text: str
 
 
 # ── Service toggle ─────────────────────────────────────────────────────────────
@@ -98,6 +105,13 @@ class SwitchLogOut(BaseModel):
     id: int
     from_account_id: Optional[int] = None
     to_account_id: int
+    # Emails are resolved server-side at response time so the frontend does
+    # not depend on whatever state.accounts happens to hold when it renders
+    # the log (WS races used to leave newly-added rows showing "#42" until
+    # the next page reload).  Null only when the referenced account was
+    # deleted after the switch was logged.
+    from_email: Optional[str] = None
+    to_email: Optional[str] = None
     reason: str
     triggered_at: datetime
     model_config = {"from_attributes": True}

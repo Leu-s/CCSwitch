@@ -4,8 +4,8 @@
 import { state } from "./state.js";
 import { qs } from "./utils.js";
 import { api } from "./api.js";
-import { loadAccounts, renderAccounts } from "./ui/accounts.js";
-import { loadServiceStatus, updateServiceUI, loadAutoSwitchSetting, initServiceListeners } from "./ui/service.js";
+import { loadAccounts } from "./ui/accounts.js";
+import { loadServiceStatus, updateServiceUI, initServiceListeners } from "./ui/service.js";
 import { loadSwitchLog, initLogListeners } from "./ui/log.js";
 import { closeAddModal, initLoginListeners } from "./ui/login.js";
 import { clearAddTermInterval } from "./ui/login.js";
@@ -51,23 +51,29 @@ if (_savedTheme) applyTheme(_savedTheme);
 else syncThemeBtn();
 
 // ── Settings page routing ───────────────────────────────────────────────────
+// The top-right icon button is a toggle: a gear while on the accounts page,
+// a home icon while on the settings page. Clicking it switches to the other
+// page.  State lives purely in the DOM — no routing, no history.
+let _currentPage = "accounts";
 function showPage(name) {
   const accounts = qs("#tab-accounts");
   const settings = qs("#tab-settings");
-  if (name === "settings") {
-    accounts.hidden = true;
-    accounts.classList.remove("active");
-    settings.hidden = false;
-    settings.classList.add("active");
-  } else {
-    settings.hidden = true;
-    settings.classList.remove("active");
-    accounts.hidden = false;
-    accounts.classList.add("active");
-  }
+  const onSettings = name === "settings";
+  accounts.hidden = onSettings;
+  accounts.classList.toggle("active", !onSettings);
+  settings.hidden = !onSettings;
+  settings.classList.toggle("active", onSettings);
+
+  const navBtn = qs("#nav-toggle-btn");
+  qs(".nav-icon-settings").classList.toggle("hidden", onSettings);
+  qs(".nav-icon-home").classList.toggle("hidden", !onSettings);
+  navBtn.setAttribute("aria-label", onSettings ? "Back to accounts" : "Settings");
+  navBtn.setAttribute("title",      onSettings ? "Back to accounts" : "Settings");
+  _currentPage = name;
 }
-qs("#settings-btn").addEventListener("click", () => showPage("settings"));
-qs("#settings-back-btn").addEventListener("click", () => showPage("accounts"));
+qs("#nav-toggle-btn").addEventListener("click", () => {
+  showPage(_currentPage === "settings" ? "accounts" : "settings");
+});
 
 // ── Keyboard shortcuts ───────────────────────────────────────────────────────
 document.addEventListener("keydown", e => {
@@ -84,12 +90,12 @@ async function checkShellStatus() {
     const warn = document.getElementById("shell-warn");
     const desc = document.getElementById("shell-warn-desc");
     if (active_file_exists && shell_configured) {
-      warn.style.display = "none";
+      warn.classList.add("hidden");
     } else {
       desc.textContent = shell_configured
         ? "The active account file (~/.claude-multi/active) has not been created yet. Switch to an account or restart the server to create it."
         : "Your shell is not configured to use CLAUDE_CONFIG_DIR. Without this, new terminal sessions may open with the wrong Claude account.";
-      warn.style.display = "";
+      warn.classList.remove("hidden");
     }
   } catch { /* ignore */ }
 }
@@ -100,7 +106,7 @@ document.getElementById("shell-tip-apply-btn").addEventListener("click", async (
   btn.disabled = true;
   btn.textContent = "Applying…";
   resultEl.textContent = "";
-  resultEl.style.color = "";
+  resultEl.classList.remove("text-danger");
   try {
     const data = await api("/api/settings/setup-shell", { method: "POST" });
     const labels = { applied: "✓ applied", already_configured: "already configured" };
@@ -112,7 +118,7 @@ document.getElementById("shell-tip-apply-btn").addEventListener("click", async (
     const anyError = values.some(v => String(v).startsWith("error:"));
     const allMissing = values.every(v => v === "not_found");
     if (anyError || allMissing) {
-      if (anyError) resultEl.style.color = "var(--danger)";
+      if (anyError) resultEl.classList.add("text-danger");
       btn.textContent = "Apply to .zshrc / .bashrc automatically";
       btn.disabled = false;
     } else {
@@ -123,7 +129,7 @@ document.getElementById("shell-tip-apply-btn").addEventListener("click", async (
     }
   } catch (e) {
     resultEl.textContent = "Error: " + e.message;
-    resultEl.style.color = "var(--danger)";
+    resultEl.classList.add("text-danger");
     btn.textContent = "Apply to .zshrc / .bashrc automatically";
     btn.disabled = false;
   }
@@ -168,7 +174,6 @@ document.addEventListener("app:reload-accounts", () => {
   await Promise.all([
     loadAccounts(),
     loadServiceStatus(true),
-    loadAutoSwitchSetting(),
     loadSwitchLog(),
     loadCredentialTargets(),
     loadTmuxNudge(),

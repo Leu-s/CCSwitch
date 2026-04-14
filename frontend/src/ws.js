@@ -40,14 +40,13 @@ export function connectWs() {
 
   ws.onopen = () => {
     _replayBoundary = _lastSeq;
-    qs("#ws-dot").classList.remove("disconnected");
     wsReconnectAttempts = 0;
     if (_wsPingInterval) { clearInterval(_wsPingInterval); _wsPingInterval = null; }
     _startWsPing();
   };
 
-  ws.onclose = () => { qs("#ws-dot").classList.add("disconnected"); scheduleReconnect(); };
-  ws.onerror = () => qs("#ws-dot").classList.add("disconnected");
+  ws.onclose = () => scheduleReconnect();
+  ws.onerror = () => {};
 
   ws.onmessage = evt => {
     let msg;

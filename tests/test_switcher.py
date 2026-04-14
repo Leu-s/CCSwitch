@@ -21,12 +21,18 @@ def make_account(id, email, priority, enabled=True, config_dir=None, stale_reaso
     return a
 
 
+def _make_account_for_next(id, email, priority, threshold_pct=80.0):
+    a = make_account(id, email, priority)
+    a.threshold_pct = threshold_pct
+    return a
+
+
 @pytest.mark.asyncio
 async def test_get_next_account_skips_current():
     from backend.services.switcher import get_next_account
-    accounts = [make_account(1, "a@x.com", 0), make_account(2, "b@x.com", 1)]
+    accounts = [_make_account_for_next(2, "b@x.com", 1)]
     mock_result = MagicMock()
-    mock_result.scalars.return_value.first.return_value = accounts[1]
+    mock_result.scalars.return_value.all.return_value = accounts
     mock_db = AsyncMock()
     mock_db.execute.return_value = mock_result
     result = await get_next_account("a@x.com", mock_db)
@@ -37,7 +43,7 @@ async def test_get_next_account_skips_current():
 async def test_get_next_account_returns_none_when_no_others():
     from backend.services.switcher import get_next_account
     mock_result = MagicMock()
-    mock_result.scalars.return_value.first.return_value = None
+    mock_result.scalars.return_value.all.return_value = []
     mock_db = AsyncMock()
     mock_db.execute.return_value = mock_result
     result = await get_next_account("only@x.com", mock_db)
@@ -49,11 +55,124 @@ async def test_get_next_account_skips_stale():
     """get_next_account must not return an account that has stale_reason set."""
     from backend.services.switcher import get_next_account
     mock_result = MagicMock()
-    mock_result.scalars.return_value.first.return_value = None
+    mock_result.scalars.return_value.all.return_value = []
     mock_db = AsyncMock()
     mock_db.execute.return_value = mock_result
     result = await get_next_account("current@x.com", mock_db)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_next_account_skips_rate_limited_candidate():
+    """A candidate whose last probe was rate-limited must be skipped, and
+    the next-in-priority account returned instead.
+    """
+    from backend.services.switcher import get_next_account
+    from backend.cache import cache
+
+    a = _make_account_for_next(1, "exhausted@x.com", 0, threshold_pct=80.0)
+    b = _make_account_for_next(2, "fresh@x.com", 1, threshold_pct=80.0)
+
+    await cache.set_usage("exhausted@x.com", {
+        "rate_limited": True,
+        "five_hour": {"utilization": 0, "resets_at": "2099-01-01T00:00:00Z"},
+    })
+    await cache.set_usage("fresh@x.com", {
+        "five_hour": {"utilization": 10.0, "resets_at": "2099-01-01T00:00:00Z"},
+    })
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [a, b]
+    mock_db = AsyncMock()
+    mock_db.execute.return_value = mock_result
+
+    try:
+        result = await get_next_account("current@x.com", mock_db)
+        assert result is b
+    finally:
+        await cache.invalidate("exhausted@x.com")
+        await cache.invalidate("fresh@x.com")
+
+
+@pytest.mark.asyncio
+async def test_get_next_account_skips_candidate_over_threshold():
+    """A candidate whose cached utilization is >= its own threshold_pct must
+    be skipped (switching to it would immediately bounce back).
+    """
+    from backend.services.switcher import get_next_account
+    from backend.cache import cache
+
+    a = _make_account_for_next(1, "over@x.com", 0, threshold_pct=80.0)
+    b = _make_account_for_next(2, "under@x.com", 1, threshold_pct=80.0)
+
+    await cache.set_usage("over@x.com", {
+        "five_hour": {"utilization": 90.0, "resets_at": "2099-01-01T00:00:00Z"},
+    })
+    await cache.set_usage("under@x.com", {
+        "five_hour": {"utilization": 20.0, "resets_at": "2099-01-01T00:00:00Z"},
+    })
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [a, b]
+    mock_db = AsyncMock()
+    mock_db.execute.return_value = mock_result
+
+    try:
+        result = await get_next_account("current@x.com", mock_db)
+        assert result is b
+    finally:
+        await cache.invalidate("over@x.com")
+        await cache.invalidate("under@x.com")
+
+
+@pytest.mark.asyncio
+async def test_get_next_account_returns_none_when_all_exhausted():
+    """If every candidate is either rate-limited or over threshold, return None
+    so the caller can surface an error to the user."""
+    from backend.services.switcher import get_next_account
+    from backend.cache import cache
+
+    a = _make_account_for_next(1, "a-ex@x.com", 0, threshold_pct=80.0)
+    b = _make_account_for_next(2, "b-ex@x.com", 1, threshold_pct=80.0)
+
+    await cache.set_usage("a-ex@x.com", {
+        "rate_limited": True,
+        "five_hour": {"utilization": 0, "resets_at": "2099-01-01T00:00:00Z"},
+    })
+    await cache.set_usage("b-ex@x.com", {
+        "five_hour": {"utilization": 95.0, "resets_at": "2099-01-01T00:00:00Z"},
+    })
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [a, b]
+    mock_db = AsyncMock()
+    mock_db.execute.return_value = mock_result
+
+    try:
+        result = await get_next_account("current@x.com", mock_db)
+        assert result is None
+    finally:
+        await cache.invalidate("a-ex@x.com")
+        await cache.invalidate("b-ex@x.com")
+
+
+@pytest.mark.asyncio
+async def test_get_next_account_includes_unprobed_candidate():
+    """A candidate with no cached usage data yet must be kept in the pool
+    (benefit of the doubt for newly-added accounts)."""
+    from backend.services.switcher import get_next_account
+    from backend.cache import cache
+
+    a = _make_account_for_next(1, "new@x.com", 0, threshold_pct=80.0)
+    await cache.invalidate("new@x.com")
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [a]
+    mock_db = AsyncMock()
+    mock_db.execute.return_value = mock_result
+
+    result = await get_next_account("current@x.com", mock_db)
+    assert result is a
 
 
 @pytest.mark.asyncio

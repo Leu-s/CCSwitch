@@ -2,6 +2,7 @@ import { state } from "../state.js";
 import { qs } from "../utils.js";
 import { api, withLoading } from "../api.js";
 import { toast } from "../toast.js";
+import { updateAllExhaustedBanner } from "./accounts.js";
 
 export async function loadServiceStatus(silent = false) {
   try {
@@ -18,47 +19,26 @@ export async function loadServiceStatus(silent = false) {
 
 export function updateServiceUI(s) {
   const btn = qs("#service-toggle-btn");
-  const stateLabel = qs("#service-btn-state");
-  const flow = qs("#service-btn-flow");
-  const currentEl = qs("#service-btn-current");
-  const autoRow = qs("#sl-auto-row");
+  const stateLabel = qs("#master-switch-state");
 
   if (s.enabled) {
     btn.dataset.on = "true";
-    stateLabel.textContent = "Switch: ON";
-    if (s.active_email) { currentEl.textContent = s.active_email; flow.hidden = false; }
-    else { flow.hidden = true; }
-    if (autoRow) autoRow.style.display = "";
+    btn.setAttribute("aria-checked", "true");
+    stateLabel.textContent = "ON";
+    btn.title = s.active_email
+      ? `Auto-switch ON — active: ${s.active_email}. Click to turn off.`
+      : "Auto-switch ON. Click to turn off.";
   } else {
     btn.dataset.on = "false";
-    stateLabel.textContent = "Switch: OFF";
-    flow.hidden = true;
-    if (autoRow) autoRow.style.display = "none";
+    btn.setAttribute("aria-checked", "false");
+    stateLabel.textContent = "OFF";
+    btn.title = "Auto-switch OFF. Click to turn on.";
   }
-}
 
-export async function loadAutoSwitchSetting() {
-  try {
-    const settings = await api("/api/settings");
-    const entry = settings.find(s => s.key === "auto_switch_enabled");
-    const enabled = entry ? entry.value !== "false" : false;
-    const cb = qs("#auto-switch-cb");
-    if (cb) cb.checked = enabled;
-  } catch { /* initial load — ignore */ }
+  updateAllExhaustedBanner();
 }
 
 export function initServiceListeners() {
-  qs("#auto-switch-cb").addEventListener("change", async (e) => {
-    const val = e.target.checked ? "true" : "false";
-    try {
-      await api("/api/settings/auto_switch_enabled", { method: "PATCH", body: { value: val } });
-      toast(e.target.checked ? "Auto-switch on" : "Auto-switch off", null, "success", 2000);
-    } catch (err) {
-      e.target.checked = !e.target.checked;
-      toast("Update failed", err.message, "error");
-    }
-  });
-
   qs("#service-toggle-btn").addEventListener("click", async () => {
     const btn = qs("#service-toggle-btn");
     const isOn = btn.dataset.on === "true";
@@ -66,10 +46,10 @@ export function initServiceListeners() {
       try {
         if (isOn) {
           await api("/api/service/disable", { method: "POST" });
-          toast("Service disabled", "Auto-switching stopped", "success");
+          toast("Auto-switch off", "Service stopped", "success");
         } else {
           const r = await api("/api/service/enable", { method: "POST" });
-          toast("Service enabled", `Active: ${r.active_email}`, "success");
+          toast("Auto-switch on", `Active: ${r.active_email}`, "success");
         }
         await loadServiceStatus();
         document.dispatchEvent(new CustomEvent("app:reload-accounts"));

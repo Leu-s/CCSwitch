@@ -5,7 +5,8 @@ background.py now:
 - reads per-account threshold from account.threshold_pct instead of a global Setting
 - calls account_service.get_access_token_from_config_dir(account.config_dir)
 - calls account_service.get_active_email() (no args)
-- gates all work behind service_enabled setting (not auto_switch_enabled)
+- gates all work behind service_enabled setting — the old auto_switch_enabled
+  sub-flag has been removed; service_enabled now *is* the auto-switch decision
 - delegates auto-switch decisions to switcher.maybe_auto_switch, which also
   fires a tmux nudge (tmux_service.fire_nudge) after every successful switch
   when the user has opted in via settings.
@@ -44,12 +45,10 @@ async def test_poll_broadcasts_usage_updated_when_service_enabled():
     def execute_side_effect(query):
         result = MagicMock()
         call_count[0] += 1
-        if call_count[0] == 1:  # service_enabled setting
-            result.scalars.return_value.first.return_value = make_setting("true")
-        elif call_count[0] == 2:  # accounts query
+        if call_count[0] == 1:  # accounts query (first DB hit post-refactor)
             result.scalars.return_value.all.return_value = []
-        elif call_count[0] == 3:  # auto_switch_enabled setting
-            result.scalars.return_value.first.return_value = make_setting("false")
+        elif call_count[0] == 2:  # service_enabled inside maybe_auto_switch → "true" to proceed
+            result.scalars.return_value.first.return_value = make_setting("true")
         else:
             result.scalars.return_value.first.return_value = None
             result.scalars.return_value.all.return_value = []
@@ -57,7 +56,8 @@ async def test_poll_broadcasts_usage_updated_when_service_enabled():
 
     mock_db.execute = AsyncMock(side_effect=execute_side_effect)
 
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls:
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)
@@ -69,8 +69,11 @@ async def test_poll_broadcasts_usage_updated_when_service_enabled():
 
 
 @pytest.mark.asyncio
-async def test_poll_does_nothing_when_service_disabled():
-    """When service_enabled=false the function returns immediately without broadcasting."""
+async def test_poll_disabled_still_broadcasts_usage_but_skips_switch():
+    """When service_enabled=false, polling still runs so the dashboard's
+    usage bars stay live — only the auto-switch decision inside
+    maybe_auto_switch is skipped.
+    """
     from backend.background import poll_usage_and_switch
 
     mock_ws = AsyncMock()
@@ -86,7 +89,9 @@ async def test_poll_does_nothing_when_service_disabled():
     def execute_side_effect(query):
         result = MagicMock()
         call_count[0] += 1
-        if call_count[0] == 1:  # service_enabled setting
+        if call_count[0] == 1:  # accounts query
+            result.scalars.return_value.all.return_value = []
+        elif call_count[0] == 2:  # service_enabled inside maybe_auto_switch → "false" → return
             result.scalars.return_value.first.return_value = make_setting("false")
         else:
             result.scalars.return_value.first.return_value = None
@@ -95,12 +100,17 @@ async def test_poll_does_nothing_when_service_disabled():
 
     mock_db.execute = AsyncMock(side_effect=execute_side_effect)
 
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls:
+    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
+         patch("backend.services.switcher.perform_switch", new_callable=AsyncMock) as mock_switch:
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)
 
-    mock_ws.broadcast.assert_not_called()
+    # Polling always broadcasts usage_updated, even with zero accounts.
+    mock_ws.broadcast.assert_called_once()
+    assert mock_ws.broadcast.call_args[0][0]["type"] == "usage_updated"
+    # No auto-switch fires because service_enabled=false short-circuits maybe_auto_switch.
+    mock_switch.assert_not_called()
 
 
 # ── Race-condition fix: error path reads and writes cache inside one lock ──────
@@ -116,7 +126,14 @@ def _make_account(email, config_dir="/tmp/fake", priority=0):
 
 
 def _make_db_for_one_account(account):
-    """Return a mock async DB that yields one account and service_enabled=true."""
+    """Return a mock async DB that yields one account for the probe loop and
+    stops maybe_auto_switch cold via service_enabled=false on its own query.
+
+    Post-refactor call order (poll_usage_and_switch no longer gates on
+    service_enabled before polling — usage bars are always live):
+      1. accounts query   → [account]
+      2. service_enabled  → "false" (inside maybe_auto_switch, triggers early return)
+    """
     mock_db = AsyncMock()
 
     def make_setting(value):
@@ -129,11 +146,9 @@ def _make_db_for_one_account(account):
     def execute_side_effect(query):
         result = MagicMock()
         call_count[0] += 1
-        if call_count[0] == 1:          # service_enabled
-            result.scalars.return_value.first.return_value = make_setting("true")
-        elif call_count[0] == 2:        # accounts
+        if call_count[0] == 1:          # accounts
             result.scalars.return_value.all.return_value = [account]
-        elif call_count[0] == 3:        # auto_switch_enabled
+        elif call_count[0] == 2:        # service_enabled (inside maybe_auto_switch)
             result.scalars.return_value.first.return_value = make_setting("false")
         else:
             result.scalars.return_value.first.return_value = None
@@ -176,7 +191,8 @@ async def test_rate_limited_error_preserves_previous_data():
          patch("backend.background.ac.get_token_info", return_value={}), \
          patch("backend.background.ac.save_refreshed_token"), \
          patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, side_effect=rate_limit_exc):
+               new_callable=AsyncMock, side_effect=rate_limit_exc), \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)
@@ -222,7 +238,8 @@ async def test_probe_401_marks_account_stale():
          patch("backend.background.ac.get_token_info", return_value={}), \
          patch("backend.background.ac.save_refreshed_token"), \
          patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, side_effect=http_err):
+               new_callable=AsyncMock, side_effect=http_err), \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)
@@ -255,7 +272,8 @@ async def test_successful_probe_clears_stale_flag():
          patch("backend.background.ac.get_token_info", return_value={}), \
          patch("backend.background.ac.save_refreshed_token"), \
          patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, return_value={"five_hour": {"utilization": 10}}):
+               new_callable=AsyncMock, return_value={"five_hour": {"utilization": 10}}), \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)
@@ -291,7 +309,8 @@ async def test_generic_error_sets_error_entry():
          patch("backend.background.ac.get_token_info", return_value={}), \
          patch("backend.background.ac.save_refreshed_token"), \
          patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, side_effect=generic_exc):
+               new_callable=AsyncMock, side_effect=generic_exc), \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)
@@ -337,11 +356,9 @@ async def test_refresh_token_401_marks_permanently_expired():
     def execute_side_effect(query):
         result = MagicMock()
         call_count[0] += 1
-        if call_count[0] == 1:  # service_enabled
-            result.scalars.return_value.first.return_value = make_setting("true")
-        elif call_count[0] == 2:  # accounts query
+        if call_count[0] == 1:  # accounts query (first DB hit post-refactor)
             result.scalars.return_value.all.return_value = [mock_account]
-        elif call_count[0] == 3:  # auto_switch_enabled
+        elif call_count[0] == 2:  # service_enabled inside maybe_auto_switch → "false" → return
             result.scalars.return_value.first.return_value = make_setting("false")
         else:
             result.scalars.return_value.first.return_value = None
@@ -368,7 +385,8 @@ async def test_refresh_token_401_marks_permanently_expired():
                return_value="old-refresh-token"), \
          patch("backend.background.anthropic_api.refresh_access_token",
                new_callable=AsyncMock, side_effect=mock_401_error) as mock_refresh, \
-         patch("backend.background.ac.save_refreshed_token") as mock_save:
+         patch("backend.background.ac.save_refreshed_token") as mock_save, \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
 
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -392,19 +410,16 @@ async def test_refresh_token_401_marks_permanently_expired():
 # ── Auto-switch tests (_maybe_auto_switch exercised via poll_usage_and_switch) ──
 
 
-def _make_db_for_auto_switch(account, auto_switch_enabled="true",
-                             current_account=None, next_account=None,
+def _make_db_for_auto_switch(account, current_account=None, next_account=None,
                              tmux_nudge_enabled="false"):
     """Return a mock async DB for auto-switch scenarios.
 
-    DB execute calls in order:
-      1. service_enabled setting
-      2. accounts query (the one account to poll)
-      3. auto_switch_enabled setting (inside _maybe_auto_switch)
-      4. get_account_by_email (inside _maybe_auto_switch via aq)
-      5. get_next_account query (inside _maybe_auto_switch via sw)
-      6. (if switch fires) tmux_nudge_enabled setting
-      7. (if nudge enabled) tmux_nudge_message setting
+    Post-refactor call order:
+      1. accounts query (the one account to poll)
+      2. service_enabled (inside maybe_auto_switch) → "true"
+      3. get_account_by_email (current active account)
+      4. get_next_account
+      5. (if switch fires) tmux_nudge_enabled setting
     """
     mock_db = AsyncMock()
     mock_db.commit = AsyncMock()
@@ -419,17 +434,17 @@ def _make_db_for_auto_switch(account, auto_switch_enabled="true",
     def execute_side_effect(query):
         result = MagicMock()
         call_count[0] += 1
-        if call_count[0] == 1:          # service_enabled
-            result.scalars.return_value.first.return_value = make_setting("true")
-        elif call_count[0] == 2:        # accounts
+        if call_count[0] == 1:          # accounts
             result.scalars.return_value.all.return_value = [account]
-        elif call_count[0] == 3:        # auto_switch_enabled
-            result.scalars.return_value.first.return_value = make_setting(auto_switch_enabled)
-        elif call_count[0] == 4:        # get_account_by_email (current)
+        elif call_count[0] == 2:        # service_enabled (inside maybe_auto_switch)
+            result.scalars.return_value.first.return_value = make_setting("true")
+        elif call_count[0] == 3:        # get_account_by_email (current)
             result.scalars.return_value.first.return_value = current_account
-        elif call_count[0] == 5:        # get_next_account
-            result.scalars.return_value.first.return_value = next_account
-        elif call_count[0] == 6:        # tmux_nudge_enabled
+        elif call_count[0] == 4:        # get_next_account (uses .all() + iterate)
+            result.scalars.return_value.all.return_value = (
+                [next_account] if next_account is not None else []
+            )
+        elif call_count[0] == 5:        # tmux_nudge_enabled
             result.scalars.return_value.first.return_value = make_setting(tmux_nudge_enabled)
         else:
             result.scalars.return_value.first.return_value = None
@@ -464,7 +479,6 @@ async def test_auto_switch_triggered_when_threshold_exceeded():
     mock_ws = AsyncMock()
     mock_db = _make_db_for_auto_switch(
         account=active_account,
-        auto_switch_enabled="true",
         current_account=active_account,
         next_account=next_account,
     )
@@ -512,7 +526,6 @@ async def test_auto_switch_not_triggered_below_threshold():
     mock_ws = AsyncMock()
     mock_db = _make_db_for_auto_switch(
         account=active_account,
-        auto_switch_enabled="true",
         current_account=active_account,
     )
 
@@ -556,7 +569,6 @@ async def test_auto_switch_no_eligible_next_account():
     mock_ws = AsyncMock()
     mock_db = _make_db_for_auto_switch(
         account=active_account,
-        auto_switch_enabled="true",
         current_account=active_account,
         next_account=None,  # no eligible account
     )
@@ -585,36 +597,6 @@ async def test_auto_switch_no_eligible_next_account():
     assert "no eligible" in error_data["message"].lower()
 
     await cache.invalidate(active_email)
-
-
-@pytest.mark.asyncio
-async def test_auto_switch_disabled_skips_check():
-    """When auto_switch_enabled=false, _maybe_auto_switch exits early
-    without calling get_active_email."""
-    from backend.background import poll_usage_and_switch
-
-    active_email = "disabled-switch@example.com"
-    account = _make_account(active_email)
-    account.stale_reason = None
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)  # auto_switch_enabled=false
-
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_access_token_from_config_dir", return_value="tok"), \
-         patch("backend.background.ac.get_token_info", return_value={}), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, return_value={
-                   "five_hour": {"utilization": 50.0},
-               }), \
-         patch("backend.services.switcher.ac.get_active_email") as mock_get_active:
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    # get_active_email should NOT have been called because auto_switch is disabled
-    mock_get_active.assert_not_called()
 
 
 # ── Regression: stale accounts must NOT trigger refresh_access_token ─────────
@@ -669,7 +651,8 @@ async def test_stale_account_skips_token_refresh():
          patch("backend.background.anthropic_api.refresh_access_token",
                new_callable=AsyncMock) as mock_refresh, \
          patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, side_effect=probe_401):
+               new_callable=AsyncMock, side_effect=probe_401), \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)
@@ -722,9 +705,10 @@ async def test_non_stale_account_triggers_token_refresh():
          patch("backend.background.ac.save_refreshed_token"), \
          patch("backend.background.anthropic_api.refresh_access_token",
                new_callable=AsyncMock,
-               return_value={"access_token": "new-token", "expires_in": 3600}) as mock_refresh, \
+               return_value={"access_token": "new-token", "refresh_token": "new-rt", "expires_in": 3600}) as mock_refresh, \
          patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, side_effect=probe_401):
+               new_callable=AsyncMock, side_effect=probe_401), \
+         patch("backend.services.switcher.ac.get_active_email", return_value=None):
         mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
         mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         await poll_usage_and_switch(mock_ws)

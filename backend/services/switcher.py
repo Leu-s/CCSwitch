@@ -25,6 +25,25 @@ _switch_lock = asyncio.Lock()
 
 
 async def get_next_account(current_email: str, db: AsyncSession) -> Account | None:
+    """Pick the next enabled, non-stale account that also has available
+    rate-limit capacity.
+
+    Filtering order:
+      1. DB-level: enabled, not stale, not the current account.
+      2. Cache-level: skip candidates whose last probe was rate-limited
+         (``rate_limited=True``) or whose recorded five-hour utilization is
+         already at or above their own ``threshold_pct``.
+
+    Rationale: switching to an account that is itself already exhausted
+    just causes another switch on the next poll cycle — or worse, leaves
+    the user on a non-working account until the next poll.  Candidates
+    with NO cached usage data are kept in the pool (benefit of the doubt
+    for newly-added or never-probed accounts).
+
+    Falls back to ``None`` if every eligible candidate is exhausted; the
+    caller broadcasts an error so the user knows all accounts are
+    saturated instead of silently picking a bad one.
+    """
     result = await db.execute(
         select(Account)
         .where(Account.enabled == True)
@@ -32,7 +51,29 @@ async def get_next_account(current_email: str, db: AsyncSession) -> Account | No
         .where(Account.email != current_email)
         .order_by(Account.priority.asc(), Account.id.asc())
     )
-    return result.scalars().first()
+    candidates = result.scalars().all()
+
+    for candidate in candidates:
+        usage = await cache.get_usage_async(candidate.email)
+        if not usage:
+            # No probe data yet — keep it in the pool.
+            return candidate
+        if usage.get("rate_limited"):
+            logger.debug(
+                "Skipping %s: last probe rate-limited",
+                candidate.email,
+            )
+            continue
+        five_hour_pct = (usage.get("five_hour") or {}).get("utilization", 0) or 0
+        if five_hour_pct >= candidate.threshold_pct:
+            logger.debug(
+                "Skipping %s: cached usage %.1f%% ≥ threshold %.1f%%",
+                candidate.email, five_hour_pct, candidate.threshold_pct,
+            )
+            continue
+        return candidate
+
+    return None
 
 
 async def switch_if_active_disabled(
@@ -114,11 +155,14 @@ async def perform_switch(
 async def maybe_auto_switch(db, ws: WebSocketManager) -> None:
     """Check auto-switch threshold for the active account and switch if needed.
 
-    Moved from background.py to keep all auto-switching decision logic together
-    with get_next_account and perform_switch.
+    Called on every poll cycle regardless of ``service_enabled`` — but only
+    does work when ``service_enabled`` is true.  Usage polling is independent
+    of the switch master-toggle: the dashboard always shows live rate-limit
+    bars, and flipping the toggle only decides whether threshold / 429
+    signals will actually move credentials over to the next account.
     """
-    auto_enabled = await ss.get_bool("auto_switch_enabled", False, db)
-    if not auto_enabled:
+    service_enabled = await ss.get_bool("service_enabled", False, db)
+    if not service_enabled:
         return
 
     current_email = await asyncio.to_thread(ac.get_active_email)

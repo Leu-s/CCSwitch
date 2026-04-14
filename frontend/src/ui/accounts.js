@@ -37,14 +37,43 @@ export function renderAccounts() {
   const countEl = qs("#accounts-count");
   if (!state.accounts.length) {
     grid.innerHTML = "";
-    empty.style.display = "block";
+    empty.classList.remove("hidden");
     if (countEl) countEl.textContent = "";
+    updateAllExhaustedBanner();
     return;
   }
-  empty.style.display = "none";
+  empty.classList.add("hidden");
   if (countEl) countEl.textContent = state.accounts.length;
   grid.innerHTML = state.accounts.map((acc, i) => accountCardHtml(acc, i)).join("");
   attachCardEvents();
+  updateAllExhaustedBanner();
+}
+
+// Surface a banner when auto-switch is ON and every eligible account has
+// crossed its own threshold or is currently rate-limited — i.e. the
+// switcher has nowhere to move to and will stall on the next trigger.
+//
+// "Eligible" mirrors get_next_account() on the backend: enabled, not stale,
+// and only counted once it has usage data we can judge (accounts with no
+// cached probe yet are treated as available — benefit of the doubt).
+export function updateAllExhaustedBanner() {
+  const banner = qs("#all-exhausted-warn");
+  if (!banner) return;
+  if (!state.service?.enabled) { banner.classList.add("hidden"); return; }
+
+  const eligible = state.accounts.filter(a => a.enabled && !a.stale_reason);
+  if (eligible.length === 0) { banner.classList.add("hidden"); return; }
+
+  const allExhausted = eligible.every(acc => {
+    const usage = acc.usage || {};
+    if (usage.rate_limited) return true;
+    const pct = usage.five_hour_pct;
+    if (pct == null) return false; // no data yet — assume still available
+    const threshold = acc.threshold_pct ?? 95;
+    return pct >= threshold;
+  });
+
+  banner.classList.toggle("hidden", !allExhausted);
 }
 
 function usageBlockHtml(acc) {
@@ -66,7 +95,7 @@ function usageBlockHtml(acc) {
           <span class="usage-reset">${resetStr}${rel ? " · " + rel : ""}</span>
         </div>
         <div class="usage-bar"><div class="usage-fill ${cls}" style="width:${Math.min(100,pct)}%"></div></div>
-        <div style="display:flex;justify-content:flex-end;margin-top:1px"><span class="usage-pct ${cls}">${pct.toFixed(0)}%</span></div>
+        <div class="usage-pct-row"><span class="usage-pct ${cls}">${pct.toFixed(0)}%</span></div>
       </div>`;
   }
 
@@ -102,7 +131,7 @@ function accountCardHtml(acc, index) {
   const staleBanner = isStale ? `
     <div class="stale-banner" title="${escapeHtml(acc.stale_reason)}">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-      <span>${escapeHtml(acc.stale_reason)} — click "Re-login" in the Add Account flow.</span>
+      <span>${escapeHtml(acc.stale_reason)} — click <strong>Re-login</strong> below to re-authenticate.</span>
     </div>` : "";
 
   return `
@@ -120,7 +149,7 @@ function accountCardHtml(acc, index) {
             ${isDefault ? `<span class="default-pill">Default</span>` : ""}
             ${isStale ? `<span class="stale-pill" title="${escapeHtml(acc.stale_reason)}">Re-login needed</span>` : ""}
             <label class="toggle" title="Include in auto-switching">
-              <input type="checkbox" class="enabled-toggle" data-id="${acc.id}" ${acc.enabled?"checked":""} />
+              <input type="checkbox" class="enabled-toggle" data-id="${acc.id}" ${acc.enabled?"checked":""} aria-label="Include ${escapeHtml(acc.email)} in auto-switching" />
               <span class="track"></span>
               <span>Auto switch</span>
             </label>
@@ -146,9 +175,15 @@ function accountCardHtml(acc, index) {
           </div>
           <span class="threshold-value" id="tval-${acc.id}">${threshold.toFixed(0)}%</span>
         </div>
-        <button class="btn primary ${isActive?"outlined":""} switch-btn" data-id="${acc.id}" ${(isActive||isStale)?"disabled":""} title="${isStale?"Credentials invalid — re-login this account first":(!isActive && disabled ? "Manual switch — available even when excluded from auto-switching":"")}">
-          ${isActive ? "Currently active" : (isStale ? "Credentials invalid" : "Switch to")}
-        </button>
+        ${isStale
+          ? `<button class="btn primary relogin-btn" data-id="${acc.id}" data-email="${escapeHtml(acc.email)}" title="Open a terminal and re-authenticate this account">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+              Re-login
+            </button>`
+          : `<button class="btn primary ${isActive?"outlined":""} switch-btn" data-id="${acc.id}" ${isActive?"disabled":""} title="${(!isActive && disabled) ? "Manual switch — available even when excluded from auto-switching" : ""}">
+              ${isActive ? "Currently active" : "Switch to"}
+            </button>`
+        }
       </div>
     </article>`;
 }
@@ -226,13 +261,28 @@ function attachCardEvents() {
       try {
         await withLoading(btn, async () => {
           try {
-            await api(`/api/accounts/${id}/switch`, {method:"POST"});
-            toast("Switch requested", "Waiting for confirmation…", "success");
+            const r = await api(`/api/accounts/${id}/switch`, {method:"POST"});
+            if (r.already_active) {
+              toast("Already active", "This account is already the current one", "success", 2000);
+            } else {
+              toast("Switched", "Credentials updated", "success", 2000);
+            }
             ok = true;
           } catch(e) { toast("Switch failed", e.message, "error"); }
         });
         // WS account_switched event will trigger reloadAccounts + reloadService
       } finally { isSwitching = false; }
+    });
+  });
+
+  qsa(".relogin-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      // Custom event keeps accounts.js → login.js decoupled (mirrors the
+      // app:reload-accounts pattern used elsewhere).  login.js owns the
+      // modal state machine and listens for this event in initLoginListeners.
+      document.dispatchEvent(new CustomEvent("app:relogin-account", {
+        detail: { accountId: Number(btn.dataset.id), email: btn.dataset.email },
+      }));
     });
   });
 
@@ -268,8 +318,11 @@ function attachDragHandlers(card) {
     dragSrc = null; isDragging = false;
     if (pendingRenderAfterDrag) renderAccounts();
   });
-  card.addEventListener("dragover", e => {
+  card.addEventListener("dragenter", e => {
     if (!dragSrc || dragSrc === card) return; e.preventDefault();
+  });
+  card.addEventListener("dragover", e => {
+    if (!dragSrc || dragSrc === card) return; e.preventDefault(); e.dataTransfer.dropEffect = "move";
     const rect = card.getBoundingClientRect();
     const isAbove = e.clientY < rect.top + rect.height / 2;
     qsa(".account-card").forEach(c => c.classList.remove("drop-above","drop-below"));
@@ -316,13 +369,13 @@ export async function loadAccounts() {
     const data = await api("/api/accounts");
     if (gen !== _accountsGen) return;
     state.accounts = data;
-    if (errorEl) errorEl.style.display = "none";
+    if (errorEl) errorEl.classList.add("hidden");
     renderAccounts();
   } catch(e) {
     toast("Load accounts failed", e.message, "error");
-    if (errorEl) { errorEl.textContent = `Failed to load accounts: ${e.message}`; errorEl.style.display = "block"; }
+    if (errorEl) { errorEl.textContent = `Failed to load accounts: ${e.message}`; errorEl.classList.remove("hidden"); }
   } finally {
-    if (loadingEl) loadingEl.style.display = "none";
+    if (loadingEl) loadingEl.classList.add("hidden");
   }
 }
 
@@ -347,4 +400,5 @@ export function updateUsageLive(updates) {
       }
     }
   }
+  updateAllExhaustedBanner();
 }

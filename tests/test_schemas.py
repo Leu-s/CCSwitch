@@ -54,9 +54,9 @@ def test_account_create_removed():
 
 
 def test_setting_out():
-    s = SettingOut(key="auto_switch_enabled", value="true")
-    assert s.key == "auto_switch_enabled"
-    assert s.value == "true"
+    s = SettingOut(key="usage_poll_interval_seconds", value="300")
+    assert s.key == "usage_poll_interval_seconds"
+    assert s.value == "300"
 
 
 def test_switch_log_out():

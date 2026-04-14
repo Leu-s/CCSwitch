@@ -22,23 +22,23 @@ export async function loadCredentialTargets() {
     const data = await api("/api/credential-targets");
     _targets = data || [];
     render();
-    if (loadingEl) loadingEl.style.display = "none";
+    if (loadingEl) loadingEl.classList.add("hidden");
     if (countEl) {
       const enabled = _targets.filter(t => t.enabled).length;
       const total = _targets.length;
       countEl.textContent = `${enabled}/${total} enabled`;
     }
     if (!_targets.length) {
-      if (emptyEl) emptyEl.style.display = "";
-      if (listEl) listEl.style.display = "none";
+      if (emptyEl) emptyEl.classList.remove("hidden");
+      if (listEl) listEl.classList.add("hidden");
     } else {
-      if (emptyEl) emptyEl.style.display = "none";
-      if (listEl) listEl.style.display = "";
+      if (emptyEl) emptyEl.classList.add("hidden");
+      if (listEl) listEl.classList.remove("hidden");
     }
   } catch (e) {
-    if (loadingEl) loadingEl.style.display = "none";
+    if (loadingEl) loadingEl.classList.add("hidden");
     if (listEl) {
-      listEl.style.display = "";
+      listEl.classList.remove("hidden");
       listEl.innerHTML = `<div class="ct-error">Failed to load: ${escapeHtml(e.message || String(e))}</div>`;
     }
   }
@@ -57,7 +57,7 @@ function render() {
   if (bannerEl) {
     const anyEnabled = _targets.some(t => t.enabled);
     const anyExisting = _targets.some(t => t.exists);
-    bannerEl.style.display = !anyEnabled && anyExisting ? "" : "none";
+    bannerEl.classList.toggle("hidden", anyEnabled || !anyExisting);
   }
 }
 
@@ -73,7 +73,7 @@ function renderItem(t) {
   return `
     <div class="ct-item ${exists ? "" : "missing"}" data-canonical="${escapeHtml(canonical)}">
       <label class="toggle ct-toggle" title="${exists ? "Mirror oauthAccount on every switch" : "File missing — cannot enable"}">
-        <input type="checkbox" class="ct-cb" ${checkedAttr} ${disabledAttr} />
+        <input type="checkbox" class="ct-cb" ${checkedAttr} ${disabledAttr} aria-label="Mirror oauthAccount into ${escapeHtml(canonical)}" />
         <span class="track"></span>
       </label>
       <div class="ct-body">

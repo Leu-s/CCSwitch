@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 # have a row to read (avoids relying on in-code defaults only).
 SETTING_DEFAULTS: dict[str, str] = {
     "service_enabled": "false",
-    "auto_switch_enabled": "false",
     "usage_poll_interval_seconds": "300",
     # tmux nudge — when enabled, after every account switch the background
     # loop scans every tmux pane and sends `tmux_nudge_message` to any pane

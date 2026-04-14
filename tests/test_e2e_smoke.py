@@ -84,7 +84,6 @@ def test_start_login(client):
     """POST /api/accounts/start-login returns session metadata."""
     mock_info = {
         "session_id": "abc12345",
-        "pane_target": "claude-multi:1.0",
         "config_dir": "/tmp/fake-account-abc12345",
         "instructions": "Authenticate in the terminal below. After login completes, click 'Verify & Save'.",
     }
@@ -163,13 +162,14 @@ def test_settings_list(client):
     resp = client.get("/api/settings")
     assert resp.status_code == 200
     keys = {s["key"] for s in resp.json()}
-    assert "auto_switch_enabled" in keys
+    assert "usage_poll_interval_seconds" in keys
+    assert "auto_switch_enabled" not in keys
 
 
 def test_settings_patch(client):
-    resp = client.patch("/api/settings/auto_switch_enabled", json={"value": "false"})
+    resp = client.patch("/api/settings/tmux_nudge_message", json={"value": "go"})
     assert resp.status_code == 200
-    assert resp.json()["value"] == "false"
+    assert resp.json()["value"] == "go"
 
 
 # ── Switch log ─────────────────────────────────────────────────────────────────

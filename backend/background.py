@@ -70,8 +70,10 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
                                 if expires_in
                                 else None
                             )
+                            new_refresh = resp.get("refresh_token")
                             await asyncio.to_thread(
-                                ac.save_refreshed_token, account.config_dir, new_token, new_expires_at_ms
+                                ac.save_refreshed_token, account.config_dir, new_token,
+                                new_expires_at_ms, new_refresh,
                             )
                             token = new_token
                             logger.info("Refreshed access token for %s", account.email)
@@ -191,12 +193,10 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
 
 async def poll_usage_and_switch(ws: WebSocketManager) -> None:
     async with AsyncSessionLocal() as db:
-        # ── Check service status FIRST ────────────────────────────────────────
-        service_enabled = await ss.get_bool("service_enabled", False, db)
-        if not service_enabled:
-            return  # service is OFF — exit immediately, no polling, no broadcast
-
-        # ── Poll usage for every account ──────────────────────────────────────
+        # Polling always runs — the dashboard's usage bars must reflect live
+        # state regardless of whether auto-switching is on.  The
+        # ``service_enabled`` flag gates only the auto-switch decision, which
+        # is checked inside ``maybe_auto_switch`` below.
         accounts_result = await db.execute(select(Account))
         accounts = accounts_result.scalars().all()
 

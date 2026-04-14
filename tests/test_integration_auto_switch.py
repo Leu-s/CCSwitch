@@ -21,14 +21,16 @@ def _make_account(id_, email, priority, threshold_pct=80.0, config_dir="/tmp/fak
 
 
 def _make_db(accounts, active_email, next_account):
-    """Build a mock DB session that handles the full query sequence:
-    1. service_enabled
-    2. accounts list
-    3. auto_switch_enabled
-    4. get_account_by_email (active account lookup)
-    5. get_next_account (next eligible)
-    6. enabled credential targets (inside perform_switch)
-    7. get_account_by_email (from-account in perform_switch)
+    """Build a mock DB session for the full poll → maybe_auto_switch chain.
+
+    Post-refactor call order (polling is now always-on; the master-switch
+    only gates the auto-switch decision inside maybe_auto_switch):
+      1. accounts list
+      2. service_enabled (inside maybe_auto_switch) → "true"
+      3. get_account_by_email (active account lookup)
+      4. get_next_account (next eligible)
+      5. enabled credential targets (inside perform_switch — patched away)
+      6. get_account_by_email (from-account in perform_switch — patched away)
     """
     mock_db = AsyncMock()
 
@@ -44,15 +46,13 @@ def _make_db(accounts, active_email, next_account):
         result = MagicMock()
         call_count[0] += 1
         n = call_count[0]
-        if n == 1:  # service_enabled
-            result.scalars.return_value.first.return_value = make_setting("true")
-        elif n == 2:  # accounts
+        if n == 1:  # accounts
             result.scalars.return_value.all.return_value = list(accounts)
-        elif n == 3:  # auto_switch_enabled
+        elif n == 2:  # service_enabled (inside maybe_auto_switch)
             result.scalars.return_value.first.return_value = make_setting("true")
-        elif n == 4:  # get_account_by_email (active)
+        elif n == 3:  # get_account_by_email (active)
             result.scalars.return_value.first.return_value = by_email.get(active_email)
-        elif n == 5:  # get_next_account
+        elif n == 4:  # get_next_account
             result.scalars.return_value.first.return_value = next_account
         else:
             result.scalars.return_value.first.return_value = None

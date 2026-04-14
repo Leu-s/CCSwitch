@@ -4,6 +4,15 @@ import { qs, qsa, escapeHtml, fmtTime } from "../utils.js";
 import { api } from "../api.js";
 import { toast } from "../toast.js";
 
+// Each log row arrives from the backend already resolved:
+//   { id, from_account_id, to_account_id, from_email, to_email, reason, triggered_at }
+// Emails are nullable only when the referenced account was deleted after
+// the switch was logged — we fall back to "#<id>" in that case so the row
+// still renders instead of disappearing.  We DO NOT look emails up from
+// state.accounts, because that map is populated by a parallel fetch and
+// can race with the WS-driven log reload, which is exactly what used to
+// leave "from → to" showing raw IDs until the user reloaded the page.
+
 // Timestamp-refresh interval — stored so it can be cleared and never leaks
 // a second copy if initLogListeners() were ever called more than once.
 let _tsInterval = null;
@@ -48,32 +57,32 @@ function renderSwitchLog() {
 
   if (!state.logTotal) {
     list.innerHTML = "";
-    empty.style.display = "flex";
-    pagination.style.display = "none";
-    badge.style.display = "none";
-    lastEl.style.display = "none";
+    empty.classList.remove("hidden");
+    pagination.classList.add("hidden");
+    badge.classList.add("hidden");
+    lastEl.classList.add("hidden");
     return;
   }
 
   badge.textContent = state.logTotal;
-  badge.style.display = "";
+  badge.classList.remove("hidden");
   if (state.switchLog.length > 0) {
     lastEl.textContent = `last · ${relTime(state.switchLog[0].triggered_at)}`;
-    lastEl.style.display = "";
+    lastEl.classList.remove("hidden");
   }
 
-  empty.style.display = "none";
+  empty.classList.add("hidden");
   const totalPages = Math.ceil(state.logTotal / LOG_PER_PAGE);
-  pagination.style.display = totalPages > 1 ? "flex" : "none";
+  pagination.classList.toggle("hidden", totalPages <= 1);
   qs("#log-page-info").textContent = `${state.logPage + 1} / ${totalPages}`;
   qs("#log-prev-btn").disabled = state.logPage === 0;
   qs("#log-next-btn").disabled = state.logPage >= totalPages - 1;
 
-  const byId = new Map(state.accounts.map(a => [a.id, a.email]));
-
   list.innerHTML = state.switchLog.map((row, i) => {
-    const fromEmail = row.from_account_id ? (byId.get(row.from_account_id) || `#${row.from_account_id}`) : null;
-    const toEmail = byId.get(row.to_account_id) || `#${row.to_account_id}`;
+    const fromEmail = row.from_account_id
+      ? (row.from_email || `#${row.from_account_id}`)
+      : null;
+    const toEmail = row.to_email || `#${row.to_account_id}`;
     const reason = String(row.reason || "").toLowerCase();
     const rm = getReasonMeta(reason);
     return `<div class="sl-item sl-item--${rm.cls}" style="animation-delay:${i * 25}ms">
@@ -85,7 +94,6 @@ function renderSwitchLog() {
         ${fromEmail
           ? `<span class="sl-email" title="${escapeHtml(fromEmail)}">${escapeHtml(fromEmail)}</span>`
           : `<span class="sl-email sl-email--none">—</span>`}
-        <span class="sl-route-sep">›</span>
         <span class="sl-email sl-email--to" title="${escapeHtml(toEmail)}">${escapeHtml(toEmail)}</span>
       </div>
     </div>`;

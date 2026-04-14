@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>CCSwitch</title>
+<link rel="icon" type="image/svg+xml" href="src/favicon.svg" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -17,25 +18,26 @@
 <header class="header">
   <div class="header-inner">
     <div class="title">
-      <svg class="bolt" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/></svg>
-      CCSwitch
+      <span class="title-text"><span class="title-accent">CC</span>Switch</span>
     </div>
 
-    <button class="service-btn" id="service-toggle-btn" data-on="false" title="Toggle auto-switching. Manual switch is always available via each card.">
-      <span class="service-dot"></span>
-      <span class="service-btn-state" id="service-btn-state">Switch: OFF</span>
-      <span class="service-btn-flow" id="service-btn-flow" hidden>
-        <span class="service-btn-current" id="service-btn-current"></span>
+    <button class="master-switch" id="service-toggle-btn" data-on="false" type="button" role="switch" aria-checked="false" title="Click to toggle auto-switching">
+      <span class="master-switch-track" aria-hidden="true">
+        <span class="master-switch-thumb"></span>
+      </span>
+      <span class="master-switch-label">
+        Auto-switch <span class="master-switch-state" id="master-switch-state">OFF</span>
       </span>
     </button>
 
     <div class="spacer"></div>
 
-    <button class="icon-btn" id="settings-btn" aria-label="Settings" title="Settings">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+    <button class="icon-btn" id="nav-toggle-btn" aria-label="Settings" title="Settings">
+      <svg class="nav-icon-settings" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+      <svg class="nav-icon-home hidden" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l9-9 9 9"></path><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"></path></svg>
     </button>
     <button class="theme-btn" id="theme-btn" aria-label="Toggle theme"></button>
-    <span class="ws-dot" id="ws-dot" title="WebSocket connection"></span>
+
   </div>
 </header>
 
@@ -56,7 +58,7 @@
           </button>
         </div>
         <!-- ── Shell setup warning (hidden when configured) ────────────────── -->
-        <div class="shell-warn" id="shell-warn" style="display:none;">
+        <div class="shell-warn hidden" id="shell-warn">
             <div class="shell-warn-header">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                 <span>New terminals may use the wrong account</span>
@@ -73,12 +75,20 @@
                 </div>
             </div>
         </div>
+        <!-- ── All-exhausted warning (shown only while auto-switch is ON) ── -->
+        <div class="exhausted-warn hidden" id="all-exhausted-warn" role="alert">
+          <svg class="exhausted-warn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <div class="exhausted-warn-text">
+            <strong>All accounts have reached their limit.</strong>
+            <span>Auto-switch has nowhere to go — every enabled account is rate-limited or above its threshold. Wait for a reset window, raise a threshold, or add another account.</span>
+          </div>
+        </div>
         <div id="accounts-loading" class="empty-state">Loading accounts…</div>
         <div id="accounts-grid" class="accounts-grid"></div>
-        <div id="accounts-empty" class="empty-state" style="display:none;">
+        <div id="accounts-empty" class="empty-state hidden">
           No accounts yet — click "Add Account" above to authenticate one.
         </div>
-        <div id="accounts-error" class="empty-state" style="display:none;color:#fca5a5;"></div>
+        <div id="accounts-error" class="empty-state empty-state--error hidden"></div>
       </div>
 
       <!-- ── Sidebar: Switch Log ── -->
@@ -86,19 +96,12 @@
         <div class="sl-header">
           <div class="sl-title-row">
             <span class="sl-title">Switch Log</span>
-            <span class="sl-badge" id="sl-badge" style="display:none;"></span>
+            <span class="sl-badge hidden" id="sl-badge"></span>
           </div>
-          <div class="sl-auto-row" id="sl-auto-row" style="display:none;">
-            <span class="sl-auto-label">Auto-switch</span>
-            <label class="toggle" title="Automatically switch to the next account when the usage threshold is reached">
-              <input type="checkbox" id="auto-switch-cb" />
-              <span class="track"></span>
-            </label>
-          </div>
-          <div class="sl-last" id="sl-last" style="display:none;"></div>
+          <div class="sl-last hidden" id="sl-last"></div>
         </div>
         <div id="switch-log-list" class="sl-feed"></div>
-        <div id="switch-log-pagination" class="sl-pg" style="display:none;">
+        <div id="switch-log-pagination" class="sl-pg hidden">
           <button class="sl-pg-btn" id="log-prev-btn" aria-label="Previous page">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
           </button>
@@ -107,7 +110,7 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
           </button>
         </div>
-        <div id="switch-log-empty" class="sl-empty" style="display:none;">
+        <div id="switch-log-empty" class="sl-empty hidden">
           <svg class="sl-empty-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 16l4-4-4-4"/><path d="M3 12h18"/><path d="M7 8l-4 4 4 4"/></svg>
           <p class="sl-empty-text">No switches yet.<br>Events will appear here automatically.</p>
         </div>
@@ -120,10 +123,6 @@
   <section class="tab-panel" id="tab-settings" role="tabpanel" hidden>
     <div class="settings-layout">
       <div class="settings-header">
-        <button class="back-btn" id="settings-back-btn" aria-label="Back to accounts">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
-          Back
-        </button>
         <h1 class="settings-title">Settings</h1>
       </div>
 
@@ -148,13 +147,13 @@
             active-pointer file — nothing else on disk is touched.
           </p>
         </div>
-        <div class="ct-warn" id="ct-warn" style="display:none;">
+        <div class="ct-warn hidden" id="ct-warn">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           <span>No targets enabled — switches won't update any <code>.claude.json</code> file outside the dashboard's own pointer. Tick at least one below.</span>
         </div>
-        <div id="ct-loading" class="empty-state" style="padding:10px 14px;">Scanning…</div>
-        <div id="ct-list" class="ct-list" style="display:none;"></div>
-        <div id="ct-empty" class="empty-state" style="display:none;padding:10px 14px;">
+        <div id="ct-loading" class="empty-state">Scanning…</div>
+        <div id="ct-list" class="ct-list hidden"></div>
+        <div id="ct-empty" class="empty-state hidden">
           No <code>.claude.json</code> files found on this machine.
         </div>
       </div>
@@ -163,7 +162,7 @@
       <div class="tnudge-panel">
         <div class="tnudge-header">
           <label class="toggle tnudge-toggle" title="Wake up tmux Claude Code sessions after every account switch">
-            <input type="checkbox" id="tnudge-enabled-cb" />
+            <input type="checkbox" id="tnudge-enabled-cb" aria-label="Wake tmux sessions with a message after every switch" />
             <span class="track"></span>
           </label>
           <span class="tnudge-title">Wake tmux sessions with a message</span>
@@ -192,7 +191,7 @@
 <div class="modal-backdrop" id="add-modal">
   <div class="modal">
     <div class="modal-header">
-      <div class="modal-title">Add Account</div>
+      <div class="modal-title" id="add-modal-title">Add Account</div>
       <button class="modal-close" id="add-modal-close" aria-label="Close">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
       </button>
@@ -202,22 +201,21 @@
       <div id="add-step-1" class="add-step">
         <div class="add-step-intro">
           <div class="step-icon">🔑</div>
-          <p>A new terminal will open with a fresh isolated Claude session.</p>
-          <p style="color:var(--text-mute);font-size:13px;">Log in with your Claude account there, then click <strong>Verify &amp; Save</strong>.</p>
+          <p id="add-step-1-text">A new terminal will open with a fresh isolated Claude session.</p>
+          <p class="add-step-hint" id="add-step-1-hint">Log in with your Claude account there, then click <strong>Verify &amp; Save</strong>.</p>
         </div>
-        <div style="display:flex;justify-content:center;padding-top:8px;">
-          <button class="btn primary" id="open-terminal-btn" style="flex:none;padding:10px 28px;font-size:14px;">
+        <div class="add-step-cta-row">
+          <button class="btn primary add-step-cta" id="open-terminal-btn">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
-            Open Login Terminal
+            <span id="open-terminal-btn-label">Open Login Terminal</span>
           </button>
         </div>
       </div>
 
       <!-- Step 2: Terminal -->
-      <div id="add-step-2" class="add-step" style="display:none;">
+      <div id="add-step-2" class="add-step hidden">
         <div class="add-terminal-wrap">
           <div class="add-terminal-bar">
-            <span class="add-terminal-target" id="add-term-target">—</span>
             <span class="add-terminal-live">live</span>
           </div>
           <div class="add-terminal-output" id="add-term-output">(waiting for output…)</div>
@@ -231,18 +229,18 @@
           <button class="btn" id="add-cancel-btn">Cancel</button>
           <button class="btn primary" id="add-verify-btn">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
-            Verify &amp; Save
+            <span id="add-verify-btn-label">Verify &amp; Save</span>
           </button>
         </div>
       </div>
 
       <!-- Step 3: Success -->
-      <div id="add-step-3" class="add-step" style="display:none;">
+      <div id="add-step-3" class="add-step hidden">
         <div class="add-success">
           <div class="check">✓</div>
-          <p>Account added successfully</p>
-          <p style="font-size:15px;font-weight:700;color:var(--text);" id="add-result-email"></p>
-          <button class="btn primary" id="add-done-btn" style="flex:none;padding:10px 28px;">Done</button>
+          <p id="add-step-3-text">Account added successfully</p>
+          <p class="add-result-email" id="add-result-email"></p>
+          <button class="btn primary add-step-cta" id="add-done-btn">Done</button>
         </div>
       </div>
     </div>
