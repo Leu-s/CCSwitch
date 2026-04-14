@@ -121,17 +121,35 @@ def test_accounts_list_with_item(client):
     assert "smoke@test.com" in emails
 
 
-def test_verify_login_duplicate_returns_success(client):
-    """Verifying the same login session again should succeed (idempotent)."""
+def test_verify_login_duplicate_returns_already_exists_true(client):
+    """Verifying a login for an already-enrolled email must return
+    ``success=True`` AND ``already_exists=True`` so the frontend can warn
+    the user instead of showing an "Account added successfully" screen
+    for a slot that was never created.  The relied-on contract: email
+    UNIQUE constraint in save_verified_account returns None → router
+    sets already_exists=True, success stays True (verification itself
+    didn't fail, just no new row)."""
     mock_result = {
         "success": True,
-        "email": "smoke@test.com",
-        "config_dir": "/tmp/fake-account-abc12345",
+        "email": "smoke@test.com",  # seeded by the earlier test in this file
+        "config_dir": "/tmp/fake-account-abc12345-dup",
     }
-    with patch("backend.services.login_session_service.verify_login_session", return_value=mock_result):
-        resp = client.post("/api/accounts/verify-login?session_id=abc12345")
+    with patch("backend.services.login_session_service.verify_login_session", return_value=mock_result), \
+         patch("backend.services.login_session_service.cleanup_login_session") as mock_cleanup:
+        resp = client.post("/api/accounts/verify-login?session_id=abc12345dup")
     assert resp.status_code == 200
-    assert resp.json()["success"] is True
+    body = resp.json()
+    assert body["success"] is True, (
+        "verification itself did not fail — backend must still report success"
+    )
+    assert body.get("already_exists") is True, (
+        "duplicate email must set already_exists=True so the frontend can "
+        "warn instead of rendering a fake 'Account added' success screen"
+    )
+    # The router should also clean up the abandoned session dir when the
+    # duplicate is detected — otherwise a leftover account-* dir accumulates
+    # per retry on an existing email.
+    mock_cleanup.assert_called_once_with("abc12345dup")
 
 
 def test_cancel_login(client):

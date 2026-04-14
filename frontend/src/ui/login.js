@@ -159,7 +159,24 @@ export function initLoginListeners() {
           ? `/api/accounts/${_reloginTarget.accountId}/relogin/verify?session_id=${sid}`
           : `/api/accounts/verify-login?session_id=${sid}`;
         const result = await api(endpoint, {method:"POST"});
-        if (result.success) {
+        if (result.success && result.already_exists) {
+          // Backend accepted the login but the email already matches an
+          // existing slot (UNIQUE email constraint).  DO NOT show the
+          // "Account added successfully" screen — the user would think
+          // they got a new slot when nothing was persisted.  Warn and
+          // close the modal; reload so any state changes are reflected.
+          clearInterval(addTermInterval); addTermInterval = null;
+          loginSession = null;
+          toast(
+            "Already enrolled",
+            `${result.email || "This account"} is already in the dashboard — no new slot was created.`,
+            "warning",
+            5000,
+          );
+          closeAddModal();
+          document.dispatchEvent(new CustomEvent("app:reload-accounts"));
+          document.dispatchEvent(new CustomEvent("app:reload-service"));
+        } else if (result.success) {
           clearInterval(addTermInterval); addTermInterval = null;
           qs("#add-result-email").textContent = result.email || "Unknown email";
           qs("#add-step-2").classList.add("hidden");
