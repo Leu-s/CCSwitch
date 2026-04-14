@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -7,9 +8,12 @@ from sqlalchemy import select
 from ..database import get_db
 from ..models import Setting
 from ..schemas import SettingOut, SettingUpdate, ShellStatus, SetupShellResult
-from ..services.settings_service import ensure_defaults
+from ..services.settings_service import ensure_defaults, get_int_or_none
 from ..services import account_service as ac
+from ..services import account_queries as aq
 from ..config import settings as cfg
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -59,10 +63,11 @@ async def shell_status():
 
 
 @router.post("/setup-shell", response_model=SetupShellResult)
-async def setup_shell():
+async def setup_shell(db: AsyncSession = Depends(get_db)):
     """
     Append the CLAUDE_CONFIG_DIR one-liner to ~/.zshrc and/or ~/.bashrc
-    if not already present. Returns per-file status.
+    if not already present.  Also seeds ~/.ccswitch/active if the pointer
+    file does not exist yet, so the shell snippet works immediately.
     """
     snippet_path = _shell_snippet_path()
     one_liner = (
@@ -91,7 +96,29 @@ async def setup_shell():
                 results[rc_name] = f"error: {e.strerror}"
         return results
 
-    return {"results": await asyncio.to_thread(_apply)}
+    results = await asyncio.to_thread(_apply)
+
+    # Seed ~/.ccswitch/active if it doesn't exist yet so the shell snippet
+    # works immediately without waiting for the first account switch.
+    if not os.path.isfile(ac.active_dir_pointer_path()):
+        default_id = await get_int_or_none("default_account_id", db)
+        if default_id:
+            acc = await aq.get_account_by_id(default_id, db)
+        else:
+            acc = None
+        if not acc:
+            enabled = await aq.get_enabled_accounts(db)
+            acc = enabled[0] if enabled else None
+        if not acc:
+            all_accs = await aq.get_all_accounts(db)
+            acc = all_accs[0] if all_accs else None
+        if acc:
+            try:
+                await asyncio.to_thread(ac.write_active_config_dir, acc.config_dir)
+            except Exception:
+                logger.warning("Failed to seed active pointer during shell setup")
+
+    return {"results": results}
 
 
 @router.patch("/{key}", response_model=SettingOut)

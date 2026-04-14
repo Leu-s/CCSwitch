@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,6 +81,17 @@ async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
     config_dir = result["config_dir"]
 
     saved = await aq.save_verified_account(email, config_dir, settings.default_account_threshold_pct, db)
+
+    # Seed ~/.ccswitch/active if no pointer exists yet so the shell snippet
+    # works immediately without waiting for the first manual/auto switch.
+    # Runs for both new and already-existing accounts — the pointer may have
+    # been cleared (e.g. last account deleted then re-added).
+    if not os.path.isfile(ac.active_dir_pointer_path()):
+        try:
+            await asyncio.to_thread(ac.write_active_config_dir, config_dir)
+        except Exception:
+            logger.warning("Failed to seed active pointer for %s", email)
+
     if saved is None:
         await asyncio.to_thread(ls.cleanup_login_session, session_id)
         return LoginVerifyResult(success=True, email=email, already_exists=True)

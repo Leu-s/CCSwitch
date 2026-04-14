@@ -29,6 +29,13 @@ _BACKOFF_INITIAL = settings.rate_limit_backoff_initial
 _BACKOFF_MAX = settings.rate_limit_backoff_max
 
 
+class _RefreshTerminal(Exception):
+    """Raised when a refresh attempt returns a terminal status (400/401),
+    meaning the stored refresh_token is dead.  Skips the subsequent probe
+    (which would just fail with 401 and overwrite the precise stale_reason
+    with a generic one)."""
+
+
 async def _process_single_account(account: Account, db) -> tuple[dict, "str | None"]:
     """Fetch token, optionally refresh, probe usage, and update caches for one account.
 
@@ -78,16 +85,27 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
                             token = new_token
                             logger.info("Refreshed access token for %s", account.email)
             except httpx.HTTPStatusError as refresh_http_err:
-                if refresh_http_err.response.status_code == 401:
+                status = refresh_http_err.response.status_code
+                # Anthropic returns 400 when the refresh_token has been
+                # rotated or invalidated (e.g. after a crash-loop race where
+                # our stored copy fell behind the server's current record),
+                # and 401 when the token is explicitly revoked.  Both are
+                # terminal — the probe would just fail with 401 — so we
+                # short-circuit by raising a marker exception that skips the
+                # probe and preserves the precise stale_reason.
+                if status in (400, 401):
+                    reason_detail = "revoked" if status == 401 else "rejected (400)"
                     logger.error(
-                        "Refresh token revoked for %s — re-login required.",
-                        account.email,
+                        "Refresh token %s for %s — re-login required.",
+                        reason_detail, account.email,
                     )
-                    new_stale_reason = "Refresh token revoked — re-login required"
+                    new_stale_reason = f"Refresh token {reason_detail} — re-login required"
                     # Mark token as permanently expired so we don't retry on every poll.
                     await asyncio.to_thread(ac.save_refreshed_token, account.config_dir, token, expires_at=1)
-                else:
-                    logger.warning("Token refresh HTTP error for %s: %s", account.email, refresh_http_err)
+                    raise _RefreshTerminal()
+                logger.warning("Token refresh HTTP error for %s: %s", account.email, refresh_http_err)
+            except _RefreshTerminal:
+                raise
             except Exception as refresh_err:
                 logger.warning("Token refresh failed for %s: %s", account.email, refresh_err)
 
@@ -150,6 +168,25 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
             "email": account.email,
             "usage": flat_dict,
             "error": None,
+        }
+    except _RefreshTerminal:
+        # Refresh returned a terminal 400/401 — skip probe, new_stale_reason
+        # is already set to the precise reason.  Return a cache-backed usage
+        # entry so the UI shows the error inline.
+        err_str = new_stale_reason or "Refresh token invalid"
+        new_entry, err_str = await cache.set_usage_error(account.email, err_str, False)
+        token_info = await cache.get_token_info_async(account.email) or {}
+        try:
+            flat = build_usage(new_entry, token_info)
+            flat_dict = flat.model_dump() if flat else {"error": err_str}
+        except Exception as _bu_err:
+            logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
+            flat_dict = {"error": err_str}
+        usage_entry = {
+            "id": account.id,
+            "email": account.email,
+            "usage": flat_dict,
+            "error": err_str,
         }
     except Exception as e:
         err_str = str(e)
