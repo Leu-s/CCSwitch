@@ -52,11 +52,15 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
         # it means "CCSwitch is refusing to refresh this because Claude
         # Code CLI owns the refresh lifecycle right now".  If the account
         # is not active, CCSwitch owns the refresh and there is no such
-        # wait.  Defense-in-depth gate: perform_switch already clears the
-        # flag on both sides of a switch, but race windows around that
-        # clear (e.g. a poll-cycle interleaved between the switch and
-        # the next GET /api/accounts) can still leak a stale True.
-        waiting = is_active and await cache.is_waiting_async(acc.email)
+        # wait.  Stale also wins over waiting: a stale account needs
+        # re-login, not a refresh, so the waiting banner must never render
+        # alongside the stale banner.  Matches build_ws_snapshot and the
+        # frontend's isWaiting = !isStale && … derivation.  Defense-in-depth
+        # gate: perform_switch already clears the flag on both sides of a
+        # switch, but race windows around that clear (e.g. a poll-cycle
+        # interleaved between the switch and the next GET /api/accounts)
+        # can still leak a stale True.
+        waiting = is_active and not acc.stale_reason and await cache.is_waiting_async(acc.email)
 
         out.append(AccountWithUsage(
             **AccountOut.model_validate(acc).model_dump(),
@@ -107,6 +111,21 @@ async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
     if saved is None:
         await asyncio.to_thread(ls.cleanup_login_session, session_id)
         return LoginVerifyResult(success=True, email=email, already_exists=True)
+
+    # Broadcast so other tabs pick up the new slot without waiting for the
+    # next poll cycle.  ``updateUsageLive`` cannot surface a brand-new
+    # account (its early ``continue`` on missing rows drops unknown emails),
+    # so this dedicated event prompts every connected tab to re-load
+    # /api/accounts.  A broadcast failure must not surface as a 500 — the
+    # DB row is already persisted and the initiating tab already knows.
+    try:
+        await ws_manager.broadcast({
+            "type": "account_added",
+            "id": saved.id,
+            "email": email,
+        })
+    except Exception:
+        logger.warning("Failed to broadcast account_added for %s", email)
 
     return LoginVerifyResult(success=True, email=email)
 
@@ -261,6 +280,14 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     # linger in memory forever.
     await cache.invalidate(account.email)
 
+    # Drop the per-config-dir force-refresh lock so ``_force_refresh_locks``
+    # does not grow unbounded across account churn.  Each isolated account
+    # dir has a unique UUID so a recreated account would get a fresh lock
+    # anyway; safe to pop because the handler is single-tasked and no caller
+    # can still be holding this lock (the row is already deleted, so no
+    # subsequent force_refresh can find the account).
+    ac._force_refresh_locks.pop(account.config_dir, None)
+
     # Notify all connected clients so their UI removes the card immediately.
     # The account is already deleted at this point, so a broadcast failure must
     # not surface as a 500 — the deletion itself succeeded.
@@ -315,7 +342,18 @@ async def _broadcast_single_account(account: Account) -> None:
         "usage": flat_dict,
         "error": account.stale_reason,
         "stale_reason": account.stale_reason,
-        "waiting_for_cli": is_active and await cache.is_waiting_async(account.email),
+        # Stale wins over waiting (matches list_accounts + build_ws_snapshot
+        # + the frontend isWaiting = !isStale && … derivation).  Without
+        # this gate, a future caller that broadcasts for a stale+waiting
+        # account would leak a contradictory usage_entry — currently the
+        # only caller is force-refresh which sets stale_reason immediately
+        # before calling us, so the bug is masked, but the symmetry matters
+        # for defense-in-depth and matches the docstring contract above.
+        "waiting_for_cli": (
+            is_active
+            and not account.stale_reason
+            and await cache.is_waiting_async(account.email)
+        ),
     }
     try:
         await ws_manager.broadcast({"type": "usage_updated", "accounts": [usage_entry]})
@@ -426,14 +464,34 @@ async def force_refresh_account(account_id: int, db: AsyncSession = Depends(get_
     # waiting for the next poll cycle.  A failure here must NOT downgrade
     # the 200 — the refresh already succeeded and is persisted in the
     # Keychain.
+    #
+    # Each op runs in its OWN try so a failure in the cache write cannot
+    # starve the clear_waiting or broadcast — otherwise a connected tab
+    # would see a stale waiting banner until the next poll cycle, while a
+    # later reconnecting tab (which builds its snapshot from the now-fresh
+    # cache) would see the correct state.  The two clients would diverge.
+    # All three ops are idempotent, so running each unconditionally is
+    # safe even if an earlier one partially succeeded.
     try:
         await cache.set_token_info(account.email, new_token_info)
-        await cache.clear_waiting(account.email)
-        await _broadcast_single_account(account)
-    except Exception as _post_err:
+    except Exception as _ti_err:
         logger.warning(
-            "Post-force-refresh cache/broadcast failed for %s: %s",
-            account.email, _post_err,
+            "Post-force-refresh set_token_info failed for %s: %s",
+            account.email, _ti_err,
+        )
+    try:
+        await cache.clear_waiting(account.email)
+    except Exception as _cw_err:
+        logger.warning(
+            "Post-force-refresh clear_waiting failed for %s: %s",
+            account.email, _cw_err,
+        )
+    try:
+        await _broadcast_single_account(account)
+    except Exception as _bc_err:
+        logger.warning(
+            "Post-force-refresh broadcast failed for %s: %s",
+            account.email, _bc_err,
         )
     return {"ok": True}
 
@@ -534,7 +592,15 @@ async def verify_relogin(
         except Exception:
             logger.exception("Post-relogin mirror failed for %s", account.email)
 
-    # The initiating frontend reloads /api/accounts on its own via the
-    # app:reload-accounts custom event, so no WS broadcast is needed — other
-    # tabs catch up on the next poll cycle's usage_updated anyway.
+    # Broadcast the health flip so sibling tabs flip from stale banner to
+    # healthy card immediately instead of waiting for the next poll cycle
+    # (which can be up to ~15s under active cadence, longer when idle).
+    # Matches the symmetry with ``verify_login`` — both entry points into
+    # the DB are observable to every connected client.  Failure must not
+    # 500 the already-persisted row.
+    try:
+        await _broadcast_single_account(account)
+    except Exception:
+        logger.warning("Post-relogin broadcast failed for %s", account.email)
+
     return LoginVerifyResult(success=True, email=new_email)

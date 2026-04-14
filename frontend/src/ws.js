@@ -72,6 +72,14 @@ export function connectWs() {
           acc.is_active = (acc.email === msg.to);
           if (!acc.is_active) acc.waiting_for_cli = false;
         }
+        // Render the eager-mutated state immediately so the Active pill,
+        // waiting banner, and footer button flip in place — otherwise there
+        // is a ~300ms flicker window until the reload-accounts HTTP
+        // round-trip lands.  The reload is still dispatched below as
+        // defense-in-depth, picking up any cards that the eager mutation
+        // missed (e.g. a freshly-added account whose row has not yet
+        // reached state.accounts).
+        renderAccounts();
         // Use custom events to reload accounts + service without importing those modules
         // (avoids circular dependency account↔service).
         document.dispatchEvent(new CustomEvent("app:reload-accounts"));
@@ -79,6 +87,14 @@ export function connectWs() {
         if (!isReplay) {
           toast("Account switched", `→ ${msg.to} (${msg.reason})`, "success");
         }
+        break;
+      case "account_added":
+        // Tab B picks up a new slot enrolled in Tab A.  The existing
+        // updateUsageLive patch path only mutates known cards, so an
+        // account_added event must trigger a full /api/accounts reload —
+        // otherwise tab B never sees the new card until a switch/delete
+        // broadcast forces a reload (multi-tab "ghost slot" bug).
+        document.dispatchEvent(new CustomEvent("app:reload-accounts"));
         break;
       case "account_deleted":
         state.accounts = state.accounts.filter(a => a.id !== Number(msg.id));

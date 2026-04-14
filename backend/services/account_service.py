@@ -535,8 +535,13 @@ async def build_ws_snapshot(db) -> list[dict]:
             continue
         token_info = await _cache.get_token_info_async(email) or {}
         flat = build_usage(usage, token_info)
+        # Stale always wins over waiting — matching the frontend's isWaiting
+        # derivation in ``accounts.js`` (``isWaiting = !isStale && …``).  A
+        # freshly-reconnecting tab would otherwise briefly flash a blue
+        # waiting banner on a red-stale card before the next render.
         waiting = (
             email == active_email
+            and not stale_by_email.get(email)
             and await _cache.is_waiting_async(email)
         )
         snapshot.append({
