@@ -86,8 +86,7 @@ frontend/
       credential_targets.js    Settings-page Credential Targets panel
       tmux_nudge.js            Settings-page Wake Tmux Sessions block
 alembic/
-  versions/            Schema migrations (initial_schema + drop_display_name
-                       + drop_tmux_monitors + drop_auto_switch_enabled_setting)
+  versions/            Schema migrations (Alembic-backed, auto-run on startup)
 tests/
   conftest.py          tmp-dir isolation + make_test_app factory fixture
   test_*.py            router + service + background + schemas + e2e

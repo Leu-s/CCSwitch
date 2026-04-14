@@ -307,8 +307,7 @@ What a switch *does* touch is determined by the **credential targets** the user 
 │           ├── credential_targets.js  # Settings-page Credential Targets panel
 │           └── tmux_nudge.js          # Settings-page Wake Tmux Sessions block
 ├── alembic/                           # Database migrations (run on startup)
-│   └── versions/                      # initial_schema + drop_display_name
-│                                      # + drop_tmux_monitors + drop_auto_switch_enabled_setting
+│   └── versions/                      # Alembic-backed schema migrations
 ├── scripts/
 │   ├── ccswitch / ccswitch.py         # CLI tool
 │   ├── launch.sh                      # Production server launcher
