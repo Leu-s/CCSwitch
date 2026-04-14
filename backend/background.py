@@ -167,6 +167,10 @@ async def _process_single_account(
             except Exception as _bu_err:
                 logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
                 flat_dict = {}
+            # Backoff ≠ waiting_for_cli — we're not stuck on a stale token,
+            # we're just politely not hammering a 429'd endpoint.  Clear the
+            # flag so the card shows its regular rate-limited treatment.
+            await cache.clear_waiting(account.email)
             return {
                 "id": account.id,
                 "email": account.email,
@@ -222,6 +226,10 @@ async def _process_single_account(
                         except Exception as _bu_err:
                             logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
                             flat_dict = {}
+                        # Record the soft waiting state so GET /api/accounts
+                        # and subsequent cards see it without waiting for the
+                        # next poll cycle.
+                        await cache.set_waiting(account.email)
                         # Preserve any pre-existing ``stale_reason`` so a
                         # switch onto an already-stale account does NOT
                         # inadvertently clear the DB flag — the user still
@@ -250,9 +258,10 @@ async def _process_single_account(
             else:
                 raise
 
-        # Successful probe — clear any backoff state for this account.
+        # Successful probe — clear any backoff + waiting state for this account.
         _backoff_until.pop(account.email, None)
         _backoff_count.pop(account.email, None)
+        await cache.clear_waiting(account.email)
 
         await cache.set_usage(account.email, usage)
         token_info = await cache.get_token_info_async(account.email) or {}
@@ -272,7 +281,8 @@ async def _process_single_account(
     except _RefreshTerminal:
         # Refresh returned a terminal 400/401 — skip probe, new_stale_reason
         # is already set to the precise reason.  Return a cache-backed usage
-        # entry so the UI shows the error inline.
+        # entry so the UI shows the error inline.  Stale overrides waiting.
+        await cache.clear_waiting(account.email)
         err_str = new_stale_reason or "Refresh token invalid"
         new_entry, err_str = await cache.set_usage_error(account.email, err_str, False)
         token_info = await cache.get_token_info_async(account.email) or {}
@@ -309,6 +319,9 @@ async def _process_single_account(
             is_rate_limited = e.response.status_code == 429
         else:
             is_rate_limited = "429" in str(e) or "rate_limit" in str(e).lower()
+        # Any error branch supersedes the soft waiting state — the user
+        # needs to see the real reason, not a stale "waiting" badge.
+        await cache.clear_waiting(account.email)
         new_entry, err_str = await cache.set_usage_error(account.email, err_str, is_rate_limited)
 
         token_info = await cache.get_token_info_async(account.email) or {}
@@ -361,6 +374,18 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                 logger.exception(
                     "_process_single_account raised for %s: %s", account.email, result
                 )
+                # A crash in the per-account coroutine must not leave a stale
+                # waiting flag behind in the cache.  Without this clear, a
+                # subsequent GET /api/accounts would disagree with the WS
+                # broadcast (which emits waiting_for_cli=False below) and the
+                # card would flicker on reload.
+                try:
+                    await cache.clear_waiting(account.email)
+                except Exception as _cw_err:
+                    logger.debug(
+                        "clear_waiting failed in exception branch for %s: %s",
+                        account.email, _cw_err,
+                    )
                 usage_entry = {
                     "id": account.id,
                     "email": account.email,
@@ -372,6 +397,13 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
             else:
                 usage_entry, new_stale_reason = result
 
+            # Every poll-loop broadcast entry now carries the live
+            # ``stale_reason`` so the frontend can flip a card in or out of
+            # stale state without waiting for a full reload.  This closes
+            # the pre-existing gap where a waiting→stale transition would
+            # leave other open tabs showing the Force-refresh button for
+            # up to one poll cycle after the DB was already updated.
+            usage_entry["stale_reason"] = new_stale_reason
             updated.append(usage_entry)
 
             # Flip stale_reason on the DB row if it changed. Rate-limiting is NOT

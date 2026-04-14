@@ -501,14 +501,27 @@ async def build_ws_snapshot(db) -> list[dict]:
 
     Used by the /ws endpoint to send the full state to a freshly connected
     client without duplicating the cache → UsageData flattening logic.
+
+    Carries ``waiting_for_cli`` and ``stale_reason`` so a reconnecting tab
+    does not flash a healthy card for up to one poll cycle when either flag
+    is active — see Phase 3 review notes (build_ws_snapshot used to drop
+    both and each reconnect momentarily rendered every waiting card as
+    healthy until the next usage_updated broadcast arrived).
     """
     from . import account_queries as aq
     from ..cache import cache as _cache
+    from ..models import Account as _Account
+    from sqlalchemy import select as _select
 
     cache_snapshot = await _cache.snapshot()
     if not cache_snapshot:
         return []
     id_map = await aq.get_email_to_id_map(db)
+    # Pull stale_reason for every referenced email in one shot so the
+    # snapshot stays aligned with the DB.  A freshly reconnecting tab relies
+    # on this to render stale banners without waiting for the next poll.
+    result = await db.execute(_select(_Account.email, _Account.stale_reason))
+    stale_by_email = {email: reason for email, reason in result.all()}
     snapshot = []
     for email, usage in cache_snapshot.items():
         acct_id = id_map.get(email)
@@ -521,5 +534,7 @@ async def build_ws_snapshot(db) -> list[dict]:
             "email": email,
             "usage": flat.model_dump() if flat else {},
             "error": usage.get("error"),
+            "waiting_for_cli": await _cache.is_waiting_async(email),
+            "stale_reason": stale_by_email.get(email),
         })
     return snapshot

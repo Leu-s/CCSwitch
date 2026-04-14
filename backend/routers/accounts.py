@@ -47,11 +47,22 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
         if token_info is None:
             token_info = await asyncio.to_thread(ac.get_token_info, acc.config_dir)
         usage = UsageData.from_raw(usage_raw, token_info)
+        is_active = acc.email == active_email
+        # Waiting is only meaningful for the currently active account —
+        # it means "CCSwitch is refusing to refresh this because Claude
+        # Code CLI owns the refresh lifecycle right now".  If the account
+        # is not active, CCSwitch owns the refresh and there is no such
+        # wait.  Defense-in-depth gate: perform_switch already clears the
+        # flag on both sides of a switch, but race windows around that
+        # clear (e.g. a poll-cycle interleaved between the switch and
+        # the next GET /api/accounts) can still leak a stale True.
+        waiting = is_active and await cache.is_waiting_async(acc.email)
 
         out.append(AccountWithUsage(
             **AccountOut.model_validate(acc).model_dump(),
             usage=usage,
-            is_active=(acc.email == active_email),
+            is_active=is_active,
+            waiting_for_cli=waiting,
         ))
     return out
 
@@ -275,10 +286,15 @@ async def _broadcast_single_account(account: Account) -> None:
     """Broadcast a single-account ``usage_updated`` so connected clients
     patch this one card without waiting for the next poll cycle.
 
-    Reads the current cache state (usage + token_info) and the live
-    ``account.stale_reason`` to build a usage_entry with the same shape the
-    poll loop emits.  Used after ``force-refresh`` to give immediate visual
-    feedback on both success and stale-on-failure paths.
+    Reads the current cache state (usage + token_info + waiting flag) and
+    the live ``account.stale_reason`` to build a usage_entry with the same
+    shape the poll loop emits.  Used after ``force-refresh`` to give
+    immediate visual feedback on both success and stale-on-failure paths.
+
+    Both ``waiting_for_cli`` and ``stale_reason`` are read LIVE rather
+    than hard-coded so a future refactor that forgets to invalidate cache
+    state before calling this helper does not silently ship a stale
+    broadcast to every connected tab.
     """
     usage_raw = await cache.get_usage_async(account.email)
     if not isinstance(usage_raw, dict):
@@ -295,7 +311,8 @@ async def _broadcast_single_account(account: Account) -> None:
         "email": account.email,
         "usage": flat_dict,
         "error": account.stale_reason,
-        "waiting_for_cli": False,
+        "stale_reason": account.stale_reason,
+        "waiting_for_cli": await cache.is_waiting_async(account.email),
     }
     try:
         await ws_manager.broadcast({"type": "usage_updated", "accounts": [usage_entry]})
@@ -356,6 +373,7 @@ async def force_refresh_account(account_id: int, db: AsyncSession = Depends(get_
                 account.stale_reason = reason
                 await db.commit()
                 await cache.invalidate_token_info(account.email)
+                await cache.clear_waiting(account.email)
                 await _broadcast_single_account(account)
             except Exception as _bk_err:
                 logger.warning(
@@ -372,12 +390,14 @@ async def force_refresh_account(account_id: int, db: AsyncSession = Depends(get_
         logger.exception("Force refresh failed for %s", account.email)
         raise HTTPException(502, f"Force refresh failed: {e}")
 
-    # Success: hydrate token_info cache and broadcast so clients see fresh
-    # expiry metadata immediately instead of waiting for the next poll cycle.
-    # A failure here must NOT downgrade the 200 — the refresh already
-    # succeeded and is persisted in the Keychain.
+    # Success: hydrate token_info cache, clear the waiting flag, and
+    # broadcast so clients see fresh expiry metadata immediately instead of
+    # waiting for the next poll cycle.  A failure here must NOT downgrade
+    # the 200 — the refresh already succeeded and is persisted in the
+    # Keychain.
     try:
         await cache.set_token_info(account.email, new_token_info)
+        await cache.clear_waiting(account.email)
         await _broadcast_single_account(account)
     except Exception as _post_err:
         logger.warning(

@@ -125,6 +125,8 @@ function accountCardHtml(acc, index) {
   const isActive  = !!acc.is_active;
   const disabled  = !acc.enabled;
   const isStale   = !!acc.stale_reason;
+  // Stale always wins over waiting — the account needs re-login, not a refresh.
+  const isWaiting = !isStale && !!acc.waiting_for_cli;
   const isDefault = Number(acc.id) === Number(state.service.default_account_id);
   const threshold = acc.threshold_pct ?? 95;
 
@@ -134,8 +136,14 @@ function accountCardHtml(acc, index) {
       <span>${escapeHtml(acc.stale_reason)} — click <strong>Re-login</strong> below to re-authenticate.</span>
     </div>` : "";
 
+  const waitingBanner = isWaiting ? `
+    <div class="waiting-banner" title="Active-ownership refresh model: CCSwitch defers token refresh to Claude Code CLI while this account is active.">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      <span>Access token expired — waiting for Claude Code to refresh.  If no CLI is running, click <strong>Force refresh</strong> below.</span>
+    </div>` : "";
+
   return `
-    <article class="account-card ${isActive?"active":""} ${disabled?"disabled":""} ${isStale?"stale":""}"
+    <article class="account-card ${isActive?"active":""} ${disabled?"disabled":""} ${isStale?"stale":""} ${isWaiting?"waiting":""}"
              draggable="true" data-id="${acc.id}" data-email="${escapeHtml(acc.email)}">
       ${index !== undefined ? `<span class="card-num">${String(index + 1).padStart(2, "0")}</span>` : ""}
       <div class="card-header">
@@ -148,6 +156,7 @@ function accountCardHtml(acc, index) {
             ${isActive ? `<span class="active-pill">Active</span>` : ""}
             ${isDefault ? `<span class="default-pill">Default</span>` : ""}
             ${isStale ? `<span class="stale-pill" title="${escapeHtml(acc.stale_reason)}">Re-login needed</span>` : ""}
+            ${isWaiting ? `<span class="waiting-pill" title="Waiting for Claude Code to refresh the OAuth token">Waiting</span>` : ""}
             <label class="toggle" title="Include in auto-switching">
               <input type="checkbox" class="enabled-toggle" data-id="${acc.id}" ${acc.enabled?"checked":""} aria-label="Include ${escapeHtml(acc.email)} in auto-switching" />
               <span class="track"></span>
@@ -165,6 +174,7 @@ function accountCardHtml(acc, index) {
         </div>
       </div>
       ${staleBanner}
+      ${waitingBanner}
       ${usageBlockHtml(acc)}
       <div class="card-footer">
         <div class="threshold-row">
@@ -179,6 +189,11 @@ function accountCardHtml(acc, index) {
           ? `<button class="btn primary relogin-btn" data-id="${acc.id}" data-email="${escapeHtml(acc.email)}" title="Open a terminal and re-authenticate this account">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
               Re-login
+            </button>`
+          : isWaiting
+          ? `<button class="btn primary force-refresh-btn" data-id="${acc.id}" title="Refresh the OAuth token using the stored refresh_token — only click if no Claude Code CLI is running for this account">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+              Force refresh
             </button>`
           : `<button class="btn primary ${isActive?"outlined":""} switch-btn" data-id="${acc.id}" ${isActive?"disabled":""} title="${(!isActive && disabled) ? "Manual switch — available even when excluded from auto-switching" : ""}">
               ${isActive ? "Currently active" : "Switch to"}
@@ -286,6 +301,27 @@ function attachCardEvents() {
     });
   });
 
+  qsa(".force-refresh-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (btn.disabled) return;
+      const id = btn.dataset.id;
+      await withLoading(btn, async () => {
+        try {
+          await api(`/api/accounts/${id}/force-refresh`, { method: "POST" });
+          toast("Refreshed", "OAuth token refreshed", "success", 2500);
+          // The endpoint already fired a single-account WS broadcast,
+          // so updateUsageLive will flip this card out of waiting state
+          // before this toast finishes animating in.
+        } catch (e) {
+          // 409 = stale (re-login needed) or already-stale; 502 = upstream error.
+          // The backend already flipped the card to "stale" via WS for the 409
+          // case, so we just surface the reason as a toast either way.
+          toast("Force refresh failed", e.message, "error", 4500);
+        }
+      });
+    });
+  });
+
   qsa(".delete-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       const id = btn.dataset.id;
@@ -380,10 +416,33 @@ export async function loadAccounts() {
 }
 
 export function updateUsageLive(updates) {
+  // Transitions that swap the footer button or add/remove a banner —
+  // waiting_for_cli flipping, or stale_reason flipping — require a full
+  // card DOM rebuild.  The in-place usage-block patch path below only
+  // works when both of those flags stay unchanged.  We still patch each
+  // account's in-place DOM eagerly (so unrelated cards in the same batch
+  // update immediately) and fall through to a full renderAccounts() at
+  // the end if any account in the batch needed a rebuild.
+  let needsFullRender = false;
   for (const u of updates) {
     const acc = state.accounts.find(a => Number(a.id) === Number(u.id) || a.email === u.email);
     if (!acc) continue;
     if (u.usage) acc.usage = u.usage;
+    const prevWaiting = !!acc.waiting_for_cli;
+    const nextWaiting = !!u.waiting_for_cli;
+    acc.waiting_for_cli = nextWaiting;
+    // stale_reason can arrive as null (cleared) or a string (newly stale).
+    // Only adopt when the key is present in the payload so older broadcast
+    // shapes (no stale_reason key) do not accidentally wipe the field.
+    const prevStale = acc.stale_reason || null;
+    let nextStale = prevStale;
+    if (Object.prototype.hasOwnProperty.call(u, "stale_reason")) {
+      nextStale = u.stale_reason || null;
+      acc.stale_reason = nextStale;
+    }
+    if (prevWaiting !== nextWaiting || prevStale !== nextStale) {
+      needsFullRender = true;
+    }
     const card = qs(`.account-card[data-id="${acc.id}"]`);
     if (card) {
       const usageBlock = card.querySelector(".usage-block");
@@ -400,5 +459,6 @@ export function updateUsageLive(updates) {
       }
     }
   }
+  if (needsFullRender) renderAccounts();
   updateAllExhaustedBanner();
 }

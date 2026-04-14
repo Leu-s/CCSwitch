@@ -12,6 +12,11 @@ class _UsageCache:
     def __init__(self):
         self._usage: dict[str, dict] = {}
         self._token_info: dict[str, dict] = {}
+        # Emails whose active account's probe came back 401 and the
+        # active-ownership model refuses to refresh.  Set by the poll loop,
+        # cleared by any subsequent successful probe (or by an explicit
+        # force-refresh call).  Surfaced to the UI as "waiting for CLI".
+        self._waiting: set[str] = set()
         self._lock = asyncio.Lock()
 
     # ── Usage ──────────────────────────────────────────────────────────────
@@ -49,6 +54,20 @@ class _UsageCache:
         async with self._lock:
             return self._token_info.get(email)
 
+    # ── Waiting-for-CLI flag ────────────────────────────────────────────────
+
+    async def set_waiting(self, email: str) -> None:
+        async with self._lock:
+            self._waiting.add(email)
+
+    async def clear_waiting(self, email: str) -> None:
+        async with self._lock:
+            self._waiting.discard(email)
+
+    async def is_waiting_async(self, email: str) -> bool:
+        async with self._lock:
+            return email in self._waiting
+
     # ── Invalidation ──────────────────────────────────────────────────────
 
     async def invalidate(self, email: str) -> None:
@@ -56,6 +75,7 @@ class _UsageCache:
         async with self._lock:
             self._usage.pop(email, None)
             self._token_info.pop(email, None)
+            self._waiting.discard(email)
 
     async def invalidate_token_info(self, email: str) -> None:
         """Remove only the token-info entry, preserving the last known usage."""

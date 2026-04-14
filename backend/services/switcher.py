@@ -123,6 +123,17 @@ async def perform_switch(
             ac.activate_account_config, target.config_dir, enabled_targets
         )
 
+        # Clear any stale "waiting for CLI" flag from both sides of the
+        # switch.  The outgoing account is no longer active so CCSwitch
+        # will now refresh it directly on its next poll cycle — the old
+        # waiting badge is meaningless.  The incoming account gets a clean
+        # slate: CCSwitch begins deferring to Claude Code CLI for its
+        # refresh lifecycle starting now, and the next probe decides
+        # whether waiting should be re-entered.
+        await cache.clear_waiting(target.email)
+        if current_email and current_email != target.email:
+            await cache.clear_waiting(current_email)
+
         # Log the switch
         from_acc = None
         if current_email:
