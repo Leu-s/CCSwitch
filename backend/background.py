@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import os
 import time
 import httpx
 
@@ -36,15 +37,31 @@ class _RefreshTerminal(Exception):
     with a generic one)."""
 
 
-async def _process_single_account(account: Account, db) -> tuple[dict, "str | None"]:
+async def _process_single_account(
+    account: Account,
+    db,
+    active_cfg_dir: "str | None",
+) -> tuple[dict, "str | None"]:
     """Fetch token, optionally refresh, probe usage, and update caches for one account.
+
+    ``active_cfg_dir`` is the canonicalized path of ``~/.ccswitch/active`` snapped
+    once per poll cycle by ``poll_usage_and_switch``.  It partitions accounts into
+    the one whose refresh lifecycle belongs to Claude Code CLI (``is_active``) and
+    the N-1 others that CCSwitch alone consumes.  See the active-ownership refresh
+    model section in ``CLAUDE.md`` and the design doc under ``docs/superpowers/``.
 
     Returns:
         (usage_entry, new_stale_reason) where usage_entry is a dict with keys
-        ``id``, ``email``, ``usage``, ``error`` suitable for the WS broadcast,
-        and new_stale_reason is the (possibly None) stale reason to persist.
+        ``id``, ``email``, ``usage``, ``error``, ``waiting_for_cli`` suitable for
+        the WS broadcast, and new_stale_reason is the (possibly None) stale reason
+        to persist.
     """
     new_stale_reason: str | None = None
+    # Canonicalize via realpath so symlinked home dirs (macOS FileVault etc.)
+    # do not defeat the ownership check by producing different-looking strings
+    # for the same filesystem location.
+    abs_cfg_dir = os.path.realpath(account.config_dir)
+    is_active = active_cfg_dir is not None and abs_cfg_dir == active_cfg_dir
     try:
         token = await asyncio.to_thread(ac.get_access_token_from_config_dir, account.config_dir)
         if not token:
@@ -57,16 +74,39 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
         token_info = await asyncio.to_thread(ac.get_token_info, account.config_dir)
         await cache.set_token_info(account.email, token_info)
 
-        # Refresh the token if it is about to expire (within 5 minutes).
-        # Skip for already-stale accounts: their refresh token is revoked,
+        # Refresh the token if it is about to expire (within 20 minutes).
+        # Active-ownership model: CCSwitch does NOT refresh the account whose
+        # config dir matches ``~/.ccswitch/active`` — Claude Code CLI owns that
+        # account's refresh lifecycle.  For inactive accounts CCSwitch is the
+        # sole consumer, so the 20 min window is free (no race surface).
+        # Stale accounts are also skipped — their refresh token is revoked,
         # so retrying would just produce a 401 log entry on every poll cycle.
         # Compute in integer milliseconds throughout to avoid float drift.
-        if not account.stale_reason:
+        if not account.stale_reason and not is_active:
             try:
-                expires_at_ms = token_info.get("token_expires_at")
+                expires_at_ms = (token_info or {}).get("token_expires_at")
                 now_ms = int(time.time() * 1000)
-                if expires_at_ms and now_ms > expires_at_ms - 300_000:
-                    refresh_token = await asyncio.to_thread(ac.get_refresh_token_from_config_dir, account.config_dir)
+                if expires_at_ms and now_ms > expires_at_ms - 1_200_000:
+                    # Double-check ownership right before the refresh call.
+                    # The ``active_cfg_dir`` snap was taken at the start of the
+                    # poll cycle, but a manual switch during ``asyncio.gather``
+                    # could have flipped ownership to THIS account.  If so,
+                    # Claude Code will refresh it momentarily — do not race.
+                    current_active = await asyncio.to_thread(
+                        ac.get_active_config_dir_pointer
+                    )
+                    if (
+                        current_active
+                        and os.path.realpath(current_active) == abs_cfg_dir
+                    ):
+                        logger.info(
+                            "Skip refresh for %s — became active mid-cycle",
+                            account.email,
+                        )
+                        is_active = True  # re-sync for the rest of this pass
+                        refresh_token = None
+                    else:
+                        refresh_token = await asyncio.to_thread(ac.get_refresh_token_from_config_dir, account.config_dir)
                     if refresh_token:
                         resp = await anthropic_api.refresh_access_token(refresh_token)
                         new_token = resp.get("access_token")
@@ -132,14 +172,71 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
                 "email": account.email,
                 "usage": flat_dict,
                 "error": cached.get("error"),
+                "waiting_for_cli": False,
             }, new_stale_reason
 
         try:
             usage = await anthropic_api.probe_usage(token)
         except httpx.HTTPStatusError as probe_err:
-            if probe_err.response.status_code == 401:
-                new_stale_reason = "Anthropic API returned 401 — re-login required"
-            elif probe_err.response.status_code == 429:
+            status = probe_err.response.status_code
+            if status == 401:
+                # Retry once after re-reading the Keychain: Claude Code may
+                # have just rotated the token while our cached copy went
+                # stale.  A fresh token in the Keychain means the probe
+                # should succeed on retry — and for the active account, a
+                # persistent 401 becomes a soft "waiting for CLI" state,
+                # never a persisted stale_reason.
+                fresh_token = await asyncio.to_thread(
+                    ac.get_access_token_from_config_dir, account.config_dir
+                )
+                retry_succeeded = False
+                if fresh_token and fresh_token != token:
+                    try:
+                        usage = await anthropic_api.probe_usage(fresh_token)
+                        # Flag success BEFORE any follow-up work so a
+                        # CancelledError mid-bookkeeping can't reverse it.
+                        retry_succeeded = True
+                        await cache.set_token_info(
+                            account.email,
+                            await asyncio.to_thread(
+                                ac.get_token_info, account.config_dir
+                            ),
+                        )
+                    except Exception as _retry_err:
+                        logger.debug(
+                            "Probe retry after Keychain re-read failed for %s: %s",
+                            account.email, _retry_err,
+                        )
+                if not retry_succeeded:
+                    if is_active:
+                        # Soft waiting state — do NOT overwrite cache, do NOT
+                        # set stale_reason, do NOT broadcast an error entry.
+                        # Claude Code will refresh on its next API call and
+                        # the next poll cycle picks up the fresh token.
+                        cached = await cache.get_usage_async(account.email)
+                        cached_dict = cached if isinstance(cached, dict) else {}
+                        cached_ti = await cache.get_token_info_async(account.email) or {}
+                        try:
+                            flat = build_usage(cached_dict, cached_ti)
+                            flat_dict = flat.model_dump() if flat else {}
+                        except Exception as _bu_err:
+                            logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
+                            flat_dict = {}
+                        # Preserve any pre-existing ``stale_reason`` so a
+                        # switch onto an already-stale account does NOT
+                        # inadvertently clear the DB flag — the user still
+                        # needs to re-login.
+                        return {
+                            "id": account.id,
+                            "email": account.email,
+                            "usage": flat_dict,
+                            "error": cached_dict.get("error"),
+                            "waiting_for_cli": True,
+                        }, account.stale_reason
+                    new_stale_reason = "Anthropic API returned 401 — re-login required"
+                    raise
+                # retry_succeeded → fall through to the success path below
+            elif status == 429:
                 # Compute exponential backoff: double the previous window, capped.
                 count = _backoff_count.get(account.email, 0) + 1
                 _backoff_count[account.email] = count
@@ -149,7 +246,9 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
                     "429 for %s (offense #%d) — backing off %ds",
                     account.email, count, backoff_seconds,
                 )
-            raise
+                raise
+            else:
+                raise
 
         # Successful probe — clear any backoff state for this account.
         _backoff_until.pop(account.email, None)
@@ -168,6 +267,7 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
             "email": account.email,
             "usage": flat_dict,
             "error": None,
+            "waiting_for_cli": False,
         }
     except _RefreshTerminal:
         # Refresh returned a terminal 400/401 — skip probe, new_stale_reason
@@ -187,6 +287,7 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
             "email": account.email,
             "usage": flat_dict,
             "error": err_str,
+            "waiting_for_cli": False,
         }
     except Exception as e:
         err_str = str(e)
@@ -222,6 +323,7 @@ async def _process_single_account(account: Account, db) -> tuple[dict, "str | No
             "email": account.email,
             "usage": flat_dict,
             "error": err_str if "error" in new_entry else None,
+            "waiting_for_cli": False,
         }
 
     return usage_entry, new_stale_reason
@@ -234,11 +336,21 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
         # state regardless of whether auto-switching is on.  The
         # ``service_enabled`` flag gates only the auto-switch decision, which
         # is checked inside ``maybe_auto_switch`` below.
+        #
+        # Snap ``active_cfg_dir`` once per cycle so every _process_single_account
+        # call in this gather sees the same ownership partition.  Active-ownership
+        # model: the matching account is refreshed by Claude Code CLI; CCSwitch
+        # handles the N-1 others.
+        active_cfg_dir_raw = await asyncio.to_thread(ac.get_active_config_dir_pointer)
+        active_cfg_dir = (
+            os.path.realpath(active_cfg_dir_raw) if active_cfg_dir_raw else None
+        )
+
         accounts_result = await db.execute(select(Account))
         accounts = accounts_result.scalars().all()
 
         results = await asyncio.gather(
-            *[_process_single_account(account, db) for account in accounts],
+            *[_process_single_account(account, db, active_cfg_dir) for account in accounts],
             return_exceptions=True,
         )
 
@@ -254,6 +366,7 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                     "email": account.email,
                     "usage": {"error": str(result)},
                     "error": str(result),
+                    "waiting_for_cli": False,
                 }
                 new_stale_reason = account.stale_reason  # leave unchanged
             else:
