@@ -102,11 +102,14 @@ restart.
    (first activation on this machine, see §2.7), skip this step.
 3. **Promote.** Write the incoming credentials from step 1 into
    `Claude Code-credentials`.
-4. **Update identity file.** Atomically rewrite
-   `~/.claude/.claude.json` — replacing only `oauthAccount` and
-   `userID`, preserving all other keys (projects, MCP state, user
-   prefs). If the file does not exist, create it with mode 0o600
-   containing only those two keys.
+4. **Update identity file.** Atomically rewrite **`~/.claude.json`**
+   (at HOME ROOT, NOT inside `~/.claude/`) — replacing only
+   `oauthAccount` and `userID`, preserving all other keys (projects,
+   MCP state, user prefs). If the file does not exist, create it with
+   mode 0o600 containing only those two keys. This is the file Claude
+   Code CLI consults on startup when `CLAUDE_CONFIG_DIR` is unset;
+   writing to `~/.claude/.claude.json` instead leaves the CLI's
+   `/stats` display stuck on the pre-swap identity.
 5. **File fallback.** Atomically rewrite `~/.claude/.credentials.json`
    with the new tokens at mode 0o600. This is a belt-and-braces mirror
    against any Claude Code build that falls back to the file (Linux,
