@@ -62,15 +62,20 @@ def fake_keychain(monkeypatch):
 
 @pytest.fixture
 def fake_claude_home(monkeypatch, tmp_path):
-    """Point ac.*_PATH constants at a tmp_path subdirectory."""
-    home = tmp_path / ".claude"
-    home.mkdir(mode=0o700)
-    monkeypatch.setattr(ac, "_CLAUDE_HOME", str(home))
-    monkeypatch.setattr(ac, "_CLAUDE_JSON_PATH", str(home / ".claude.json"))
+    """Point ac.*_PATH constants at a tmp_path layout mirroring the real
+    locations: identity file at HOME root, credentials file inside
+    HOME/.claude/."""
+    home_root = tmp_path
+    claude_dir = home_root / ".claude"
+    claude_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(ac, "_HOME", str(home_root))
+    monkeypatch.setattr(ac, "_CLAUDE_HOME", str(claude_dir))
+    monkeypatch.setattr(ac, "_CLAUDE_JSON_PATH", str(home_root / ".claude.json"))
     monkeypatch.setattr(
-        ac, "_CREDENTIALS_JSON_PATH", str(home / ".credentials.json")
+        ac, "_CREDENTIALS_JSON_PATH", str(claude_dir / ".credentials.json")
     )
-    return home
+    # Return the HOME ROOT so tests can reference .claude.json via it.
+    return home_root
 
 
 def _blob(email: str, refresh="rt", access="at") -> dict:

@@ -28,12 +28,21 @@ logger = logging.getLogger(__name__)
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 #
-# Hardcoded to ``~/.claude`` — Claude Code has no public override for this
-# location, and the previous configurable ``active_claude_dir`` setting was
-# dead weight.
+# Claude Code CLI reads two different files at two different locations:
+#
+#   ~/.claude.json           — identity file (oauthAccount, userID).  Lives
+#                              at HOME ROOT, NOT inside ~/.claude/.  This is
+#                              what the CLI consults on every startup when
+#                              CLAUDE_CONFIG_DIR is unset.
+#   ~/.claude/.credentials.json  — token fallback inside the config dir.
+#
+# Writing ``oauthAccount`` to the wrong file (~/.claude/.claude.json) is
+# invisible to the CLI, so /stats keeps showing the previous identity even
+# after a successful Keychain swap.
 
-_CLAUDE_HOME = os.path.expanduser("~/.claude")
-_CLAUDE_JSON_PATH = os.path.join(_CLAUDE_HOME, ".claude.json")
+_HOME = os.path.expanduser("~")
+_CLAUDE_HOME = os.path.join(_HOME, ".claude")
+_CLAUDE_JSON_PATH = os.path.join(_HOME, ".claude.json")
 _CREDENTIALS_JSON_PATH = os.path.join(_CLAUDE_HOME, ".credentials.json")
 
 
@@ -51,11 +60,15 @@ def _load_json_safe(path: str) -> dict:
 def _atomic_write_json(path: str, data: dict, mode: int = 0o600) -> None:
     """Write ``data`` as JSON to ``path`` via a same-dir tmp file + os.replace.
 
-    Creates the parent directory if needed.  Raises on failure so callers
-    that assume the write succeeded can treat a swap as failed.
+    Creates the parent directory if needed — but only when the parent is
+    one of CCSwitch's known locations (~/.claude or its parent); never
+    creates an arbitrary directory that happens to appear in ``path``.
+    Raises on failure so callers that assume the write succeeded can
+    treat a swap as failed.
     """
     parent = os.path.dirname(path) or "."
-    os.makedirs(parent, mode=0o700, exist_ok=True)
+    if not os.path.isdir(parent):
+        os.makedirs(parent, mode=0o700, exist_ok=True)
     tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)

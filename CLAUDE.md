@@ -184,10 +184,12 @@ sequence under `credential_provider._credential_lock`:
    standard entry is never overwritten on a failed checkpoint.
 3. **Promote.** Write the incoming credentials to the standard
    Keychain entry.
-4. **Identity file.** Atomically rewrite `~/.claude/.claude.json` —
-   replacing only `oauthAccount` and `userID`, preserving every other
-   key (projects, MCP state, user prefs).  Creates `~/.claude/` and
-   the file if they do not exist.
+4. **Identity file.** Atomically rewrite **`~/.claude.json`** (at HOME
+   ROOT — *not* `~/.claude/.claude.json`) — replacing only
+   `oauthAccount` and `userID`, preserving every other key (projects,
+   MCP state, user prefs).  Creates the file if it does not exist.
+   This is the file Claude Code CLI consults on startup for its
+   identity when `CLAUDE_CONFIG_DIR` is unset.
 5. **File fallback.** Atomically rewrite `~/.claude/.credentials.json`
    at mode 0o600 — a belt-and-braces mirror for Claude Code builds
    that prefer the file over the Keychain.

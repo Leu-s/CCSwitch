@@ -171,7 +171,8 @@ _HOME = os.path.expanduser("~")
 _POINTER_PATH = os.path.join(_HOME, ".ccswitch", "active")
 _CCSWITCH_DIR = os.path.join(_HOME, ".ccswitch")
 _ACCOUNTS_DIR = os.path.join(_HOME, ".ccswitch-accounts")
-_CLAUDE_JSON = os.path.join(_HOME, ".claude", ".claude.json")
+# Claude Code CLI's identity file lives at HOME ROOT (not inside ~/.claude/).
+_CLAUDE_JSON = os.path.join(_HOME, ".claude.json")
 _CREDENTIALS_JSON = os.path.join(_HOME, ".claude", ".credentials.json")
 _BACKUP_PATH = os.path.join(_HOME, ".ccswitch-backup-2026-04-15.json")
 _VAULT_COMMENT = (
