@@ -66,11 +66,41 @@ _STALL_PATTERNS = re.compile(
 _CAPTURE_LINES = 200
 
 
+# Tab-separated so user-option values that contain spaces or shell metacharacters
+# survive intact.  A ``#{@user-option}`` that is unset expands to an empty string;
+# the ``maxsplit=3`` below preserves that as the literal ``""``.
+_PANE_FORMAT = (
+    "#{session_name}:#{window_index}.#{pane_index}"
+    "\t#{pane_pid}"
+    "\t#{pane_current_command}"
+    "\t#{@ccswitch-nudge}"
+)
+
+
+def _opt_in_value(raw: str) -> bool:
+    """True when a tmux user option's raw value reads as 'on' (case-insensitive).
+
+    Strict equality is intentional.  A value with embedded whitespace or
+    trailing junk (e.g. ``"on\textra"`` — possible if the user shell-quoted
+    a tab into the option value) reads as opt-OUT.  False-negative is the
+    safer failure mode for this flag — we prefer skipping a legit opt-in
+    than nudging a pane whose opt-in value was mangled.
+    """
+    return raw.strip().lower() == "on"
+
+
 async def list_panes() -> list[dict]:
+    """Return one dict per tmux pane: ``{target, pid, command, opt_in}``.
+
+    ``pid`` is the shell PID (``#{pane_pid}``), not the foreground process —
+    exactly the root for the descendant-walk in ``_pane_has_claude_descendant``.
+    ``opt_in`` is ``True`` only when the pane's ``@ccswitch-nudge`` user option
+    is set to ``on``; an unset option parses as an empty string and maps to
+    ``False``.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "tmux", "list-panes", "-a", "-F",
-            "#{session_name}:#{window_index}.#{pane_index} #{pane_current_command}",
+            "tmux", "list-panes", "-a", "-F", _PANE_FORMAT,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -88,10 +118,21 @@ async def list_panes() -> list[dict]:
         for line in stdout.decode().strip().splitlines():
             if not line.strip():
                 continue
-            parts = line.split(" ", 1)
+            parts = line.split("\t", 3)
+            # Pad missing fields (very old tmux that ignores a format token
+            # leaves the slot absent rather than empty).
+            while len(parts) < 4:
+                parts.append("")
+            target, pid_raw, command, opt_in_raw = parts
+            try:
+                pid = int(pid_raw) if pid_raw else None
+            except ValueError:
+                pid = None
             panes.append({
-                "target": parts[0],
-                "command": parts[1] if len(parts) > 1 else ""
+                "target": target,
+                "pid": pid,
+                "command": command,
+                "opt_in": _opt_in_value(opt_in_raw),
             })
         return panes
     except FileNotFoundError:

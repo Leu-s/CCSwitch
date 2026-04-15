@@ -13,12 +13,54 @@ from unittest.mock import patch, AsyncMock
 async def test_list_panes_parses_output():
     from backend.services.tmux_service import list_panes
     mock_proc = AsyncMock()
-    mock_proc.communicate = AsyncMock(return_value=(b"main:0.0 claude\nwork:1.0 bash\n", b""))
+    mock_proc.communicate = AsyncMock(return_value=(
+        b"main:0.0\t12345\tclaude\ton\nwork:1.0\t67890\tbash\t\n", b"",
+    ))
     with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc):
         panes = await list_panes()
     assert len(panes) == 2
-    assert panes[0]["target"] == "main:0.0"
+    assert panes[0] == {
+        "target": "main:0.0", "pid": 12345, "command": "claude", "opt_in": True,
+    }
+    assert panes[1] == {
+        "target": "work:1.0", "pid": 67890, "command": "bash", "opt_in": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_panes_handles_missing_pid():
+    """Very old tmux that doesn't populate pane_pid leaves the slot empty.
+    Parser must yield ``pid=None`` instead of crashing."""
+    from backend.services.tmux_service import list_panes
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(b"main:0.0\t\tclaude\t\n", b""))
+    with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc):
+        panes = await list_panes()
+    assert panes[0]["pid"] is None
     assert panes[0]["command"] == "claude"
+    assert panes[0]["opt_in"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_panes_opt_in_flag_parsing():
+    """``@ccswitch-nudge`` is truthy ONLY when the raw value reads ``on``
+    (case-insensitive, whitespace-trimmed).  Every other shape — empty,
+    ``off``, ``true``, ``1`` — parses as opt-out."""
+    from backend.services.tmux_service import list_panes
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(
+        b"a:0.0\t1\tclaude\ton\n"
+        b"b:0.0\t2\tclaude\t ON \n"     # whitespace + caps
+        b"c:0.0\t3\tclaude\t\n"         # unset
+        b"d:0.0\t4\tclaude\toff\n"
+        b"e:0.0\t5\tclaude\ttrue\n"     # truthy-looking but not 'on'
+        b"f:0.0\t6\tclaude\t1\n",
+        b"",
+    ))
+    with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc):
+        panes = await list_panes()
+    expected = [True, True, False, False, False, False]
+    assert [p["opt_in"] for p in panes] == expected
 
 
 @pytest.mark.asyncio
