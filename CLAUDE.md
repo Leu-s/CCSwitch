@@ -186,10 +186,11 @@ tests/
      to at most once per 30 s per account) to wake any sleeping CLI,
      return last-known cached usage, do NOT mark stale.
    - Vault-refresh 401 or 400 with a body `error` code in the terminal
-     set (`invalid_grant`, `invalid_client`, `unauthorized_client`,
-     `unsupported_grant_type`, `invalid_scope`): mark `stale_reason`
-     with the precise terminal reason; skip the probe.  The UI renders
-     a Re-login button.
+     set (RFC 6749 §5.2: `invalid_grant`, `invalid_client`,
+     `unauthorized_client`, `unsupported_grant_type`, `invalid_scope`;
+     Anthropic envelope: `invalid_request_error`, `authentication_error`):
+     mark `stale_reason` with the precise terminal reason; skip the
+     probe.  The UI renders a Re-login button.
    - Vault-refresh bare 401, 400 with non-terminal body, 429, 5xx,
      network: classified TRANSIENT by `anthropic_api.parse_oauth_error`.
      Increment three in-memory per-account dicts (count, next-retry
