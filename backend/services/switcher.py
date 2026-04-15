@@ -129,6 +129,13 @@ async def perform_switch(
         except Exception as _bc_err:
             logger.warning("WS broadcast failed: %s", _bc_err)
 
+        # Nudge every stalled claude tmux pane so running CLI sessions pick
+        # up the fresh Keychain credentials.  Fire-and-forget — the nudge
+        # helper owns its own DB session and does nothing when the feature
+        # is disabled in Settings.  Runs for EVERY switch (manual or auto)
+        # so a user-initiated switch from the UI also wakes stalled panes.
+        tmux_service.fire_nudge()
+
 
 # ── Auto-switch decision logic ────────────────────────────────────────────────
 
@@ -165,7 +172,6 @@ async def maybe_auto_switch(db, ws: WebSocketManager) -> None:
                 next_account.stale_reason or current_account.stale_reason,
             )
             await perform_switch(next_account, "stale", db, ws)
-            tmux_service.fire_nudge()
         else:
             logger.warning("Current account stale but no eligible replacement")
             try:
@@ -198,7 +204,6 @@ async def maybe_auto_switch(db, ws: WebSocketManager) -> None:
                     current_email, next_account.email, five_hour_pct, threshold,
                 )
             await perform_switch(next_account, reason_log, db, ws)
-            tmux_service.fire_nudge()
         else:
             logger.warning("No eligible account to switch to")
             try:

@@ -92,33 +92,33 @@ def _read_scratch_identity(scratch_dir: str) -> tuple[dict | None, str | None, s
 
 
 def _open_claude_tmux_window(scratch_dir: str) -> str:
-    """Ensure tmux is running and launch a new window with ``claude``
-    inside it, with ``CLAUDE_CONFIG_DIR`` pointing at ``scratch_dir``.
+    """Ensure the dedicated ccswitch tmux session exists and launch a new
+    window inside it with ``claude`` running under
+    ``CLAUDE_CONFIG_DIR=scratch_dir``.
+
+    The window is explicitly created with ``-t <ccswitch_session>`` so it
+    lands in CCSwitch's own session instead of whatever session the user
+    is currently attached to — otherwise login panes pollute the user's
+    own tmux workspace.
 
     Returns the new pane's target string (``session:window.pane``).
     """
+    session_name = settings.tmux_session_name
+
+    # Idempotent session-create: tmux returns non-zero if the session
+    # already exists, which is exactly what we want.  Swallow that.
     try:
-        sessions = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
+        subprocess.run(
+            ["tmux", "new-session", "-d", "-s", session_name],
             capture_output=True, text=True, timeout=10,
         )
-        no_sessions = sessions.returncode != 0 or not sessions.stdout.strip()
     except subprocess.TimeoutExpired:
-        logger.warning("tmux list-sessions timed out — falling through")
-        no_sessions = True
-
-    if no_sessions:
-        try:
-            subprocess.run(
-                ["tmux", "new-session", "-d", "-s", settings.tmux_session_name],
-                capture_output=True, text=True, timeout=10,
-            )
-        except subprocess.TimeoutExpired:
-            logger.warning("tmux new-session timed out — falling through")
+        logger.warning("tmux new-session timed out — falling through")
 
     result = subprocess.run(
         [
             "tmux", "new-window",
+            "-t", session_name,
             "-P", "-F", "#{session_name}:#{window_index}.#{pane_index}",
             "-n", "add-acct",
         ],
@@ -292,17 +292,35 @@ def verify_login_session(session_id: str) -> dict:
 
 
 def cleanup_login_session(session_id: str) -> None:
-    """Remove a session entirely: pop from tracking, delete the scratch
-    hashed Keychain entry, and ``rmtree`` the scratch directory.
+    """Remove a session entirely: pop from tracking, kill the tmux window,
+    delete the scratch hashed Keychain entry, and ``rmtree`` the scratch
+    directory.
 
     Used by explicit cancel, successful verification post-process, and
     the expiry sweep.  Always safe: individual step failures are logged
     but do not abort the remaining steps.
+
+    Ordering matters: kill the tmux window FIRST so the ``claude``
+    process inside the pane is terminated before we pull the rug
+    (scratch dir + hashed Keychain entry) out from under it.  Otherwise
+    the CLI sees its config dir vanish mid-lifetime and may print a
+    startle into the pane just before the kill lands.
     """
     with _sessions_lock:
         data = _active_login_sessions.pop(session_id, None)
     if not data:
         return
+
+    pane_target = data.get("pane_target")
+    if pane_target:
+        try:
+            subprocess.run(
+                ["tmux", "kill-window", "-t", pane_target],
+                capture_output=True, timeout=5,
+            )
+        except Exception as e:
+            logger.debug("tmux kill-window failed for %s: %s", pane_target, e)
+
     scratch_dir = data.get("scratch_dir")
     if not scratch_dir:
         return

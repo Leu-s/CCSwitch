@@ -206,3 +206,24 @@ def test_cleanup_login_session_deletes_scratch_and_keychain(
     assert not os.path.isdir(scratch)
     # Session registry entry popped.
     assert sid not in ls._active_login_sessions
+    # tmux kill-window called with the pane target (fake_tmux recorded it).
+    kill_window_calls = [
+        c for c in fake_tmux if len(c) >= 2 and c[1] == "kill-window"
+    ]
+    assert kill_window_calls, "tmux kill-window was not invoked"
+    assert any("ccswitch:99.0" in c for c in kill_window_calls)
+
+
+def test_open_claude_tmux_window_targets_ccswitch_session(fake_tmux, tmpdir_home):
+    """The login window must be created inside the ccswitch session, not
+    whatever session the user is currently attached to."""
+    ls.start_login_session()
+    new_window_calls = [
+        c for c in fake_tmux if len(c) >= 2 and c[1] == "new-window"
+    ]
+    assert new_window_calls, "tmux new-window was not invoked"
+    # Every new-window call must carry ``-t <session_name>``.
+    for call in new_window_calls:
+        assert "-t" in call, f"missing -t in {call}"
+        idx = call.index("-t")
+        assert call[idx + 1] == "ccswitch", f"-t target was {call[idx + 1]!r}"

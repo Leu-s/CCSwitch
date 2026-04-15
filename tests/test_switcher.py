@@ -200,6 +200,35 @@ async def test_perform_switch_writes_log_and_broadcasts(db_session, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_perform_switch_fires_nudge(db_session, monkeypatch):
+    """Every switch — manual or auto — must fire the tmux nudge so
+    running claude panes wake up on the new credentials."""
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(email="b@example.com", priority=1),
+    ])
+    await db_session.commit()
+
+    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
+    monkeypatch.setattr(ac, "swap_to_account", lambda _e: {})
+
+    nudge_calls: list[int] = []
+    monkeypatch.setattr(
+        tmux_service, "fire_nudge",
+        lambda: nudge_calls.append(1),
+    )
+
+    ws = _FakeWS()
+    target = (await db_session.execute(
+        select(Account).where(Account.email == "b@example.com")
+    )).scalar_one()
+
+    await sw.perform_switch(target, "manual", db_session, ws)
+
+    assert len(nudge_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_perform_switch_preserves_target_cache(db_session, monkeypatch):
     """perform_switch must NOT invalidate the target's cached usage — the
     UI needs the last-known state visible immediately after the swap, and
