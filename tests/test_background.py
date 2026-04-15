@@ -33,6 +33,9 @@ async def _wipe_cache_between_tests():
     _cache._token_info.clear()
     bg._backoff_until.clear()
     bg._backoff_count.clear()
+    bg._refresh_backoff_until.clear()
+    bg._refresh_backoff_count.clear()
+    bg._refresh_backoff_first_failure_at.clear()
     bg._last_nudge_at.clear()
     bg._last_poll_monotonic = None
     yield
@@ -40,6 +43,9 @@ async def _wipe_cache_between_tests():
     _cache._token_info.clear()
     bg._backoff_until.clear()
     bg._backoff_count.clear()
+    bg._refresh_backoff_until.clear()
+    bg._refresh_backoff_count.clear()
+    bg._refresh_backoff_first_failure_at.clear()
     bg._last_nudge_at.clear()
     bg._last_poll_monotonic = None
 
@@ -69,9 +75,18 @@ def _fresh_creds(expires_at_ms: int | None = None) -> dict:
     }
 
 
-def _http_error(status: int) -> httpx.HTTPStatusError:
+def _http_error(status: int, json_body=None) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx.Response(status, request=request)
+    if json_body is not None:
+        import json as _json
+        response = httpx.Response(
+            status,
+            request=request,
+            content=_json.dumps(json_body).encode("utf-8"),
+            headers={"content-type": "application/json"},
+        )
+    else:
+        response = httpx.Response(status, request=request)
     return httpx.HTTPStatusError(str(status), request=request, response=response)
 
 
@@ -175,7 +190,10 @@ async def test_vault_refresh_400_sets_rejected_stale_reason(monkeypatch):
     )
 
     async def fake_refresh(refresh_token):
-        raise _http_error(400)
+        # 400 + OAuth2 `error=invalid_grant` → terminal rejected.  A bare
+        # 400 without a body is now TRANSIENT, so inject the RFC 6749 §5.2
+        # terminal code here to keep this test exercising the terminal path.
+        raise _http_error(400, json_body={"error": "invalid_grant"})
 
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
@@ -188,7 +206,7 @@ async def test_vault_refresh_400_sets_rejected_stale_reason(monkeypatch):
     monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
 
     _, stale = await bg._process_single_account(account, "someone-else@example.com")
-    assert stale == "Refresh token rejected (400) — re-login required"
+    assert stale == "Refresh token rejected — re-login required"
     # probe was skipped
     assert probe_called["n"] == 0
 
@@ -204,7 +222,11 @@ async def test_vault_refresh_401_sets_revoked_stale_reason(monkeypatch):
     )
 
     async def fake_refresh(refresh_token):
-        raise _http_error(401)
+        # 401 + OAuth2 `error=invalid_grant` → terminal revoked.  A bare
+        # 401 without a body is now TRANSIENT (could be an edge-proxy
+        # WAF challenge) and would not set stale_reason, so inject the
+        # RFC 6749 §5.2 terminal code here.
+        raise _http_error(401, json_body={"error": "invalid_grant"})
 
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
@@ -381,3 +403,203 @@ async def test_process_returns_stale_reason_tuple(monkeypatch):
     entry, stale_reason = result
     assert stale_reason is None
     assert entry["email"] == "a@example.com"
+
+
+# ── Transient refresh-failure handling ────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_refresh_400_invalid_grant_sets_terminal_stale(monkeypatch):
+    """400 with error=invalid_grant → terminal stale_reason, no backoff counters."""
+    from backend.services.anthropic_api import OAuthErrorKind  # noqa: F401
+
+    bg._refresh_backoff_until.clear()
+    bg._refresh_backoff_count.clear()
+    near_expiry_ms = int(time.time() * 1000) + 5 * 60 * 1000
+    account = _make_account(email="vault@example.com")
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(expires_at_ms=near_expiry_ms),
+    )
+
+    async def fake_refresh(refresh_token):
+        raise _http_error(400, json_body={"error": "invalid_grant"})
+
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    async def fake_probe(token):
+        return {}
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    _, stale = await bg._process_single_account(account, "other@example.com")
+    assert stale == "Refresh token rejected — re-login required"
+    assert "vault@example.com" not in bg._refresh_backoff_count
+    assert "vault@example.com" not in bg._refresh_backoff_until
+
+
+@pytest.mark.asyncio
+async def test_refresh_400_invalid_request_is_transient_no_stale(monkeypatch):
+    """400 with non-terminal error code → no stale_reason, backoff counter = 1."""
+    bg._refresh_backoff_until.clear()
+    bg._refresh_backoff_count.clear()
+    near_expiry_ms = int(time.time() * 1000) + 5 * 60 * 1000
+    account = _make_account(email="vault@example.com")
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(expires_at_ms=near_expiry_ms),
+    )
+
+    async def fake_refresh(refresh_token):
+        raise _http_error(400, json_body={"error": "invalid_request"})
+
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    async def fake_probe(token):
+        return {}
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    _, stale = await bg._process_single_account(account, "other@example.com")
+    assert stale is None
+    assert bg._refresh_backoff_count["vault@example.com"] == 1
+    assert "vault@example.com" in bg._refresh_backoff_until
+
+
+@pytest.mark.asyncio
+async def test_refresh_transient_escalates_after_n_failures(monkeypatch):
+    """After `_TRANSIENT_REFRESH_ESCALATE_AFTER` consecutive transients, mark stale."""
+    # Pre-load the counter to one below the escalation threshold, and a
+    # recent first-failure timestamp so the wall-clock ceiling does NOT fire.
+    bg._refresh_backoff_count["vault@example.com"] = bg._TRANSIENT_REFRESH_ESCALATE_AFTER - 1
+    bg._refresh_backoff_first_failure_at["vault@example.com"] = time.monotonic() - 10
+
+    near_expiry_ms = int(time.time() * 1000) + 5 * 60 * 1000
+    account = _make_account(email="vault@example.com")
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(expires_at_ms=near_expiry_ms),
+    )
+
+    async def fake_refresh(refresh_token):
+        raise _http_error(400, json_body={"error": "invalid_request"})
+
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    async def fake_probe(token):
+        return {}
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    _, stale = await bg._process_single_account(account, "other@example.com")
+    assert stale is not None
+    assert "transient failure" in stale
+    assert f"×{bg._TRANSIENT_REFRESH_ESCALATE_AFTER}" in stale
+    # Counters cleared on escalation.
+    assert "vault@example.com" not in bg._refresh_backoff_count
+    assert "vault@example.com" not in bg._refresh_backoff_first_failure_at
+
+
+@pytest.mark.asyncio
+async def test_refresh_transient_escalates_after_wall_clock_ceiling(monkeypatch):
+    """If the first transient was > 24 h ago, escalate regardless of count.
+
+    Protects against counter-reset loops (Anthropic intermittently succeeds
+    resetting the count; feature still broken for the account in net).
+    """
+    # Count well below threshold, but first-failure timestamp older than the
+    # 24 h ceiling — escalation must fire on this attempt.
+    bg._refresh_backoff_count["vault@example.com"] = 2
+    bg._refresh_backoff_first_failure_at["vault@example.com"] = (
+        time.monotonic() - (bg._TRANSIENT_REFRESH_ESCALATE_AFTER_SECONDS + 60)
+    )
+
+    near_expiry_ms = int(time.time() * 1000) + 5 * 60 * 1000
+    account = _make_account(email="vault@example.com")
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(expires_at_ms=near_expiry_ms),
+    )
+
+    async def fake_refresh(refresh_token):
+        raise _http_error(400, json_body={"error": "invalid_request"})
+
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    async def fake_probe(token):
+        return {}
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    _, stale = await bg._process_single_account(account, "other@example.com")
+    assert stale is not None
+    assert "transient failure" in stale
+    assert "vault@example.com" not in bg._refresh_backoff_first_failure_at
+
+
+@pytest.mark.asyncio
+async def test_refresh_backoff_skips_retry_within_deadline(monkeypatch):
+    """While refresh-backoff deadline is in the future, skip the refresh attempt."""
+    bg._refresh_backoff_until.clear()
+    bg._refresh_backoff_count.clear()
+    bg._refresh_backoff_until["vault@example.com"] = time.monotonic() + 60.0
+    bg._refresh_backoff_count["vault@example.com"] = 1
+
+    near_expiry_ms = int(time.time() * 1000) + 5 * 60 * 1000
+    account = _make_account(email="vault@example.com")
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(expires_at_ms=near_expiry_ms),
+    )
+
+    refresh_calls = []
+    async def fake_refresh(refresh_token):
+        refresh_calls.append(refresh_token)
+        return {"access_token": "new", "expires_in": 3600}
+
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    async def fake_probe(token):
+        return {}
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    _, stale = await bg._process_single_account(account, "other@example.com")
+    assert stale is None
+    assert refresh_calls == []  # refresh was skipped
+
+
+@pytest.mark.asyncio
+async def test_refresh_success_clears_backoff_counters(monkeypatch):
+    bg._refresh_backoff_until.clear()
+    bg._refresh_backoff_count.clear()
+    bg._refresh_backoff_count["vault@example.com"] = 3
+    # Deadline is in the past — no skip.
+    bg._refresh_backoff_until["vault@example.com"] = time.monotonic() - 1.0
+
+    near_expiry_ms = int(time.time() * 1000) + 5 * 60 * 1000
+    account = _make_account(email="vault@example.com")
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(expires_at_ms=near_expiry_ms),
+    )
+
+    async def fake_refresh(refresh_token):
+        return {"access_token": "new-access", "expires_in": 3600}
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    saved = {}
+    def fake_save(email, new_token, new_expires_at_ms, new_refresh):
+        saved["email"] = email
+        saved["token"] = new_token
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", fake_save)
+
+    async def fake_probe(token):
+        return {}
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    _, stale = await bg._process_single_account(account, "other@example.com")
+    assert stale is None
+    assert saved["token"] == "new-access"
+    assert "vault@example.com" not in bg._refresh_backoff_count
+    assert "vault@example.com" not in bg._refresh_backoff_until

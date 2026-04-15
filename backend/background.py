@@ -23,15 +23,41 @@ from .ws import WebSocketManager
 logger = logging.getLogger(__name__)
 
 
-# ── Per-account 429 backoff state ────────────────────────────────────────────
+# ── Per-account 429 backoff state (probe path) ───────────────────────────────
 # Maps email → monotonic deadline (seconds); if time.monotonic() < deadline,
 # skip the probe and return stale cached data instead.
 _backoff_until: dict[str, float] = {}
 # Maps email → consecutive 429 count for exponential doubling.
 _backoff_count: dict[str, int] = {}
 
+# ── Per-account transient-refresh backoff state (refresh path) ───────────────
+# Parallel to the 429 backoff above, but for Anthropic's refresh endpoint
+# returning TRANSIENT classifications (400 with non-terminal error codes, bare
+# 401, 429, 5xx).  Keeps the stale_reason marker off the account until we
+# have tried enough times to be confident the refresh_token is genuinely dead.
+# State resets on server restart — intentional; the first post-restart poll
+# re-enters the escalation ladder from zero.
+_refresh_backoff_until: dict[str, float] = {}
+_refresh_backoff_count: dict[str, int] = {}
+# When the FIRST transient failure for this email was observed.  Used as a
+# wall-clock ceiling for escalation so rapid-fire retries can't prematurely
+# flip an account stale AND a long-running hung state can't permanently
+# avoid escalation via periodic counter resets.
+_refresh_backoff_first_failure_at: dict[str, float] = {}
+
 _BACKOFF_INITIAL = settings.rate_limit_backoff_initial
 _BACKOFF_MAX = settings.rate_limit_backoff_max
+
+# Consecutive-failure count at which we escalate to terminal stale_reason.
+# Under exponential backoff the actual poll-cycle wall-clock to reach N=5
+# is ~63 min in active mode (15 s cadence) and longer in idle mode (300 s
+# cadence, each skipped poll wastes 300 s).
+_TRANSIENT_REFRESH_ESCALATE_AFTER = 5
+# Second independent escalation trigger: if the first transient failure is
+# older than this many seconds, escalate regardless of the current counter
+# value.  Protects against counter-reset loops where Anthropic intermittently
+# succeeds (resetting the count) but fails overall for a day+.
+_TRANSIENT_REFRESH_ESCALATE_AFTER_SECONDS = 24 * 3600
 
 
 # Refresh window for vault accounts.  CCSwitch is the sole consumer of vault
@@ -124,7 +150,11 @@ async def _process_single_account(
         # Refresh the token if near expiry — ONLY for vault accounts.
         # The active account's refresh lifecycle is owned by Claude Code;
         # CCSwitch refreshing it would race with the CLI.
-        if not account.stale_reason and not is_active:
+        if (
+            not account.stale_reason
+            and not is_active
+            and _refresh_backoff_until.get(account.email, 0.0) <= time.monotonic()
+        ):
             try:
                 expires_at_ms = token_info.get("token_expires_at")
                 now_ms = int(time.time() * 1000)
@@ -148,25 +178,68 @@ async def _process_single_account(
                             )
                             token = new_token
                             logger.info("Refreshed vault token for %s", account.email)
+                            _refresh_backoff_until.pop(account.email, None)
+                            _refresh_backoff_count.pop(account.email, None)
+                            _refresh_backoff_first_failure_at.pop(account.email, None)
             except httpx.HTTPStatusError as refresh_http_err:
+                kind = anthropic_api.parse_oauth_error(refresh_http_err)
                 status = refresh_http_err.response.status_code
-                # Anthropic returns 400 when the refresh_token has been
-                # rotated or invalidated and 401 when it is explicitly
-                # revoked.  Both are terminal — the follow-up probe would
-                # just fail with 401 — so we raise a marker that skips the
-                # probe and preserves the precise stale_reason.
-                if status in (400, 401):
-                    reason_detail = "revoked" if status == 401 else "rejected (400)"
+                if kind is anthropic_api.OAuthErrorKind.TERMINAL_REVOKED:
                     logger.error(
-                        "Refresh token %s for %s — re-login required.",
-                        reason_detail, account.email,
+                        "Refresh token revoked for %s (HTTP 401 + terminal body) — re-login required.",
+                        account.email,
                     )
-                    new_stale_reason = f"Refresh token {reason_detail} — re-login required"
+                    new_stale_reason = "Refresh token revoked — re-login required"
+                    _refresh_backoff_until.pop(account.email, None)
+                    _refresh_backoff_count.pop(account.email, None)
+                    _refresh_backoff_first_failure_at.pop(account.email, None)
+                    raise _RefreshTerminal()
+                if kind is anthropic_api.OAuthErrorKind.TERMINAL_REJECTED:
+                    logger.error(
+                        "Refresh token rejected for %s (HTTP 400 + terminal OAuth code) — re-login required.",
+                        account.email,
+                    )
+                    new_stale_reason = "Refresh token rejected — re-login required"
+                    _refresh_backoff_until.pop(account.email, None)
+                    _refresh_backoff_count.pop(account.email, None)
+                    _refresh_backoff_first_failure_at.pop(account.email, None)
+                    raise _RefreshTerminal()
+                # TRANSIENT: 400 with non-terminal error, bare 401, 429, 5xx, network.
+                now = time.monotonic()
+                _refresh_backoff_first_failure_at.setdefault(account.email, now)
+                first_failure_at = _refresh_backoff_first_failure_at[account.email]
+                count = _refresh_backoff_count.get(account.email, 0) + 1
+                _refresh_backoff_count[account.email] = count
+                backoff_seconds = min(
+                    _BACKOFF_INITIAL * (2 ** (count - 1)), _BACKOFF_MAX
+                )
+                _refresh_backoff_until[account.email] = now + backoff_seconds
+                wall_age = now - first_failure_at
+                escalate = (
+                    count >= _TRANSIENT_REFRESH_ESCALATE_AFTER
+                    or wall_age >= _TRANSIENT_REFRESH_ESCALATE_AFTER_SECONDS
+                )
+                if escalate:
+                    logger.error(
+                        "Refresh transient escalation for %s — count=%d wall=%ds last HTTP %d.",
+                        account.email, count, int(wall_age), status,
+                    )
+                    new_stale_reason = (
+                        f"Refresh endpoint transient failure ×{count} "
+                        f"over {int(wall_age // 60)} min (last HTTP {status}) — "
+                        f"re-login required"
+                    )
+                    _refresh_backoff_until.pop(account.email, None)
+                    _refresh_backoff_count.pop(account.email, None)
+                    _refresh_backoff_first_failure_at.pop(account.email, None)
                     raise _RefreshTerminal()
                 logger.warning(
-                    "Token refresh HTTP error for %s: %s",
-                    account.email, refresh_http_err,
+                    "Refresh transient for %s (HTTP %d, offense #%d, wall %ds) — "
+                    "backing off %ds; will retry (no stale_reason yet).",
+                    account.email, status, count, int(wall_age), backoff_seconds,
                 )
+                # Fall through to return cached usage — no stale_reason write.
+                raise
             except _RefreshTerminal:
                 raise
             except Exception as refresh_err:
