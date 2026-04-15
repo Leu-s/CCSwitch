@@ -88,6 +88,61 @@ class _RefreshTerminal(Exception):
     meaning the stored refresh_token is dead.  Skips the subsequent probe."""
 
 
+def _record_transient_refresh_failure(
+    email: str,
+    status: int | None,
+) -> str | None:
+    """Increment the transient-refresh backoff bookkeeping for ``email``.
+
+    Shared by both the ``httpx.HTTPStatusError`` TRANSIENT branch (400 with
+    non-terminal body, bare 401, 429, 5xx) and the ``httpx.RequestError``
+    branch (network-level failures — ConnectError, ReadTimeout, DNS, etc.).
+
+    Returns a ``stale_reason`` string if this call tripped the escalation
+    threshold (consecutive-count OR 24 h wall-clock ceiling), else
+    ``None``.  Caller sets ``new_stale_reason`` from the returned string
+    and raises ``_RefreshTerminal`` when it is non-None.
+
+    ``status`` is the HTTP status for HTTPStatusError; pass ``None`` for
+    network-level errors.  The formatter adapts the message accordingly.
+    """
+    now = time.monotonic()
+    _refresh_backoff_first_failure_at.setdefault(email, now)
+    first_failure_at = _refresh_backoff_first_failure_at[email]
+    count = _refresh_backoff_count.get(email, 0) + 1
+    _refresh_backoff_count[email] = count
+    backoff_seconds = min(
+        _BACKOFF_INITIAL * (2 ** (count - 1)), _BACKOFF_MAX
+    )
+    _refresh_backoff_until[email] = now + backoff_seconds
+    wall_age = now - first_failure_at
+    escalate = (
+        count >= _TRANSIENT_REFRESH_ESCALATE_AFTER
+        or wall_age >= _TRANSIENT_REFRESH_ESCALATE_AFTER_SECONDS
+    )
+    status_tag = f"HTTP {status}" if status is not None else "network error"
+    if escalate:
+        logger.error(
+            "Refresh transient escalation for %s — count=%d wall=%ds last %s.",
+            email, count, int(wall_age), status_tag,
+        )
+        stale = (
+            f"Refresh endpoint transient failure ×{count} "
+            f"over {int(wall_age // 60)} min (last {status_tag}) — "
+            f"re-login required"
+        )
+        _refresh_backoff_until.pop(email, None)
+        _refresh_backoff_count.pop(email, None)
+        _refresh_backoff_first_failure_at.pop(email, None)
+        return stale
+    logger.warning(
+        "Refresh transient for %s (%s, offense #%d, wall %ds) — "
+        "backing off %ds; will retry (no stale_reason yet).",
+        email, status_tag, count, int(wall_age), backoff_seconds,
+    )
+    return None
+
+
 def _maybe_nudge_active(email: str) -> None:
     """Fire a single tmux nudge for an active-account probe 401, subject to
     a per-account cooldown.  ``fire_nudge`` schedules its work via
@@ -114,6 +169,9 @@ def forget_account_state(email: str) -> None:
     _backoff_until.pop(email, None)
     _backoff_count.pop(email, None)
     _last_nudge_at.pop(email, None)
+    _refresh_backoff_until.pop(email, None)
+    _refresh_backoff_count.pop(email, None)
+    _refresh_backoff_first_failure_at.pop(email, None)
 
 
 async def _process_single_account(
@@ -204,43 +262,29 @@ async def _process_single_account(
                     _refresh_backoff_count.pop(account.email, None)
                     _refresh_backoff_first_failure_at.pop(account.email, None)
                     raise _RefreshTerminal()
-                # TRANSIENT: 400 with non-terminal error, bare 401, 429, 5xx, network.
-                now = time.monotonic()
-                _refresh_backoff_first_failure_at.setdefault(account.email, now)
-                first_failure_at = _refresh_backoff_first_failure_at[account.email]
-                count = _refresh_backoff_count.get(account.email, 0) + 1
-                _refresh_backoff_count[account.email] = count
-                backoff_seconds = min(
-                    _BACKOFF_INITIAL * (2 ** (count - 1)), _BACKOFF_MAX
-                )
-                _refresh_backoff_until[account.email] = now + backoff_seconds
-                wall_age = now - first_failure_at
-                escalate = (
-                    count >= _TRANSIENT_REFRESH_ESCALATE_AFTER
-                    or wall_age >= _TRANSIENT_REFRESH_ESCALATE_AFTER_SECONDS
-                )
-                if escalate:
-                    logger.error(
-                        "Refresh transient escalation for %s — count=%d wall=%ds last HTTP %d.",
-                        account.email, count, int(wall_age), status,
-                    )
-                    new_stale_reason = (
-                        f"Refresh endpoint transient failure ×{count} "
-                        f"over {int(wall_age // 60)} min (last HTTP {status}) — "
-                        f"re-login required"
-                    )
-                    _refresh_backoff_until.pop(account.email, None)
-                    _refresh_backoff_count.pop(account.email, None)
-                    _refresh_backoff_first_failure_at.pop(account.email, None)
+                # TRANSIENT: 400 with non-terminal error, bare 401, 429, 5xx.
+                stale = _record_transient_refresh_failure(account.email, status)
+                if stale is not None:
+                    new_stale_reason = stale
                     raise _RefreshTerminal()
-                logger.warning(
-                    "Refresh transient for %s (HTTP %d, offense #%d, wall %ds) — "
-                    "backing off %ds; will retry (no stale_reason yet).",
-                    account.email, status, count, int(wall_age), backoff_seconds,
-                )
                 # Fall through to return cached usage — no stale_reason write.
                 raise
             except _RefreshTerminal:
+                raise
+            except httpx.RequestError as refresh_net_err:
+                # Network-level failures — ConnectError, ReadTimeout, DNS
+                # failures, etc.  Always transient: fold into the same
+                # escalation ladder as HTTPStatusError TRANSIENT so a
+                # sustained network outage eventually trips stale_reason
+                # instead of looping silently.
+                logger.warning(
+                    "Refresh network error for %s: %s",
+                    account.email, refresh_net_err,
+                )
+                stale = _record_transient_refresh_failure(account.email, None)
+                if stale is not None:
+                    new_stale_reason = stale
+                    raise _RefreshTerminal()
                 raise
             except Exception as refresh_err:
                 logger.warning(

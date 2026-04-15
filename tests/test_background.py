@@ -603,3 +603,79 @@ async def test_refresh_success_clears_backoff_counters(monkeypatch):
     assert saved["token"] == "new-access"
     assert "vault@example.com" not in bg._refresh_backoff_count
     assert "vault@example.com" not in bg._refresh_backoff_until
+
+
+@pytest.mark.asyncio
+async def test_refresh_success_then_transient_starts_fresh_escalation_clock(monkeypatch):
+    """After a successful refresh clears counters, a subsequent transient
+    failure must start first_failure_at fresh — not reuse an old value that
+    would let the 24h wall-clock trigger escalation prematurely."""
+    near_expiry_ms = int(time.time() * 1000) + 5 * 60 * 1000
+    account = _make_account(email="vault@example.com")
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(expires_at_ms=near_expiry_ms),
+    )
+
+    async def fake_probe(token):
+        return {}
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    # Phase 1: success — all three dicts clear.
+    async def ok_refresh(rt):
+        return {"access_token": "new", "expires_in": 3600}
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", ok_refresh)
+
+    def noop_save(*args, **kwargs):
+        pass
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", noop_save)
+
+    _, stale = await bg._process_single_account(account, "other@example.com")
+    assert stale is None
+    assert "vault@example.com" not in bg._refresh_backoff_first_failure_at
+
+    # Phase 2: one transient.  first_failure_at must be freshly set (close to now).
+    before = time.monotonic()
+    async def bad_refresh(rt):
+        raise _http_error(400, json_body={"error": "invalid_request"})
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", bad_refresh)
+
+    # Force deadline to past so the skip gate doesn't fire.
+    bg._refresh_backoff_until.pop("vault@example.com", None)
+
+    _, stale = await bg._process_single_account(account, "other@example.com")
+    assert stale is None  # not escalated yet
+    assert bg._refresh_backoff_count["vault@example.com"] == 1
+    # first_failure_at is close to now, not some ancient value.
+    first_at = bg._refresh_backoff_first_failure_at["vault@example.com"]
+    assert first_at >= before  # freshly set
+    assert first_at - time.monotonic() < 1.0  # within the past second
+
+
+@pytest.mark.asyncio
+async def test_refresh_network_error_is_transient(monkeypatch):
+    """httpx.RequestError on refresh must increment the transient backoff
+    counter, not fall through to the generic-Exception handler (which
+    would let sustained network outages avoid escalation entirely)."""
+    import httpx
+    near_expiry_ms = int(time.time() * 1000) + 5 * 60 * 1000
+    account = _make_account(email="vault@example.com")
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(expires_at_ms=near_expiry_ms),
+    )
+
+    async def net_error(rt):
+        raise httpx.ConnectError("simulated network outage")
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", net_error)
+
+    async def fake_probe(token):
+        return {}
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    _, stale = await bg._process_single_account(account, "other@example.com")
+    assert stale is None  # not escalated yet
+    assert bg._refresh_backoff_count["vault@example.com"] == 1
+    assert "vault@example.com" in bg._refresh_backoff_first_failure_at
