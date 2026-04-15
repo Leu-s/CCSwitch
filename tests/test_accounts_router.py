@@ -4,7 +4,12 @@ Tests for backend.routers.accounts.
 Uses the ``make_test_app`` conftest fixture to spin up a FastAPI app with
 the accounts router and an in-memory SQLite DB.  All Keychain / swap /
 login-session machinery is monkeypatched out.
+
+These tests are synchronous — the Starlette TestClient drives the event
+loop internally so wrapping them in ``@pytest.mark.asyncio`` breaks the
+``asyncio.run()`` calls used to seed the DB.
 """
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -15,10 +20,8 @@ from backend.cache import cache as _cache
 from backend.database import Base, get_db
 from backend.models import Account
 from backend.routers import accounts as accounts_router
-from backend.services import account_queries as aq
 from backend.services import account_service as ac
 from backend.services import login_session_service as ls
-from backend.services import settings_service as ss
 from backend.services import switcher as sw
 
 
@@ -26,19 +29,26 @@ from backend.services import switcher as sw
 
 
 @pytest.fixture
-async def app_and_db():
-    """Create an app backed by an isolated async SQLite DB.
+def client_and_factory():
+    """Create a sync TestClient backed by an isolated async SQLite DB.
 
-    Returns (client, session_factory) so tests can seed state directly.
+    Returns (client, session_factory).  The caller can run
+    ``asyncio.run()`` to seed the DB because the fixture itself is not
+    inside an event loop.
     """
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     url = "sqlite+aiosqlite:///./test_accounts_router.db"
     engine = create_async_engine(url, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+
+    async def _init():
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+
+    asyncio.run(_init())
+
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async def override_get_db():
@@ -52,11 +62,9 @@ async def app_and_db():
 
     yield client, factory
 
-    await engine.dispose()
-
 
 @pytest.fixture(autouse=True)
-async def _wipe_cache():
+def _wipe_cache():
     _cache._usage.clear()
     _cache._token_info.clear()
     yield
@@ -67,7 +75,9 @@ async def _wipe_cache():
 @pytest.fixture(autouse=True)
 def _stub_everywhere(monkeypatch):
     """Default stubs — tests override individual callables as needed."""
-    async def noop_get_active(): return None
+    async def noop_get_active():
+        return None
+
     monkeypatch.setattr(ac, "get_active_email_async", noop_get_active)
     monkeypatch.setattr(ac, "get_active_email", lambda: None)
 
@@ -80,8 +90,8 @@ def _stub_everywhere(monkeypatch):
 
 
 def _insert_account(factory, **kwargs) -> int:
-    """Helper — insert one Account row and return its id."""
-    import asyncio
+    """Helper — insert one Account row and return its id.  Called from
+    the sync portion of the test body."""
     defaults = dict(
         email="a@example.com",
         threshold_pct=95.0,
@@ -103,15 +113,28 @@ def _insert_account(factory, **kwargs) -> int:
     return asyncio.run(_insert())
 
 
+def _query_account(factory, account_id: int) -> Account:
+    async def _run():
+        async with factory() as session:
+            row = (await session.execute(
+                select(Account).where(Account.id == account_id)
+            )).scalar_one()
+            # Load attributes before session closes.
+            _ = (row.id, row.email, row.stale_reason, row.enabled)
+            return row
+
+    return asyncio.run(_run())
+
+
 # ── GET /api/accounts ─────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_list_accounts_has_is_active_no_waiting_field(app_and_db, monkeypatch):
-    client, factory = app_and_db
+def test_list_accounts_has_is_active_no_waiting_field(client_and_factory, monkeypatch):
+    client, factory = client_and_factory
     _insert_account(factory, email="a@example.com")
 
-    async def fake_active(): return "a@example.com"
+    async def fake_active():
+        return "a@example.com"
 
     monkeypatch.setattr(ac, "get_active_email_async", fake_active)
 
@@ -128,11 +151,10 @@ async def test_list_accounts_has_is_active_no_waiting_field(app_and_db, monkeypa
 # ── POST /api/accounts/verify-login ───────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_verify_login_writes_vault_and_autoswaps_first(app_and_db, monkeypatch):
-    client, factory = app_and_db
+def test_verify_login_writes_vault_and_autoswaps_first(client_and_factory, monkeypatch):
+    client, factory = client_and_factory
 
-    async def fake_verify(sid):
+    def fake_verify(sid):
         return {
             "success": True,
             "email": "alice@example.com",
@@ -143,7 +165,6 @@ async def test_verify_login_writes_vault_and_autoswaps_first(app_and_db, monkeyp
             "expected_email": None,
         }
 
-    # ls.verify_login_session is called via asyncio.to_thread(ls.verify_login_session, sid)
     monkeypatch.setattr(ls, "verify_login_session", fake_verify)
     monkeypatch.setattr(ls, "cleanup_login_session", lambda sid: None)
 
@@ -163,7 +184,6 @@ async def test_verify_login_writes_vault_and_autoswaps_first(app_and_db, monkeyp
 
     monkeypatch.setattr(ac, "swap_to_account", fake_swap)
 
-    # Test: the verify_login endpoint accepts `session_id` as a query param.
     resp = client.post("/api/accounts/verify-login?session_id=abc")
     assert resp.status_code == 200
     body = resp.json()
@@ -172,13 +192,15 @@ async def test_verify_login_writes_vault_and_autoswaps_first(app_and_db, monkeyp
 
     # Vault write happened.
     assert save_calls and save_calls[0][0] == "alice@example.com"
-
     # First-account auto-swap happened.
     assert swap_calls == ["alice@example.com"]
 
     # Account row is in DB.
-    async with factory() as s:
-        rows = (await s.execute(select(Account))).scalars().all()
+    async def _count():
+        async with factory() as s:
+            return (await s.execute(select(Account))).scalars().all()
+
+    rows = asyncio.run(_count())
     assert len(rows) == 1
     assert rows[0].email == "alice@example.com"
 
@@ -186,12 +208,12 @@ async def test_verify_login_writes_vault_and_autoswaps_first(app_and_db, monkeyp
 # ── DELETE /api/accounts/{id} — non-active ────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_delete_non_active_calls_delete_everywhere(app_and_db, monkeypatch):
-    client, factory = app_and_db
+def test_delete_non_active_calls_delete_everywhere(client_and_factory, monkeypatch):
+    client, factory = client_and_factory
     acc_id = _insert_account(factory, email="bob@example.com")
 
-    async def fake_active(): return "alice@example.com"  # alice is active, not bob
+    async def fake_active():
+        return "alice@example.com"  # alice is active, not bob
 
     monkeypatch.setattr(ac, "get_active_email_async", fake_active)
 
@@ -210,13 +232,13 @@ async def test_delete_non_active_calls_delete_everywhere(app_and_db, monkeypatch
 # ── DELETE /api/accounts/{id} — active with replacement ──────────────────
 
 
-@pytest.mark.asyncio
-async def test_delete_active_with_replacement_calls_perform_switch(app_and_db, monkeypatch):
-    client, factory = app_and_db
+def test_delete_active_with_replacement_calls_perform_switch(client_and_factory, monkeypatch):
+    client, factory = client_and_factory
     a_id = _insert_account(factory, email="alice@example.com", priority=0)
-    b_id = _insert_account(factory, email="bob@example.com", priority=1)
+    _insert_account(factory, email="bob@example.com", priority=1)
 
-    async def fake_active(): return "alice@example.com"
+    async def fake_active():
+        return "alice@example.com"
 
     monkeypatch.setattr(ac, "get_active_email_async", fake_active)
 
@@ -244,12 +266,12 @@ async def test_delete_active_with_replacement_calls_perform_switch(app_and_db, m
 # ── POST /api/accounts/{id}/switch — already active ──────────────────────
 
 
-@pytest.mark.asyncio
-async def test_manual_switch_already_active(app_and_db, monkeypatch):
-    client, factory = app_and_db
+def test_manual_switch_already_active(client_and_factory, monkeypatch):
+    client, factory = client_and_factory
     acc_id = _insert_account(factory, email="a@example.com")
 
-    async def fake_active(): return "a@example.com"
+    async def fake_active():
+        return "a@example.com"
 
     monkeypatch.setattr(ac, "get_active_email_async", fake_active)
 
@@ -271,14 +293,13 @@ async def test_manual_switch_already_active(app_and_db, monkeypatch):
 # ── Re-login verify — matching email ──────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_relogin_verify_matching_email_clears_stale(app_and_db, monkeypatch):
-    client, factory = app_and_db
+def test_relogin_verify_matching_email_clears_stale(client_and_factory, monkeypatch):
+    client, factory = client_and_factory
     acc_id = _insert_account(
         factory, email="alice@example.com", stale_reason="Refresh token revoked",
     )
 
-    async def fake_verify(sid):
+    def fake_verify(sid):
         return {
             "success": True,
             "email": "alice@example.com",
@@ -307,24 +328,20 @@ async def test_relogin_verify_matching_email_clears_stale(app_and_db, monkeypatc
     # Vault save was called.
     assert save_calls == ["alice@example.com"]
     # Stale reason is cleared on the row.
-    async with factory() as s:
-        acc = (await s.execute(
-            select(Account).where(Account.id == acc_id)
-        )).scalar_one()
-        assert acc.stale_reason is None
+    acc = _query_account(factory, acc_id)
+    assert acc.stale_reason is None
 
 
 # ── Re-login verify — wrong email ────────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_relogin_verify_wrong_email_returns_error(app_and_db, monkeypatch):
-    client, factory = app_and_db
+def test_relogin_verify_wrong_email_returns_error(client_and_factory, monkeypatch):
+    client, factory = client_and_factory
     acc_id = _insert_account(
         factory, email="alice@example.com", stale_reason="Refresh token revoked",
     )
 
-    async def fake_verify(sid):
+    def fake_verify(sid):
         return {
             "success": True,
             "email": "bob@example.com",  # wrong identity!
@@ -352,10 +369,7 @@ async def test_relogin_verify_wrong_email_returns_error(app_and_db, monkeypatch)
     assert "alice@example.com" in error
     assert "bob@example.com" in error
     # Stale reason NOT cleared.
-    async with factory() as s:
-        acc = (await s.execute(
-            select(Account).where(Account.id == acc_id)
-        )).scalar_one()
-        assert acc.stale_reason == "Refresh token revoked"
+    acc = _query_account(factory, acc_id)
+    assert acc.stale_reason == "Refresh token revoked"
     # save_new_vault_account never called for wrong-identity.
     assert save_calls == []
