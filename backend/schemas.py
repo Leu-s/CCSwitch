@@ -18,6 +18,11 @@ def _stamp_utc(value: datetime) -> datetime:
 
 UtcDateTime = Annotated[
     datetime,
+    # Contract: naive datetimes get tzinfo=UTC stamped on them (the
+    # SQLAlchemy/SQLite round-trip case); aware datetimes pass through
+    # untouched — the validator does NOT convert non-UTC offsets to UTC.
+    # Every persistence path in this app writes via datetime.now(timezone.utc),
+    # so the aware-non-UTC case never fires; it's documented for completeness.
     AfterValidator(_stamp_utc),
     PlainSerializer(
         lambda v: _stamp_utc(v).isoformat().replace("+00:00", "Z"),

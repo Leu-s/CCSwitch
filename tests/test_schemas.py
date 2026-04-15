@@ -5,7 +5,7 @@ layer.  They exist to catch silent changes to the wire format that
 the frontend depends on.
 """
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from backend.schemas import SwitchLogOut
 
@@ -51,17 +51,17 @@ def test_switch_log_out_serializes_aware_non_utc_preserves_utc_wall_clock():
     non-UTC input retains its offset.  In our codebase all writes are
     UTC-aware so this never fires, but pinning the behaviour helps
     future readers."""
-    from datetime import timedelta
     aware_eest = datetime(
         2026, 4, 15, 22, 46, 59, 198897,
         tzinfo=timezone(timedelta(hours=3)),
     )
     log = _make_switch_log(aware_eest)
     blob = json.loads(log.model_dump_json())
-    # The serialiser does NOT convert to UTC wall clock — it passes
-    # through the existing tz.  If we ever need to force UTC for all
-    # emits, swap PlainSerializer's body to call ``.astimezone(timezone.utc)``.
-    assert blob["triggered_at"].endswith("+03:00") or blob["triggered_at"].endswith("Z")
+    # Passthrough contract: validator only stamps tz on NAIVE inputs.
+    # Aware non-UTC inputs retain their offset verbatim.  If we ever
+    # want to force UTC for all wire output, swap PlainSerializer's
+    # lambda to call ``.astimezone(timezone.utc)`` before isoformat.
+    assert blob["triggered_at"] == "2026-04-15T22:46:59.198897+03:00"
 
 
 def test_switch_log_out_model_dump_accepts_string_input():
@@ -78,3 +78,14 @@ def test_switch_log_out_model_dump_accepts_string_input():
     log = SwitchLogOut(**blob)
     out = json.loads(log.model_dump_json())
     assert out["triggered_at"] == "2026-04-15T19:46:59.198897Z"
+
+
+def test_switch_log_out_serializes_zero_microsecond_datetime():
+    """Zero-microsecond datetimes round-trip through isoformat() WITHOUT
+    the trailing `.000000` segment.  Pin the exact output shape so a
+    future consumer that naively pattern-matches on `\\d{6}Z$` cannot
+    silently drift.  Any matching depth should accept both forms."""
+    naive_no_micro = datetime(2026, 4, 15, 19, 46, 59)
+    log = _make_switch_log(naive_no_micro)
+    blob = json.loads(log.model_dump_json())
+    assert blob["triggered_at"] == "2026-04-15T19:46:59Z"  # no `.000000`
