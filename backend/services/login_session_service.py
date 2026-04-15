@@ -241,9 +241,15 @@ def verify_login_session(session_id: str) -> dict:
             "expected_email": str | None,
         }
 
-    On failure returns ``{"success": False, "error": str}``.  On success
-    the session is popped from the tracking dict; on failure it is left
-    in place so the user can retry ``verify`` without restarting.
+    On failure returns ``{"success": False, "error": str}``.
+
+    This function is read-only w.r.t. the session registry: success and
+    failure BOTH leave the session in place.  The caller is expected to
+    invoke ``cleanup_login_session`` to tear down the scratch dir, the
+    tmux window, and the hashed Keychain entry — whether the verify
+    succeeded (normal teardown) or needs a clean retry (no-op on the
+    stub).  Popping here would defeat the teardown because
+    ``cleanup_login_session`` looks the session up by id.
     """
     with _sessions_lock:
         data = _active_login_sessions.get(session_id)
@@ -274,11 +280,6 @@ def verify_login_session(session_id: str) -> dict:
                 "Make sure the login completed in the terminal."
             ),
         }
-
-    # Success — stop tracking so the registry does not hold a handle to
-    # the scratch dir we are about to delete.
-    with _sessions_lock:
-        _active_login_sessions.pop(session_id, None)
 
     return {
         "success": True,

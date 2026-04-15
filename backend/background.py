@@ -64,8 +64,9 @@ class _RefreshTerminal(Exception):
 
 def _maybe_nudge_active(email: str) -> None:
     """Fire a single tmux nudge for an active-account probe 401, subject to
-    a per-account cooldown.  Runs the blocking fire_nudge call via an
-    asyncio thread so it does not block the event loop."""
+    a per-account cooldown.  ``fire_nudge`` schedules its work via
+    ``asyncio.create_task`` and returns immediately, so this call never
+    blocks the event loop."""
     now = time.monotonic()
     deadline = _last_nudge_at.get(email, 0.0)
     if now < deadline:
@@ -75,6 +76,18 @@ def _maybe_nudge_active(email: str) -> None:
         tmux_service.fire_nudge()
     except Exception as e:  # pragma: no cover — tmux errors logged inside
         logger.debug("fire_nudge raised: %s", e)
+
+
+def forget_account_state(email: str) -> None:
+    """Drop every module-level per-account bookkeeping entry for ``email``.
+
+    Called from the delete-account router so the backoff + nudge-cooldown
+    dicts do not leak across account churn.  Safe to call for an email
+    that was never tracked.
+    """
+    _backoff_until.pop(email, None)
+    _backoff_count.pop(email, None)
+    _last_nudge_at.pop(email, None)
 
 
 async def _process_single_account(
@@ -344,10 +357,19 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
             # Exception and BaseException subclasses (notably
             # CancelledError during lifespan shutdown).
             if isinstance(result, BaseException):
-                logger.exception(
-                    "_process_single_account raised for %s: %s",
-                    account.email, result,
-                )
+                # CancelledError during lifespan shutdown is expected; log
+                # at debug so the shutdown path does not spam stderr with
+                # one stack-less traceback per account.
+                if isinstance(result, asyncio.CancelledError):
+                    logger.debug(
+                        "_process_single_account cancelled for %s",
+                        account.email,
+                    )
+                else:
+                    logger.exception(
+                        "_process_single_account raised for %s: %s",
+                        account.email, result,
+                    )
                 usage_entry = {
                     "id": account.id,
                     "email": account.email,

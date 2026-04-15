@@ -259,8 +259,12 @@ def test_delete_active_with_replacement_calls_perform_switch(client_and_factory,
     assert resp.status_code == 204
     # perform_switch was called to activate bob — the replacement.
     assert switch_calls == ["bob@example.com"]
-    # delete_account_everywhere was NOT called — the swap handles the cleanup.
-    assert delete_calls == []
+    # delete_account_everywhere is called AFTER the swap to wipe the
+    # outgoing account's vault entry.  perform_switch checkpoints the
+    # outgoing credentials into vault[alice] as part of step 2; without
+    # this cleanup call every active-delete would leak a ghost vault
+    # entry for the deleted email.
+    assert delete_calls == ["alice@example.com"]
 
 
 # ── POST /api/accounts/{id}/switch — already active ──────────────────────

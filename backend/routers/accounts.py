@@ -250,13 +250,19 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
 
     logger.info("Deleting account %s (id=%d)", account.email, account_id)
 
-    # If this account is currently active, swap away first.  If there is
-    # no replacement, just clear its credentials — the new-terminal shell
-    # will show no active identity until the user picks one.
+    # If this account is currently active, swap away first.  perform_switch
+    # checkpoints the OUTGOING account (us) into its vault entry as part of
+    # the swap, so after the switch returns we still need to explicitly
+    # wipe that newly-written vault entry — otherwise every active-account
+    # delete leaks a ghost vault entry for the deleted email.  If there is
+    # no replacement, clear credentials outright and disable the service.
     if account.email == await ac.get_active_email_async():
         next_acc = await sw.get_next_account(account.email, db)
         if next_acc:
             await sw.perform_switch(next_acc, "manual", db, ws_manager)
+            # Wipe the checkpointed vault entry for the now-not-active
+            # deleted account — perform_switch populated it during step 2.
+            await asyncio.to_thread(ac.delete_account_everywhere, account.email)
         else:
             await asyncio.to_thread(ac.delete_account_everywhere, account.email)
             if await ss.get_bool("service_enabled", False, db):
@@ -272,6 +278,10 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     await cache.invalidate(account.email)
+    # Clear module-level per-account state in the background loop so the
+    # backoff / nudge-cooldown dicts do not grow unbounded across churn.
+    from ..background import forget_account_state
+    forget_account_state(account.email)
 
     try:
         await ws_manager.broadcast({"type": "account_deleted", "id": account_id})

@@ -67,16 +67,22 @@ async def get_next_account(current_email: str, db: AsyncSession) -> Account | No
 
 
 async def switch_if_active_disabled(
-    account: "Account",
+    account: Account,
     db: AsyncSession,
     ws: WebSocketManager,
 ) -> None:
     """If ``account`` is the currently active one, swap away from it.
-    Called when an account is disabled via the API."""
+
+    Called when a user explicitly disables the currently-active account
+    via the PATCH endpoint.  The ``service_enabled`` master toggle is
+    NOT checked here: the user's explicit "disable this" action should
+    move them off the account whether or not auto-switching is on.
+    When no replacement is eligible the function is a no-op and the
+    disabled account remains active until the user picks another one
+    manually — better than silently breaking the "disable = move away"
+    mental model.
+    """
     if account.email != await ac.get_active_email_async():
-        return
-    service_enabled = await ss.get_bool("service_enabled", False, db)
-    if not service_enabled:
         return
     next_acc = await get_next_account(account.email, db)
     if next_acc:

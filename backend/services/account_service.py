@@ -60,9 +60,12 @@ def _load_json_safe(path: str) -> dict:
 def _atomic_write_json(path: str, data: dict, mode: int = 0o600) -> None:
     """Write ``data`` as JSON to ``path`` via a same-dir tmp file + os.replace.
 
-    Creates the parent directory if needed — but only when the parent is
-    one of CCSwitch's known locations (~/.claude or its parent); never
-    creates an arbitrary directory that happens to appear in ``path``.
+    Creates the parent directory if it does not already exist.  Callers
+    are expected to pass a path inside a known location (the HOME root,
+    ``~/.claude``, or a test tmpdir fixture); there is no defensive
+    validation of ``path`` beyond the parent-dir creation — this helper
+    is module-private in spirit and is not intended for arbitrary paths.
+
     Raises on failure so callers that assume the write succeeded can
     treat a swap as failed.
     """
@@ -181,6 +184,17 @@ def _swap_to_account_locked(target_email: str) -> dict:
         raise SwapError(
             f"Cannot activate {target_email}: vault entry has no refresh token"
         )
+    # The identity file write (step 4) needs oauthAccount + userID from
+    # the incoming blob.  Refuse to proceed if either is missing — without
+    # them the CLI's /stats would keep showing the pre-swap identity even
+    # though the standard Keychain entry was rewritten, and the startup
+    # integrity check would try to reconcile from a vault blob that still
+    # lacks the metadata it needs.
+    if not isinstance(incoming.get("oauthAccount"), dict):
+        raise SwapError(
+            f"Cannot activate {target_email}: vault entry has no oauthAccount "
+            "(re-login required)"
+        )
 
     # ── Step 2: checkpoint outgoing ───────────────────────────────────────
     current_standard = cp.read_standard()
@@ -251,14 +265,17 @@ def _merge_checkpoint(outgoing_email: str, fresh_standard: dict) -> dict:
         }
         if token_fields:
             merged["claudeAiOauth"] = token_fields
-    # If fresh_standard carries fresh oauthAccount / userID (the CLI
+    # If fresh_standard carries a fresh oauthAccount / userID (the CLI
     # sometimes writes both), prefer them so the vault learns about
-    # upstream identity changes.
+    # upstream identity changes.  Both are gated on a truthy value so a
+    # stale/empty field in the standard entry cannot clobber the vault's
+    # existing identity metadata.
     fresh_oauth = fresh_standard.get("oauthAccount")
-    if isinstance(fresh_oauth, dict):
+    if isinstance(fresh_oauth, dict) and fresh_oauth:
         merged["oauthAccount"] = fresh_oauth
-    if "userID" in fresh_standard:
-        merged["userID"] = fresh_standard["userID"]
+    fresh_user_id = fresh_standard.get("userID")
+    if fresh_user_id:
+        merged["userID"] = fresh_user_id
     return merged
 
 

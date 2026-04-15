@@ -124,6 +124,52 @@ def test_verify_login_session_success(fake_tmux, tmpdir_home, monkeypatch):
     assert result["kind"] == "add"
 
 
+def test_verify_login_session_leaves_session_in_registry_on_success(
+    fake_tmux, tmpdir_home, monkeypatch
+):
+    """verify_login_session must NOT pop the session on success.
+
+    Regression guard for a bug where popping made the subsequent
+    ``cleanup_login_session`` call a silent no-op — which meant the
+    tmux window, scratch dir, and hashed Keychain entry all leaked
+    on every successful login.
+    """
+    info = ls.start_login_session()
+    sid = info["session_id"]
+    scratch = ls._active_login_sessions[sid]["scratch_dir"]
+    with open(os.path.join(scratch, ".claude.json"), "w") as f:
+        json.dump({
+            "oauthAccount": {"emailAddress": "alice@example.com"},
+            "userID": "uid-alice",
+        }, f)
+    monkeypatch.setattr(
+        cp, "read_login_scratch",
+        lambda path: {"claudeAiOauth": {"accessToken": "at", "refreshToken": "rt"}},
+    )
+
+    result = ls.verify_login_session(sid)
+    assert result["success"] is True
+
+    # The session must still be in the registry so cleanup_login_session
+    # can find it and run the teardown (kill-window, rmtree, keychain).
+    assert sid in ls._active_login_sessions
+
+    # Now run cleanup and verify the session is gone + teardown happened.
+    delete_calls: list[str] = []
+    monkeypatch.setattr(
+        cp, "delete_login_scratch",
+        lambda path: delete_calls.append(path),
+    )
+    ls.cleanup_login_session(sid)
+    assert sid not in ls._active_login_sessions
+    assert delete_calls == [scratch]
+    assert not os.path.isdir(scratch)
+    kill_window_calls = [
+        c for c in fake_tmux if len(c) >= 2 and c[1] == "kill-window"
+    ]
+    assert kill_window_calls, "tmux kill-window was not invoked by cleanup"
+
+
 def test_verify_login_session_missing_email(fake_tmux, tmpdir_home, monkeypatch):
     info = ls.start_login_session()
     sid = info["session_id"]

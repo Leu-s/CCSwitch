@@ -270,7 +270,13 @@ def _write_backup(rows: list[tuple], legacy_services: list[str]) -> None:
             _BACKUP_PATH,
         )
     except Exception as e:
+        # The backup IS the user's only safety net.  Failing silently and
+        # continuing through the destructive steps leaves the user with no
+        # recovery path if the migration itself has a bug.  Abort instead.
         logger.error("Failed to write migration backup: %s", e)
+        raise RuntimeError(
+            f"Migration aborted: cannot write backup to {_BACKUP_PATH}: {e}"
+        ) from e
 
 
 def upgrade() -> None:
@@ -302,9 +308,18 @@ def upgrade() -> None:
     stale_ids: list[int] = []
     for acct_id, email, config_dir in rows:
         existing_vault = _read_keychain(_VAULT_SERVICE, email)
-        if existing_vault and (existing_vault.get("claudeAiOauth") or existing_vault.get("refreshToken")):
-            logger.info("Skipping %s — vault entry already present", email)
-            continue
+        # Treat the vault entry as "already migrated" only when it has a
+        # usable refresh_token.  A truncated blob from a prior crashed run
+        # (``{"claudeAiOauth": {}}`` or a blob with only an accessToken)
+        # is not usable and must be re-migrated from the legacy source.
+        if existing_vault:
+            existing_oauth = existing_vault.get("claudeAiOauth")
+            if (
+                isinstance(existing_oauth, dict)
+                and existing_oauth.get("refreshToken")
+            ):
+                logger.info("Skipping %s — vault entry already present", email)
+                continue
 
         creds = _read_legacy_credentials(config_dir) if config_dir else None
         blob = _build_vault_blob(creds, config_dir or "") if creds else None
@@ -345,10 +360,17 @@ def upgrade() -> None:
             active_email = maybe_email
 
     # ── 3. Promote active account's vault entry into the standard entry ───
+    # Ordering: identity file FIRST (the HOME-root ``~/.claude.json``
+    # oauthAccount metadata), then standard Keychain entry, then file
+    # fallback.  Writing the identity file first means if anything below
+    # fails, the user's next ``claude`` startup sees the new oauthAccount
+    # but possibly stale tokens — which the CLI recovers from by
+    # refreshing on its next API call.  The reverse order leaves
+    # ``/stats`` showing one identity while API calls authenticate as
+    # another — the exact trap that motivated the d3f90c6 fix.
     if active_email:
         active_blob = _read_keychain(_VAULT_SERVICE, active_email)
         if active_blob:
-            _write_keychain(_STANDARD_SERVICE, getpass.getuser(), active_blob)
             oauth_account = active_blob.get("oauthAccount")
             if isinstance(oauth_account, dict):
                 claude_data = _load_json_safe(_CLAUDE_JSON)
@@ -358,11 +380,33 @@ def upgrade() -> None:
                 try:
                     _atomic_write_json(_CLAUDE_JSON, claude_data)
                 except Exception as e:
-                    logger.warning("Failed to update %s: %s", _CLAUDE_JSON, e)
+                    logger.error(
+                        "FATAL: failed to write identity file %s: %s — "
+                        "aborting migration with active account unset",
+                        _CLAUDE_JSON, e,
+                    )
+                    raise RuntimeError(
+                        f"Could not write identity file {_CLAUDE_JSON}: {e}"
+                    ) from e
+            if not _write_keychain(
+                _STANDARD_SERVICE, getpass.getuser(), active_blob
+            ):
+                logger.error(
+                    "FATAL: failed to write standard Keychain entry for %s",
+                    active_email,
+                )
+                raise RuntimeError(
+                    f"Could not write standard Keychain entry for {active_email}"
+                )
             try:
                 _atomic_write_json(_CREDENTIALS_JSON, active_blob)
             except Exception as e:
-                logger.warning("Failed to write %s: %s", _CREDENTIALS_JSON, e)
+                # File fallback failure is non-fatal — the Keychain entry
+                # and the identity file are what Claude Code actually
+                # reads on macOS.
+                logger.warning(
+                    "Failed to write %s (non-fatal): %s", _CREDENTIALS_JSON, e
+                )
             logger.info("Active account set to %s", active_email)
 
     # ── 4. Orphan hashed Keychain sweep ────────────────────────────────────
