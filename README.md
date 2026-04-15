@@ -391,6 +391,19 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 - Enable the **Wake tmux sessions** toggle in Settings; it nudges stalled panes automatically after every swap.
 - Or press Enter / type any keystroke in the pane — the CLI re-reads the Keychain on its next request and will pick up the new credentials.
 
+**Tmux nudge doesn't reach my Claude Code pane** (Docker / supervisor / SSH-in-tmux)
+- CCSwitch decides a pane is a Claude Code session by walking the pane's shell process tree and looking for a descendant whose `comm` contains `claude`. In setups where the `claude` process runs outside that tree — inside a Docker container, under a supervisor (systemd / runit / foreman), or on the far side of an SSH-in-tmux session — the walk cannot see it and the pane is skipped.
+- Explicit escape hatch: set the `@ccswitch-nudge` tmux user option to `on` on the affected pane before (or while) `claude` runs in it. That bypasses the ancestry walk entirely; the stall-banner check still applies, so CCSwitch only types the nudge if a rate-limit notice is in the pane's last 20 lines of output.
+  ```sh
+  tmux set-option -p @ccswitch-nudge on
+  claude
+  ```
+- Make it automatic for every invocation with a shell alias — opts the current pane in, then launches `claude`:
+  ```sh
+  alias cc='tmux set-option -p @ccswitch-nudge on 2>/dev/null; claude'
+  ```
+  The redirect means the `set-option` is a no-op (not an error) if you run `cc` outside tmux.
+
 **WebSocket indicator stays disconnected**
 - Verify the server is running: `curl http://localhost:41924/health`
 - Check logs: `ccswitch log -n 50`
