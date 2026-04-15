@@ -84,8 +84,13 @@ _last_poll_monotonic: float | None = None
 
 
 class _RefreshTerminal(Exception):
-    """Raised when a refresh attempt returned a terminal status (400/401),
-    meaning the stored refresh_token is dead.  Skips the subsequent probe."""
+    """Raised when a refresh attempt returned a terminal status.  The
+    ``reason`` attribute carries the stale_reason string the caller
+    should write to account.stale_reason."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _record_transient_refresh_failure(
@@ -141,6 +146,161 @@ def _record_transient_refresh_failure(
         email, status_tag, count, int(wall_age), backoff_seconds,
     )
     return None
+
+
+async def _refresh_vault_token(email: str, refresh_token: str) -> dict:
+    """Perform one refresh attempt for a vault account's refresh_token.
+
+    Success path returns:
+
+        {
+          "access_token":   str,
+          "refresh_token":  str | None,          # None if server did not rotate
+          "expires_at_ms":  int | None,          # absolute epoch ms from expires_in
+        }
+
+    and clears all three transient-refresh backoff dicts for ``email``.
+
+    Failure paths (all raise with the stale_reason on ``err.reason``):
+    * ``httpx.HTTPStatusError`` terminal (OAuthErrorKind.TERMINAL_*) —
+      raise ``_RefreshTerminal(reason=<specific>)``.
+    * HTTPStatusError transient below escalation threshold —
+      ``_record_transient_refresh_failure`` logs + records, then
+      re-raise the original ``HTTPStatusError`` so the caller can
+      decide whether to fall through.
+    * HTTPStatusError transient that trips escalation —
+      raise ``_RefreshTerminal(reason=<escalation>)``.
+    * ``httpx.RequestError`` (network) — same ladder as above,
+      re-raise on sub-threshold / ``_RefreshTerminal`` on escalation.
+    * Keychain persist failure after successful rotation (retries 3×
+      with backoff, then escalates) — raise ``_RefreshTerminal(
+      reason="Keychain write failed after refresh ... — re-login
+      required")``.  Anthropic has already rotated, we cannot persist,
+      so the next refresh attempt would present a dead refresh_token.
+
+    ``_RefreshTerminal`` is the signal to the caller: "this refresh
+    attempt closed the book on this account — write the reason and
+    stop."  The exact stale_reason string lives on ``err.reason``;
+    the caller reads it from ``except _RefreshTerminal as e: ...
+    e.reason``.  No module-level sidecar dict — the exception is the
+    contract.
+
+    Contract guarantees: the function ONLY reads Anthropic and writes
+    the vault + backoff dicts.  It does NOT touch the DB, the cache
+    (other than via save_refreshed_vault_token's Keychain write), or
+    any lock (that is the caller's responsibility — see M2).
+    """
+    try:
+        resp = await anthropic_api.refresh_access_token(refresh_token)
+    except httpx.HTTPStatusError as refresh_http_err:
+        kind = anthropic_api.parse_oauth_error(refresh_http_err)
+        status = refresh_http_err.response.status_code
+        if kind is anthropic_api.OAuthErrorKind.TERMINAL_REVOKED:
+            logger.error(
+                "Refresh token revoked for %s (HTTP 401 + terminal body) — re-login required.",
+                email,
+            )
+            _refresh_backoff_until.pop(email, None)
+            _refresh_backoff_count.pop(email, None)
+            _refresh_backoff_first_failure_at.pop(email, None)
+            raise _RefreshTerminal("Refresh token revoked — re-login required") from refresh_http_err
+        if kind is anthropic_api.OAuthErrorKind.TERMINAL_REJECTED:
+            logger.error(
+                "Refresh token rejected for %s (HTTP %d + terminal OAuth code) — re-login required.",
+                email, status,
+            )
+            _refresh_backoff_until.pop(email, None)
+            _refresh_backoff_count.pop(email, None)
+            _refresh_backoff_first_failure_at.pop(email, None)
+            raise _RefreshTerminal("Refresh token rejected — re-login required") from refresh_http_err
+        # TRANSIENT
+        stale = _record_transient_refresh_failure(email, status)
+        if stale is not None:
+            raise _RefreshTerminal(stale) from refresh_http_err
+        raise
+    except httpx.RequestError as refresh_net_err:
+        logger.warning(
+            "Refresh network error for %s: %s", email, refresh_net_err,
+        )
+        stale = _record_transient_refresh_failure(email, None)
+        if stale is not None:
+            raise _RefreshTerminal(stale) from refresh_net_err
+        raise
+
+    new_token = resp.get("access_token")
+    if not new_token:
+        # Shouldn't happen on a 200 — defensive.
+        raise RuntimeError("Refresh response missing access_token")
+
+    expires_in = resp.get("expires_in")
+    new_expires_at_ms = (
+        int(time.time() * 1000) + int(expires_in) * 1000
+        if expires_in
+        else None
+    )
+    new_refresh = resp.get("refresh_token")
+
+    # Atomic persist: server has rotated, we MUST successfully store the
+    # new tokens or the next refresh attempt will present a dead refresh_token
+    # and Anthropic will family-revoke all tokens for this user session.
+    # Retry the Keychain write briefly before giving up.  Distinguish
+    # subprocess.TimeoutExpired (Keychain UI blocked on user password
+    # prompt — retrying is wasted work) from other exceptions (genuine
+    # transient — retry with backoff).
+    import subprocess as _sp
+
+    persist_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            await asyncio.to_thread(
+                cp.save_refreshed_vault_token,
+                email, new_token, expires_at=new_expires_at_ms,
+                refresh_token=new_refresh,
+            )
+            persist_err = None
+            break
+        except _sp.TimeoutExpired as e:
+            # Keychain subprocess hung — likely waiting for a UI password
+            # prompt the user isn't responding to.  Retrying is a waste.
+            # Abort immediately with escalation.
+            persist_err = e
+            logger.warning(
+                "Keychain persist timed out for %s (Keychain locked UI?): %s",
+                email, e,
+            )
+            break
+        except Exception as e:
+            persist_err = e
+            logger.warning(
+                "Keychain persist failed for %s attempt %d/3: %s",
+                email, attempt + 1, e,
+            )
+            await asyncio.sleep(0.1 * (attempt + 1))
+    if persist_err is not None:
+        # All retries failed (or TimeoutExpired aborted immediately).
+        # Anthropic has rotated; we cannot persist.  Next refresh WILL
+        # fail.  Escalate to stale_reason NOW rather than leaving the
+        # account quietly broken.
+        logger.error(
+            "Keychain persist exhausted retries for %s — marking stale: %s",
+            email, persist_err,
+        )
+        raise _RefreshTerminal(
+            f"Keychain write failed after refresh ({type(persist_err).__name__}) — "
+            f"re-login required"
+        )
+
+    logger.info("Refreshed vault token for %s", email)
+
+    _refresh_backoff_until.pop(email, None)
+    _refresh_backoff_count.pop(email, None)
+    _refresh_backoff_first_failure_at.pop(email, None)
+
+    return {
+        "access_token": new_token,
+        "refresh_token": new_refresh,
+        "expires_at_ms": new_expires_at_ms,
+    }
 
 
 def _maybe_nudge_active(email: str) -> None:
@@ -205,91 +365,12 @@ async def _process_single_account(
         token_info = cp.token_info_of(credentials)
         await cache.set_token_info(account.email, token_info)
 
-        # Refresh the token if near expiry — ONLY for vault accounts.
-        # The active account's refresh lifecycle is owned by Claude Code;
-        # CCSwitch refreshing it would race with the CLI.
-        if (
-            not account.stale_reason
-            and not is_active
-            and _refresh_backoff_until.get(account.email, 0.0) <= time.monotonic()
-        ):
-            try:
-                expires_at_ms = token_info.get("token_expires_at")
-                now_ms = int(time.time() * 1000)
-                if expires_at_ms and now_ms > expires_at_ms - _REFRESH_SKEW_MS:
-                    refresh_token = cp.refresh_token_of(credentials)
-                    if refresh_token:
-                        resp = await anthropic_api.refresh_access_token(refresh_token)
-                        new_token = resp.get("access_token")
-                        if new_token:
-                            expires_in = resp.get("expires_in")
-                            new_expires_at_ms = (
-                                now_ms + int(expires_in) * 1000
-                                if expires_in
-                                else None
-                            )
-                            new_refresh = resp.get("refresh_token")
-                            await asyncio.to_thread(
-                                cp.save_refreshed_vault_token,
-                                account.email, new_token,
-                                new_expires_at_ms, new_refresh,
-                            )
-                            token = new_token
-                            logger.info("Refreshed vault token for %s", account.email)
-                            _refresh_backoff_until.pop(account.email, None)
-                            _refresh_backoff_count.pop(account.email, None)
-                            _refresh_backoff_first_failure_at.pop(account.email, None)
-            except httpx.HTTPStatusError as refresh_http_err:
-                kind = anthropic_api.parse_oauth_error(refresh_http_err)
-                status = refresh_http_err.response.status_code
-                if kind is anthropic_api.OAuthErrorKind.TERMINAL_REVOKED:
-                    logger.error(
-                        "Refresh token revoked for %s (HTTP 401 + terminal body) — re-login required.",
-                        account.email,
-                    )
-                    new_stale_reason = "Refresh token revoked — re-login required"
-                    _refresh_backoff_until.pop(account.email, None)
-                    _refresh_backoff_count.pop(account.email, None)
-                    _refresh_backoff_first_failure_at.pop(account.email, None)
-                    raise _RefreshTerminal()
-                if kind is anthropic_api.OAuthErrorKind.TERMINAL_REJECTED:
-                    logger.error(
-                        "Refresh token rejected for %s (HTTP 400 + terminal OAuth code) — re-login required.",
-                        account.email,
-                    )
-                    new_stale_reason = "Refresh token rejected — re-login required"
-                    _refresh_backoff_until.pop(account.email, None)
-                    _refresh_backoff_count.pop(account.email, None)
-                    _refresh_backoff_first_failure_at.pop(account.email, None)
-                    raise _RefreshTerminal()
-                # TRANSIENT: 400 with non-terminal error, bare 401, 429, 5xx.
-                stale = _record_transient_refresh_failure(account.email, status)
-                if stale is not None:
-                    new_stale_reason = stale
-                    raise _RefreshTerminal()
-                # Fall through to return cached usage — no stale_reason write.
-                raise
-            except _RefreshTerminal:
-                raise
-            except httpx.RequestError as refresh_net_err:
-                # Network-level failures — ConnectError, ReadTimeout, DNS
-                # failures, etc.  Always transient: fold into the same
-                # escalation ladder as HTTPStatusError TRANSIENT so a
-                # sustained network outage eventually trips stale_reason
-                # instead of looping silently.
-                logger.warning(
-                    "Refresh network error for %s: %s",
-                    account.email, refresh_net_err,
-                )
-                stale = _record_transient_refresh_failure(account.email, None)
-                if stale is not None:
-                    new_stale_reason = stale
-                    raise _RefreshTerminal()
-                raise
-            except Exception as refresh_err:
-                logger.warning(
-                    "Token refresh failed for %s: %s", account.email, refresh_err
-                )
+        # Proactive vault-token refresh (pre-April-16: triggered when
+        # expires_at - now ≤ 20 min) has been removed per OAuth 2.1 RTR
+        # best practices.  Vault tokens refresh only on demand now:
+        # reactive via probe 401 (M2), and on promotion via swap step 0.5
+        # (M3).  See docs/superpowers/plans/2026-04-16-reactive-vault-
+        # refresh.md + spec §9.11.
 
         # Probe usage — skip if in 429 backoff window.
         backoff_deadline = _backoff_until.get(account.email, 0)
