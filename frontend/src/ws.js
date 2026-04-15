@@ -62,31 +62,23 @@ export function connectWs() {
     switch(msg.type) {
       case "account_switched":
         loadSwitchLog(0);
-        // Eagerly reset local is_active + waiting_for_cli on every card so
-        // any usage_updated frame that arrives before loadAccounts()
-        // completes (the HTTP round-trip is async) cannot render a waiting
-        // banner on what is no longer the active card.  Backend's
-        // list_accounts gates waiting by is_active, but state.accounts is
-        // only reconciled when the GET response lands.
+        // Eagerly flip is_active on every card so the Active pill and
+        // footer button update in place before the loadAccounts() HTTP
+        // round-trip lands.  A reload is still dispatched below as
+        // defense-in-depth for freshly-added cards that may not be in
+        // state.accounts yet.
         for (const acc of state.accounts) {
           acc.is_active = (acc.email === msg.to);
-          if (!acc.is_active) acc.waiting_for_cli = false;
         }
-        // Render the eager-mutated state immediately so the Active pill,
-        // waiting banner, and footer button flip in place — otherwise there
-        // is a ~300ms flicker window until the reload-accounts HTTP
-        // round-trip lands.  The reload is still dispatched below as
-        // defense-in-depth, picking up any cards that the eager mutation
-        // missed (e.g. a freshly-added account whose row has not yet
-        // reached state.accounts).
         renderAccounts();
-        // Use custom events to reload accounts + service without importing those modules
-        // (avoids circular dependency account↔service).
         document.dispatchEvent(new CustomEvent("app:reload-accounts"));
         document.dispatchEvent(new CustomEvent("app:reload-service"));
         if (!isReplay) {
           toast("Account switched", `→ ${msg.to} (${msg.reason})`, "success");
         }
+        break;
+      case "account_updated":
+        document.dispatchEvent(new CustomEvent("app:reload-accounts"));
         break;
       case "account_added":
         // Tab B picks up a new slot enrolled in Tab A.  The existing

@@ -57,24 +57,6 @@
             Add Account
           </button>
         </div>
-        <!-- ── Shell setup warning (hidden when configured) ────────────────── -->
-        <div class="shell-warn hidden" id="shell-warn">
-            <div class="shell-warn-header">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                <span>New terminals may use the wrong account</span>
-            </div>
-            <div class="shell-warn-body">
-                <p id="shell-warn-desc"></p>
-                <div class="shell-tip-code-wrap">
-                    <code id="shell-tip-cmd" class="shell-tip-cmd">_d=$(cat ~/.ccswitch/active 2&gt;/dev/null); [ -n "$_d" ] &amp;&amp; export CLAUDE_CONFIG_DIR="$_d"; unset _d</code>
-                    <button class="shell-tip-copy" id="shell-tip-copy-btn" title="Copy to clipboard">Copy</button>
-                </div>
-                <div class="shell-tip-actions">
-                    <button class="btn primary shell-tip-apply-btn" id="shell-tip-apply-btn">Apply to .zshrc / .bashrc automatically</button>
-                    <span class="shell-tip-apply-result" id="shell-tip-apply-result"></span>
-                </div>
-            </div>
-        </div>
         <!-- ── All-exhausted warning (shown only while auto-switch is ON) ── -->
         <div class="exhausted-warn hidden" id="all-exhausted-warn" role="alert">
           <svg class="exhausted-warn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -124,38 +106,6 @@
     <div class="settings-layout">
       <div class="settings-header">
         <h1 class="settings-title">Settings</h1>
-      </div>
-
-      <!-- ── Credential Targets (auto-discovered .claude.json mirror list) ── -->
-      <div class="ct-panel">
-        <div class="ct-panel-header">
-          <div class="ct-title-row">
-            <span class="ct-title">Credential Targets</span>
-            <span class="ct-count" id="ct-count"></span>
-            <button class="btn primary ct-sync-btn" id="ct-sync-btn" title="Mirror the currently active account into every enabled target now">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
-              Sync now
-            </button>
-            <button class="btn icon" id="ct-rescan-btn" title="Rescan filesystem">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-            </button>
-          </div>
-          <p class="ct-hint">
-            <code>.claude.json</code> files discovered on this machine. Tick
-            the ones this service should rewrite on every switch. When no
-            targets are enabled, switches only update the dashboard's own
-            active-pointer file — nothing else on disk is touched.
-          </p>
-        </div>
-        <div class="ct-warn hidden" id="ct-warn">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-          <span>No targets enabled — switches won't update any <code>.claude.json</code> file outside the dashboard's own pointer. Tick at least one below.</span>
-        </div>
-        <div id="ct-loading" class="empty-state">Scanning…</div>
-        <div id="ct-list" class="ct-list hidden"></div>
-        <div id="ct-empty" class="empty-state hidden">
-          No <code>.claude.json</code> files found on this machine.
-        </div>
       </div>
 
       <!-- ── Tmux nudge (wake stalled Claude Code sessions after a switch) ── -->

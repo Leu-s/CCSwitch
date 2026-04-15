@@ -3,13 +3,10 @@
 
 import { state } from "./state.js";
 import { qs } from "./utils.js";
-import { api } from "./api.js";
 import { loadAccounts } from "./ui/accounts.js";
 import { loadServiceStatus, updateServiceUI, initServiceListeners } from "./ui/service.js";
 import { loadSwitchLog, initLogListeners } from "./ui/log.js";
-import { closeAddModal, initLoginListeners } from "./ui/login.js";
-import { clearAddTermInterval } from "./ui/login.js";
-import { loadCredentialTargets, initCredentialTargetsListeners } from "./ui/credential_targets.js";
+import { closeAddModal, initLoginListeners, clearAddTermInterval } from "./ui/login.js";
 import { loadTmuxNudge, initTmuxNudgeListeners } from "./ui/tmux_nudge.js";
 import { connectWs } from "./ws.js";
 
@@ -51,9 +48,6 @@ if (_savedTheme) applyTheme(_savedTheme);
 else syncThemeBtn();
 
 // ── Settings page routing ───────────────────────────────────────────────────
-// The top-right icon button is a toggle: a gear while on the accounts page,
-// a home icon while on the settings page. Clicking it switches to the other
-// page.  State lives purely in the DOM — no routing, no history.
 let _currentPage = "accounts";
 function showPage(name) {
   const accounts = qs("#tab-accounts");
@@ -83,74 +77,6 @@ document.addEventListener("keydown", e => {
   }
 });
 
-// ── Shell status ─────────────────────────────────────────────────────────────
-async function checkShellStatus() {
-  try {
-    const { active_file_exists, shell_configured } = await api("/api/settings/shell-status");
-    const warn = document.getElementById("shell-warn");
-    const desc = document.getElementById("shell-warn-desc");
-    if (active_file_exists && shell_configured) {
-      warn.classList.add("hidden");
-    } else {
-      desc.textContent = shell_configured
-        ? "The active account file (~/.ccswitch/active) has not been created yet. Switch to an account or restart the server to create it."
-        : "Your shell is not configured to use CLAUDE_CONFIG_DIR. Without this, new terminal sessions may open with the wrong Claude account.";
-      warn.classList.remove("hidden");
-    }
-  } catch { /* ignore */ }
-}
-
-document.getElementById("shell-tip-apply-btn").addEventListener("click", async () => {
-  const btn = document.getElementById("shell-tip-apply-btn");
-  const resultEl = document.getElementById("shell-tip-apply-result");
-  btn.disabled = true;
-  btn.textContent = "Applying…";
-  resultEl.textContent = "";
-  resultEl.classList.remove("text-danger");
-  try {
-    const data = await api("/api/settings/setup-shell", { method: "POST" });
-    const labels = { applied: "✓ applied", already_configured: "already configured" };
-    const parts = Object.entries(data.results)
-      .filter(([, v]) => v !== "not_found")
-      .map(([k, v]) => `~/${k}: ${labels[v] ?? v}`);
-    resultEl.textContent = parts.length ? parts.join(" • ") : "No .zshrc or .bashrc found.";
-    const values = Object.values(data.results);
-    const anyError = values.some(v => String(v).startsWith("error:"));
-    const allMissing = values.every(v => v === "not_found");
-    if (anyError || allMissing) {
-      if (anyError) resultEl.classList.add("text-danger");
-      btn.textContent = "Apply to .zshrc / .bashrc automatically";
-      btn.disabled = false;
-    } else {
-      const anyApplied = values.includes("applied");
-      btn.textContent = anyApplied ? "Applied!" : "Already applied ✓";
-      btn.disabled = true;
-      checkShellStatus();
-    }
-  } catch (e) {
-    resultEl.textContent = "Error: " + e.message;
-    resultEl.classList.add("text-danger");
-    btn.textContent = "Apply to .zshrc / .bashrc automatically";
-    btn.disabled = false;
-  }
-});
-
-document.getElementById("shell-tip-copy-btn").addEventListener("click", async () => {
-  const btn = document.getElementById("shell-tip-copy-btn");
-  const text = document.getElementById("shell-tip-cmd").textContent.trim();
-  try {
-    await navigator.clipboard.writeText(text);
-    btn.textContent = "Copied!";
-    btn.classList.add("copied");
-    setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 2000);
-  } catch {
-    const range = document.createRange();
-    range.selectNodeContents(document.getElementById("shell-tip-cmd"));
-    window.getSelection().removeAllRanges();
-    window.getSelection().addRange(range);
-  }
-});
-
 // ── Cleanup on unload ────────────────────────────────────────────────────────
 window.addEventListener("beforeunload", () => {
   clearAddTermInterval();
@@ -160,14 +86,7 @@ window.addEventListener("beforeunload", () => {
 initServiceListeners();
 initLogListeners();
 initLoginListeners();
-initCredentialTargetsListeners();
 initTmuxNudgeListeners();
-
-// ── Reload credential targets whenever the active account changes, so the
-//    "Currently: …" label under each target file stays in sync. ─────────────
-document.addEventListener("app:reload-accounts", () => {
-  loadCredentialTargets();
-});
 
 // ── Initial data load ────────────────────────────────────────────────────────
 (async () => {
@@ -175,9 +94,7 @@ document.addEventListener("app:reload-accounts", () => {
     loadAccounts(),
     loadServiceStatus(true),
     loadSwitchLog(),
-    loadCredentialTargets(),
     loadTmuxNudge(),
   ]);
-  checkShellStatus();
   connectWs();
 })();
