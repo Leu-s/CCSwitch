@@ -571,7 +571,8 @@ async def revalidate_account(account_id: int, db) -> dict | None:
                 "active_refused": False,
             }
         except (httpx.RequestError, RuntimeError) as net_err:
-            account.stale_reason = f"Refresh network error: {net_err}"
+            logger.warning("Refresh network error for %s: %s", email, net_err)
+            account.stale_reason = "Refresh network error — try again later"
             await db.commit()
             return {
                 "success": False,

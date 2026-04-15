@@ -707,3 +707,50 @@ async def test_revalidate_account_missing_refresh_token_returns_error(monkeypatc
     assert result["success"] is False
     assert result["active_refused"] is False
     assert "vault" in result["stale_reason"].lower()
+
+
+@pytest.mark.asyncio
+async def test_revalidate_account_network_error_returns_sanitized_reason(monkeypatch):
+    """Network errors from the refresh endpoint must NOT surface raw exception
+    strings (which can contain host/port/socket details) to the user.  Only a
+    generic message; full exception goes to logs."""
+    import httpx
+    from backend.models import Account
+
+    account = Account(
+        id=42, email="vault@example.com", enabled=True, priority=0,
+        threshold_pct=90,
+        stale_reason="Refresh token rejected — re-login required",
+    )
+    db = MagicMock()
+    db.commit = AsyncMock()
+
+    monkeypatch.setattr(
+        ac.aq, "get_account_by_id", AsyncMock(return_value=account),
+    )
+    monkeypatch.setattr(
+        ac, "get_active_email_async",
+        AsyncMock(return_value="other@example.com"),
+    )
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: {
+            "claudeAiOauth": {"accessToken": "a", "refreshToken": "rt", "expiresAt": 0},
+        },
+    )
+
+    async def network_error(rt):
+        raise httpx.ConnectError("Connection refused to 127.0.0.1:8080")
+
+    monkeypatch.setattr(ac.anthropic_api, "refresh_access_token", network_error)
+
+    result = await ac.revalidate_account(42, db)
+    assert result["success"] is False
+    assert result["active_refused"] is False
+    # Sanitised — no host/port/socket/exception details.
+    reason = result["stale_reason"]
+    assert "127.0.0.1" not in reason
+    assert "8080" not in reason
+    assert "Connection refused" not in reason
+    assert "try again later" in reason.lower()
+    assert account.stale_reason == reason
