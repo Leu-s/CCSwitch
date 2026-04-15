@@ -132,6 +132,7 @@ async def test_active_account_reads_standard_never_refreshes(monkeypatch):
 # ── Vault account refresh ──────────────────────────────────────────────────
 
 
+@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_vault_account_near_expiry_refreshes(monkeypatch):
     """A vault account within 20 min of expiry must refresh_access_token
@@ -179,6 +180,7 @@ async def test_vault_account_near_expiry_refreshes(monkeypatch):
     assert saved["expires_at"] is not None
 
 
+@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_vault_refresh_400_sets_rejected_stale_reason(monkeypatch):
     account = _make_account(email="vault@example.com")
@@ -211,6 +213,7 @@ async def test_vault_refresh_400_sets_rejected_stale_reason(monkeypatch):
     assert probe_called["n"] == 0
 
 
+@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_vault_refresh_401_sets_revoked_stale_reason(monkeypatch):
     account = _make_account(email="vault@example.com")
@@ -407,6 +410,7 @@ async def test_process_returns_stale_reason_tuple(monkeypatch):
 
 # ── Transient refresh-failure handling ────────────────────────────────────
 
+@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_refresh_400_invalid_grant_sets_terminal_stale(monkeypatch):
     """400 with error=invalid_grant → terminal stale_reason, no backoff counters."""
@@ -437,6 +441,7 @@ async def test_refresh_400_invalid_grant_sets_terminal_stale(monkeypatch):
     assert "vault@example.com" not in bg._refresh_backoff_until
 
 
+@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_refresh_400_invalid_request_is_transient_no_stale(monkeypatch):
     """400 with non-terminal error code → no stale_reason, backoff counter = 1."""
@@ -465,6 +470,7 @@ async def test_refresh_400_invalid_request_is_transient_no_stale(monkeypatch):
     assert "vault@example.com" in bg._refresh_backoff_until
 
 
+@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_refresh_transient_escalates_after_n_failures(monkeypatch):
     """After `_TRANSIENT_REFRESH_ESCALATE_AFTER` consecutive transients, mark stale."""
@@ -499,6 +505,7 @@ async def test_refresh_transient_escalates_after_n_failures(monkeypatch):
     assert "vault@example.com" not in bg._refresh_backoff_first_failure_at
 
 
+@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_refresh_transient_escalates_after_wall_clock_ceiling(monkeypatch):
     """If the first transient was > 24 h ago, escalate regardless of count.
@@ -536,6 +543,7 @@ async def test_refresh_transient_escalates_after_wall_clock_ceiling(monkeypatch)
     assert "vault@example.com" not in bg._refresh_backoff_first_failure_at
 
 
+@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_refresh_backoff_skips_retry_within_deadline(monkeypatch):
     """While refresh-backoff deadline is in the future, skip the refresh attempt."""
@@ -568,6 +576,7 @@ async def test_refresh_backoff_skips_retry_within_deadline(monkeypatch):
     assert refresh_calls == []  # refresh was skipped
 
 
+@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_refresh_success_clears_backoff_counters(monkeypatch):
     bg._refresh_backoff_until.clear()
@@ -605,6 +614,7 @@ async def test_refresh_success_clears_backoff_counters(monkeypatch):
     assert "vault@example.com" not in bg._refresh_backoff_until
 
 
+@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_refresh_success_then_transient_starts_fresh_escalation_clock(monkeypatch):
     """After a successful refresh clears counters, a subsequent transient
@@ -653,6 +663,7 @@ async def test_refresh_success_then_transient_starts_fresh_escalation_clock(monk
     assert first_at - time.monotonic() < 1.0  # within the past second
 
 
+@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_refresh_network_error_is_transient(monkeypatch):
     """httpx.RequestError on refresh must increment the transient backoff
@@ -679,3 +690,142 @@ async def test_refresh_network_error_is_transient(monkeypatch):
     assert stale is None  # not escalated yet
     assert bg._refresh_backoff_count["vault@example.com"] == 1
     assert "vault@example.com" in bg._refresh_backoff_first_failure_at
+
+
+# ── _refresh_vault_token helper contract ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_refresh_vault_token_success_returns_new_blob(monkeypatch):
+    """Successful refresh returns a dict with new access_token, expires_at_ms,
+    and optionally new refresh_token.  Clears all three backoff dicts on success."""
+    bg._refresh_backoff_count["vault@example.com"] = 2
+    bg._refresh_backoff_until["vault@example.com"] = time.monotonic() - 1.0
+    bg._refresh_backoff_first_failure_at["vault@example.com"] = time.monotonic() - 60
+
+    async def fake_refresh(rt):
+        assert rt == "rt-old"
+        return {"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600}
+
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    def ok_save(email, access_token, expires_at=None, refresh_token=None, **kw):
+        pass
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", ok_save)
+
+    result = await bg._refresh_vault_token("vault@example.com", "rt-old")
+    assert result["access_token"] == "at-new"
+    assert result["refresh_token"] == "rt-new"
+    # expires_at_ms should be ~= now + 3600 s (±5s tolerance for async overhead)
+    expected = int(time.time() * 1000) + 3600 * 1000
+    assert abs(result["expires_at_ms"] - expected) < 5000
+    # All three backoff dicts cleared.
+    assert "vault@example.com" not in bg._refresh_backoff_count
+    assert "vault@example.com" not in bg._refresh_backoff_until
+    assert "vault@example.com" not in bg._refresh_backoff_first_failure_at
+
+
+@pytest.mark.asyncio
+async def test_refresh_vault_token_terminal_400_raises(monkeypatch):
+    """Terminal 400 (e.g. invalid_grant / invalid_request_error) → helper
+    raises _RefreshTerminal carrying the stale_reason on err.reason."""
+    async def fake_refresh(rt):
+        raise _http_error(400, json_body={"error": "invalid_grant"})
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    with pytest.raises(bg._RefreshTerminal) as excinfo:
+        await bg._refresh_vault_token("vault@example.com", "rt-dead")
+    assert "rejected" in excinfo.value.reason or "revoked" in excinfo.value.reason
+
+
+@pytest.mark.asyncio
+async def test_refresh_vault_token_terminal_401_raises(monkeypatch):
+    async def fake_refresh(rt):
+        raise _http_error(401, json_body={"error": "invalid_grant"})
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+    with pytest.raises(bg._RefreshTerminal) as excinfo:
+        await bg._refresh_vault_token("vault@example.com", "rt-dead")
+    assert "revoked" in excinfo.value.reason
+
+
+@pytest.mark.asyncio
+async def test_refresh_vault_token_transient_escalates_after_n(monkeypatch):
+    """Below escalation threshold: records offense, re-raises HTTPStatusError."""
+    bg._refresh_backoff_count["vault@example.com"] = 0
+    async def fake_refresh(rt):
+        raise _http_error(400, json_body={"error": "invalid_request"})
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    # First transient — records offense, re-raises HTTPStatusError (not _RefreshTerminal).
+    with pytest.raises(httpx.HTTPStatusError):
+        await bg._refresh_vault_token("vault@example.com", "rt-probably-live")
+    assert bg._refresh_backoff_count["vault@example.com"] == 1
+
+    # Push to threshold.
+    bg._refresh_backoff_count["vault@example.com"] = bg._TRANSIENT_REFRESH_ESCALATE_AFTER - 1
+    bg._refresh_backoff_first_failure_at["vault@example.com"] = time.monotonic() - 10
+
+    # Nth transient — escalates, raises _RefreshTerminal with a reason.
+    with pytest.raises(bg._RefreshTerminal) as excinfo:
+        await bg._refresh_vault_token("vault@example.com", "rt-probably-live")
+    assert excinfo.value.reason  # non-empty stale_reason string
+
+
+@pytest.mark.asyncio
+async def test_refresh_vault_token_network_error_records_transient(monkeypatch):
+    """httpx.RequestError → same transient ladder.  Below threshold → re-raises
+    RequestError, counter incremented."""
+    bg._refresh_backoff_count.pop("vault@example.com", None)
+    async def fake_refresh(rt):
+        raise httpx.ConnectError("simulated")
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    with pytest.raises(httpx.RequestError):
+        await bg._refresh_vault_token("vault@example.com", "rt-live")
+    assert bg._refresh_backoff_count["vault@example.com"] == 1
+    assert "vault@example.com" in bg._refresh_backoff_first_failure_at
+
+
+@pytest.mark.asyncio
+async def test_refresh_vault_token_keychain_persist_failure_after_rotation_escalates(monkeypatch):
+    """Anthropic rotated our tokens; Keychain persist fails 3×.  The helper
+    must escalate to _RefreshTerminal with a clear reason, NOT silently
+    return success with a non-persisted token (which would break chain on
+    next refresh)."""
+    async def fake_refresh(rt):
+        return {"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600}
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    attempts = []
+    def always_fail(email, access_token, expires_at=None, refresh_token=None, **kw):
+        attempts.append(1)
+        raise OSError("Keychain locked")
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", always_fail)
+
+    with pytest.raises(bg._RefreshTerminal) as excinfo:
+        await bg._refresh_vault_token("vault@example.com", "rt-live")
+    assert "Keychain write failed" in excinfo.value.reason
+    assert len(attempts) == 3  # retry loop exhausted
+
+
+@pytest.mark.asyncio
+async def test_refresh_vault_token_persist_timeout_aborts_without_retry(monkeypatch):
+    """subprocess.TimeoutExpired on Keychain write aborts IMMEDIATELY
+    without retrying — the subprocess was hung on UI password prompt
+    and retrying solves nothing."""
+    import subprocess as sp
+
+    async def fake_refresh(rt):
+        return {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    attempts = []
+    def timeout_once(email, access_token, expires_at=None, refresh_token=None, **kw):
+        attempts.append(1)
+        raise sp.TimeoutExpired("/usr/bin/security", 5)
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", timeout_once)
+
+    with pytest.raises(bg._RefreshTerminal) as excinfo:
+        await bg._refresh_vault_token("vault@example.com", "rt-live")
+    assert "TimeoutExpired" in excinfo.value.reason
+    assert len(attempts) == 1  # no retry

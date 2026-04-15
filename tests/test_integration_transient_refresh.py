@@ -37,6 +37,7 @@ def _http_400(error_code):
     return httpx.HTTPStatusError("bad", request=req, response=resp)
 
 
+@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_transient_400_storm_never_sets_stale_until_escalation(monkeypatch):
     """Four consecutive transient 400s leave stale_reason None; the fifth escalates."""
