@@ -244,7 +244,7 @@ def test_parse_oauth_error_401_anthropic_auth_error_is_terminal():
     assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REVOKED
 
 
-def test_parse_oauth_error_400_anthropic_rate_limit_is_transient():
+def test_parse_oauth_error_429_anthropic_rate_limit_is_transient():
     """Anthropic 'rate_limit_error' under the nested envelope is NOT
     terminal — it's the server telling us to back off and retry."""
     err = _make_http_status_error(429, {

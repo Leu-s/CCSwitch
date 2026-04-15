@@ -30,8 +30,15 @@ from ..config import settings
 #     invalid_request_error   — Anthropic's actual signal for dead
 #                               refresh_token on /oauth/token (despite
 #                               the misleading "request format" message)
-#     authentication_error    — access-token invalid on /v1/messages
-#                               (matches the probe-path 401)
+#     authentication_error    — access-token invalid on /v1/messages.
+#                               The poll loop's probe-path handles 401
+#                               with a dedicated branch in background.py
+#                               that sets a fixed stale_reason string
+#                               WITHOUT calling parse_oauth_error, so
+#                               this set-entry is belt-and-braces for any
+#                               future caller that DOES route probe
+#                               errors through parse_oauth_error (e.g.
+#                               a revalidate-probe-verify path).
 _TERMINAL_OAUTH_ERROR_CODES = frozenset({
     "invalid_grant",
     "invalid_client",
