@@ -57,6 +57,36 @@ all of which are reused, renamed, or extended here.
 - Modify: `backend/background.py:177-292` (the `_process_single_account` body, specifically the refresh block)
 - Test: `tests/test_background.py`
 
+### Task 1.0 — Pre-flight: audit existing `_RefreshTerminal()` bare callers
+
+The April-15 feature already introduced `_RefreshTerminal` (without the `reason`
+argument — it was bare).  This plan's wave-1 revision made `reason` required.
+Any pre-existing test or code site calling `_RefreshTerminal()` bare will break.
+
+- [ ] **Step 1: Grep the backend + tests for bare `_RefreshTerminal` calls**:
+
+```bash
+grep -rn 'raise _RefreshTerminal()' backend/ tests/
+grep -rn '_RefreshTerminal()' backend/ tests/
+grep -rn 'except _RefreshTerminal:' backend/ tests/
+```
+
+Expected pre-existing matches (from the April-15 feature):
+
+- `backend/background.py` — multiple `raise _RefreshTerminal()` inside the
+  now-deleted proactive-refresh block (they go away with M1 anyway).
+- `backend/background.py` `except _RefreshTerminal: raise` — catches without
+  reading reason; unchanged behavior, still fine.
+- Any tests asserting `pytest.raises(_RefreshTerminal)` without capturing
+  `.reason` — still pass because the constructor now accepts reason but
+  callers don't need to read it.
+
+- [ ] **Step 2: If any call site exists that raises `_RefreshTerminal()` WITHOUT
+  a reason and that code path survives M1**, convert it to pass an appropriate
+  reason string.  Most likely: zero such sites (proactive block deletion removes
+  the surviving raises).  Document the grep result in the M1 commit message so
+  a reviewer doesn't wonder whether it was checked.
+
 ### Task 1.1 — Write failing tests for the helper's contract
 
 - [ ] **Step 1: Append to `tests/test_background.py`** after the existing transient tests.  The helper contract: takes `(email, refresh_token)`, returns the new-token dict on success (new access_token, new expires_at_ms, optional new refresh_token), raises `_RefreshTerminal(reason=...)` on terminal (the exception itself carries the stale_reason via `err.reason`), propagates `_RefreshTerminal` after recording a transient offense that trips escalation, propagates `httpx.HTTPStatusError` / `httpx.RequestError` after recording a sub-threshold transient offense.
@@ -162,7 +192,7 @@ async def test_refresh_vault_token_keychain_persist_failure_after_rotation_escal
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
     attempts = []
-    def always_fail(email, at, exp, rt):
+    def always_fail(email, access_token, expires_at=None, refresh_token=None, **kw):
         attempts.append(1)
         raise OSError("Keychain locked")
     monkeypatch.setattr(cp, "save_refreshed_vault_token", always_fail)
@@ -171,6 +201,29 @@ async def test_refresh_vault_token_keychain_persist_failure_after_rotation_escal
         await bg._refresh_vault_token("vault@example.com", "rt-live")
     assert "Keychain write failed" in excinfo.value.reason
     assert len(attempts) == 3  # retry loop exhausted
+
+
+@pytest.mark.asyncio
+async def test_refresh_vault_token_persist_timeout_aborts_without_retry(monkeypatch):
+    """subprocess.TimeoutExpired on Keychain write aborts IMMEDIATELY
+    without retrying — the subprocess was hung on UI password prompt
+    and retrying solves nothing."""
+    import subprocess as sp
+
+    async def fake_refresh(rt):
+        return {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    attempts = []
+    def timeout_once(email, access_token, expires_at=None, refresh_token=None, **kw):
+        attempts.append(1)
+        raise sp.TimeoutExpired("/usr/bin/security", 5)
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", timeout_once)
+
+    with pytest.raises(bg._RefreshTerminal) as excinfo:
+        await bg._refresh_vault_token("vault@example.com", "rt-live")
+    assert "TimeoutExpired" in excinfo.value.reason
+    assert len(attempts) == 1  # no retry
 ```
 
 - [ ] **Step 2: Run tests to verify they fail with AttributeError on `_refresh_vault_token`**
@@ -179,7 +232,7 @@ async def test_refresh_vault_token_keychain_persist_failure_after_rotation_escal
 uv run python -m pytest tests/test_background.py -q -k refresh_vault_token
 ```
 
-Expected: all 6 tests fail with `AttributeError: module 'backend.background' has no attribute '_refresh_vault_token'` (or `_RefreshTerminal`).
+Expected: all 7 tests fail with `AttributeError: module 'backend.background' has no attribute '_refresh_vault_token'` (or `_RefreshTerminal`).
 
 ### Task 1.2 — Implement the helper + delete proactive block
 
@@ -291,15 +344,31 @@ async def _refresh_vault_token(email: str, refresh_token: str) -> dict:
     # Atomic persist: server has rotated, we MUST successfully store the
     # new tokens or the next refresh attempt will present a dead refresh_token
     # and Anthropic will family-revoke all tokens for this user session.
-    # Retry the Keychain write briefly before giving up.
+    # Retry the Keychain write briefly before giving up.  Distinguish
+    # subprocess.TimeoutExpired (Keychain UI blocked on user password
+    # prompt — retrying is wasted work) from other exceptions (genuine
+    # transient — retry with backoff).
+    import subprocess as _sp
+
     persist_err: Exception | None = None
     for attempt in range(3):
         try:
             await asyncio.to_thread(
                 cp.save_refreshed_vault_token,
-                email, new_token, new_expires_at_ms, new_refresh,
+                email, new_token, expires_at=new_expires_at_ms,
+                refresh_token=new_refresh,
             )
             persist_err = None
+            break
+        except _sp.TimeoutExpired as e:
+            # Keychain subprocess hung — likely waiting for a UI password
+            # prompt the user isn't responding to.  Retrying is a waste.
+            # Abort immediately with escalation.
+            persist_err = e
+            logger.warning(
+                "Keychain persist timed out for %s (Keychain locked UI?): %s",
+                email, e,
+            )
             break
         except Exception as e:
             persist_err = e
@@ -309,9 +378,10 @@ async def _refresh_vault_token(email: str, refresh_token: str) -> dict:
             )
             await asyncio.sleep(0.1 * (attempt + 1))
     if persist_err is not None:
-        # All retries failed.  Anthropic has rotated; we cannot persist.
-        # Next refresh WILL fail.  Escalate to stale_reason NOW rather
-        # than leaving the account quietly broken.
+        # All retries failed (or TimeoutExpired aborted immediately).
+        # Anthropic has rotated; we cannot persist.  Next refresh WILL
+        # fail.  Escalate to stale_reason NOW rather than leaving the
+        # account quietly broken.
         logger.error(
             "Keychain persist exhausted retries for %s — marking stale: %s",
             email, persist_err,
@@ -348,7 +418,7 @@ async def _refresh_vault_token(email: str, refresh_token: str) -> dict:
 
 **Caveat:** preserve the `forget_account_state` bookkeeping cleanups (lines 162-174 of the current file) — they still apply to the backoff dicts and are called from the account-delete router.  Do NOT delete those.  (Note: `forget_account_state` does NOT need updating for `_pending_terminal_reason` — that dict no longer exists; the `.reason` attribute on `_RefreshTerminal` is ephemeral and ties to the exception lifetime.  The M2 revision adds `_last_reactive_refresh_at` cleanup here instead.)
 
-- [ ] **Step 3: Run helper tests — expect 6 pass**
+- [ ] **Step 3: Run helper tests — expect 7 pass**
 
 ```bash
 uv run python -m pytest tests/test_background.py -q -k refresh_vault_token
@@ -399,10 +469,11 @@ persist retries 3× with backoff, then escalates to a terminal
 _RefreshTerminal so a post-rotation Keychain write failure cannot
 silently leave us holding a dead chain.
 
-6 new tests cover the helper contract directly (incl. a persist-
-failure-after-rotation escalation test).  N pre-existing tests that
-exercised the proactive path are temporarily skipped (M2 will re-
-enable them against the reactive path).
+7 new tests cover the helper contract directly (incl. a persist-
+failure-after-rotation escalation test + a subprocess.TimeoutExpired
+abort-without-retry test).  N pre-existing tests that exercised the
+proactive path are temporarily skipped (M2 will re-enable them
+against the reactive path).
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 EOF
@@ -420,6 +491,18 @@ EOF
 > refresh_token, Anthropic would invalid_grant the loser, and the loser would
 > overwrite the winner's success with a phantom-stale_reason.  So the lock
 > rename + reactive path + router update all land as one milestone.
+
+**Cooldown asymmetry.**  The 60 s reactive-refresh cooldown
+(`_last_reactive_refresh_at`) applies ONLY to the poll-loop path, NOT to
+user-triggered `revalidate_account`.  Rationale: poll-loop fires automatically
+on probe 401; without cooldown, N vault accounts hitting 401 simultaneously
+(Anthropic degraded state) would issue N concurrent refresh POSTs.  User-
+triggered Revalidate is a conscious act initiated by a click; cooldown-skipping
+it would silently drop the action and confuse UX ("I clicked it, nothing
+happened").  The shared `get_refresh_lock` still prevents concurrent Revalidate
+races.  Sequential Revalidate within 60 s (user rapid-clicking) is accepted as
+intentional; frontend debounce could be added in a follow-up UI fix if real
+users exhibit the behavior.
 
 **Files:**
 - Modify: `backend/services/account_service.py:446-462` (rename `_revalidate_locks` → `_refresh_locks`; export `get_refresh_lock` + `forget_refresh_lock`)
@@ -511,7 +594,7 @@ async def test_vault_probe_401_triggers_refresh_and_retry_success(monkeypatch):
         return {"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600}
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
-    def fake_save(email, t, exp, r):
+    def fake_save(email, access_token, expires_at=None, refresh_token=None, **kw):
         pass
     monkeypatch.setattr(cp, "save_refreshed_vault_token", fake_save)
 
@@ -543,7 +626,7 @@ async def test_vault_probe_401_refresh_success_but_retry_still_401(monkeypatch):
         return {"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600}
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
-    def fake_save(email, t, exp, r):
+    def fake_save(email, access_token, expires_at=None, refresh_token=None, **kw):
         pass
     monkeypatch.setattr(cp, "save_refreshed_vault_token", fake_save)
 
@@ -819,6 +902,36 @@ Expected: ~8 fail (reactive path + cooldown + lock coverage not yet implemented 
 
 ### Task 2.3 — Implement reactive branch (with cooldown + shared lock)
 
+- [ ] **Step 0: Extend the autouse fixture in `tests/test_background.py`** to clear
+  `bg._last_reactive_refresh_at` before and after each test.  Find the existing
+  `_wipe_cache_between_tests` fixture (~ line 30) — it currently clears 6 dicts;
+  extend to 7.  Without this the test suite would have cross-test pollution once
+  the cooldown dict is live.
+
+```python
+@pytest.fixture(autouse=True)
+async def _wipe_cache_between_tests():
+    bg._backoff_until.clear()
+    bg._backoff_count.clear()
+    bg._refresh_backoff_until.clear()
+    bg._refresh_backoff_count.clear()
+    bg._refresh_backoff_first_failure_at.clear()
+    bg._last_reactive_refresh_at.clear()     # NEW
+    await _cache._usage_cache.clear()
+    yield
+    bg._backoff_until.clear()
+    bg._backoff_count.clear()
+    bg._refresh_backoff_until.clear()
+    bg._refresh_backoff_count.clear()
+    bg._refresh_backoff_first_failure_at.clear()
+    bg._last_reactive_refresh_at.clear()     # NEW
+    await _cache._usage_cache.clear()
+```
+
+(The integration-test fixture in M5 already clears `_last_reactive_refresh_at`
+— it was added during wave-1 revision; only the main `test_background.py`
+autouse needs updating here.)
+
 - [ ] **Step 1: Add module-level cooldown state** in `backend/background.py` near the other module-level dicts:
 
 ```python
@@ -949,6 +1062,10 @@ def forget_account_state(email: str) -> None:
                 await cache.set_usage(account.email, usage)
                 _backoff_until.pop(account.email, None)
                 _backoff_count.pop(account.email, None)
+                # Recovery succeeded — clear the cooldown so a GENUINELY
+                # NEW 401 on the next poll cycle is treated as a fresh
+                # event, not falsely 60s-skipped as if we already tried.
+                _last_reactive_refresh_at.pop(account.email, None)
                 flat = build_usage(usage, token_info) if usage else None
                 flat_dict = flat.model_dump() if flat else {}
                 return {
@@ -969,7 +1086,7 @@ Note: the existing `elif status == 429:` and `else: raise` branches stay unchang
 uv run python -m pytest tests/test_background.py -q -k "vault_probe_401 or active_probe_401 or reactive_refresh_cooldown or poll_reactive_refresh"
 ```
 
-- [ ] **Step 6: Full suite** — expect 207 + M1's new 6 + M2's new ~10 ≈ 223.  (No regressions.)
+- [ ] **Step 6: Full suite** — expect 207 + M1's new 7 + M2's new ~10 ≈ 224.  (No regressions.)
 
 ```bash
 uv run python -m pytest tests/ -q
@@ -1099,9 +1216,9 @@ async def test_swap_refreshes_incoming_before_promotion(monkeypatch):
     monkeypatch.setattr(ac, "_rewrite_claude_json_identity", lambda b: None)
     monkeypatch.setattr(ac, "_atomic_write_json", lambda p, b: None)
 
-    def fake_save_refresh(email, at, exp, rt, *, already_locked=False):
+    def fake_save_refresh(email, access_token, expires_at=None, refresh_token=None, *, already_locked=False):
         stale_vault["claudeAiOauth"] = {
-            "accessToken": at, "refreshToken": rt, "expiresAt": exp,
+            "accessToken": access_token, "refreshToken": refresh_token, "expiresAt": expires_at,
         }
     monkeypatch.setattr(ac.cp, "save_refreshed_vault_token", fake_save_refresh)
 
@@ -1192,8 +1309,8 @@ async def test_swap_aborts_when_incoming_refresh_terminal(monkeypatch):
 def save_refreshed_vault_token(
     email: str,
     access_token: str,
-    expires_at_ms: int | None,
-    refresh_token: str | None,
+    expires_at: int | None = None,
+    refresh_token: str | None = None,
     *,
     already_locked: bool = False,
 ) -> None:
@@ -1206,10 +1323,10 @@ def save_refreshed_vault_token(
     holding swap path.
     """
     if already_locked:
-        _save_refreshed_vault_token_locked(email, access_token, expires_at_ms, refresh_token)
+        _save_refreshed_vault_token_locked(email, access_token, expires_at, refresh_token)
     else:
         with _credential_lock:
-            _save_refreshed_vault_token_locked(email, access_token, expires_at_ms, refresh_token)
+            _save_refreshed_vault_token_locked(email, access_token, expires_at, refresh_token)
 ```
 
 (Hoist the current body into `_save_refreshed_vault_token_locked`.)
@@ -1225,12 +1342,17 @@ async def _refresh_vault_token(
 ) -> dict:
     # ...(docstring updated to mention already_locked)...
     # ...all logic unchanged except the one line that calls
-    #    save_refreshed_vault_token — now passes already_locked=already_locked:
+    #    save_refreshed_vault_token — now passes already_locked=already_locked.
+    #    Note the keyword arg name is `expires_at` (matches the real
+    #    cp.save_refreshed_vault_token signature), not `expires_at_ms`;
+    #    the internal variable name `new_expires_at_ms` stays for
+    #    descriptiveness.
     for attempt in range(3):
         try:
             await asyncio.to_thread(
                 cp.save_refreshed_vault_token,
-                email, new_token, new_expires_at_ms, new_refresh,
+                email, new_token, expires_at=new_expires_at_ms,
+                refresh_token=new_refresh,
                 already_locked=already_locked,
             )
             # ...
