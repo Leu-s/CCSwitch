@@ -15,25 +15,31 @@ import httpx
 
 from ..config import settings
 
-# OAuth2 terminal error codes per RFC 6749 §5.2.  Each one names a condition
-# that is NOT self-healing within hours — the refresh_token is dead, the
-# client is mis-registered, or the scope is wrong — so the correct response
-# is to demand a re-login.  Everything else (400 `invalid_request`, 400 with
-# no body, 429, 5xx, network) is transient and eligible for exponential
-# retry.
+# Codes that indicate the refresh_token / access_token is dead in a way
+# that will NOT self-heal — only a re-login can fix it.  Two flavours:
 #
-# `invalid_grant`          — refresh_token expired, revoked, or reused.
-# `invalid_client`         — client authentication failed (we are mis-
-#                            registered with the authz server).
-# `unauthorized_client`    — client not allowed to use this grant type.
-# `unsupported_grant_type` — authz server doesn't understand this grant.
-# `invalid_scope`          — scope requested is invalid / out of range.
+#   RFC 6749 §5.2 (standard OAuth2 flat shape)
+#     invalid_grant           — token expired, revoked, or reused
+#     invalid_client          — client authentication failed
+#     unauthorized_client     — client not allowed to use this grant
+#     unsupported_grant_type  — server doesn't understand the grant
+#     invalid_scope           — scope invalid / out of range
+#
+#   Anthropic-specific envelope (empirically verified on their
+#   /v1/oauth/token and /v1/messages endpoints):
+#     invalid_request_error   — Anthropic's actual signal for dead
+#                               refresh_token on /oauth/token (despite
+#                               the misleading "request format" message)
+#     authentication_error    — access-token invalid on /v1/messages
+#                               (matches the probe-path 401)
 _TERMINAL_OAUTH_ERROR_CODES = frozenset({
     "invalid_grant",
     "invalid_client",
     "unauthorized_client",
     "unsupported_grant_type",
     "invalid_scope",
+    "invalid_request_error",
+    "authentication_error",
 })
 
 
@@ -56,19 +62,30 @@ class OAuthErrorKind(enum.Enum):
 
 
 def _extract_oauth_error_code(resp: httpx.Response) -> str | None:
-    """Return the OAuth ``error`` field from a response body, or None if it
-    is not a parseable OAuth2 error response."""
+    """Return the error code from a failed OAuth/API response, supporting
+    both RFC 6749 §5.2 flat shape and Anthropic's nested envelope.
+
+    * RFC 6749:   ``{"error": "invalid_grant", "error_description": "..."}``
+    * Anthropic:  ``{"type": "error", "error": {"type": "...", "message": "..."}}``
+
+    Returns ``None`` if the response body is not parseable JSON, not a dict,
+    or does not carry an ``error`` field in either recognised shape.
+    """
     try:
         body: Any = resp.json()
     except Exception:
-        # httpx versions differ: older raise ValueError, newer raise
-        # json.JSONDecodeError (which is a ValueError subclass but also
-        # surfaces as-is).  Either way — no parseable body.
         return None
     if not isinstance(body, dict):
         return None
-    code = body.get("error")
-    return code if isinstance(code, str) else None
+    raw = body.get("error")
+    if isinstance(raw, str):
+        # RFC 6749 flat shape.
+        return raw
+    if isinstance(raw, dict):
+        # Anthropic nested envelope — read error.type.
+        inner = raw.get("type")
+        return inner if isinstance(inner, str) else None
+    return None
 
 
 def parse_oauth_error(err: httpx.HTTPStatusError) -> OAuthErrorKind:
