@@ -63,7 +63,7 @@ You're refactoring a service in 20 tmux panes, all running `claude`. Around hour
 - **Atomic credential swap** — when the dashboard flips to a new account, a 5-step orchestrator moves credentials from vault → standard under a single lock, updates `~/.claude/.claude.json`, and rewrites the fallback `.credentials.json`.  Any crash between steps is reconciled on the next startup by the integrity check.
 - **Stale-account relogin** — if a refresh token is revoked or rotated by Anthropic, the dashboard marks the account stale and offers a one-click re-login flow (opens a tmux pane with `claude`, verifies new credentials, clears `stale_reason`)
 - **Real-time dashboard** — vanilla-JS single-page app; account cards, drag-to-reorder priority, per-account threshold slider, switch log; no build step required
-- **Optional tmux nudge** — opt-in toggle on the Settings page: after every account switch, scan every `tmux` pane and send a configurable message (default `continue`) to any pane whose recent output matches a Claude Code rate-limit notice. Off by default.
+- **Optional tmux nudge** — opt-in toggle on the Settings page: after every account switch, scan every `tmux` pane and send a configurable message (default `continue`) to any Claude Code pane (detected by process-ancestry walk, or explicit `@ccswitch-nudge=on` tmux user option) whose last 20 lines show a rate-limit banner. Off by default.
 - **CLI** (`ccswitch`) — list/switch/enable/disable accounts, tail logs, manage the LaunchAgent
 - **macOS LaunchAgent** — optional auto-start on login
 

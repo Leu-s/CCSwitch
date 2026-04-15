@@ -115,8 +115,19 @@ restart.
    against any Claude Code build that falls back to the file (Linux,
    older macOS builds, future versions).
 6. **Release lock, then nudge.** Send a configurable keystroke to
-   every tmux pane whose `pane_current_command` looks like `claude` —
-   the `tmux_service.fire_nudge()` logic already in place, unchanged.
+   every tmux pane that (a) is a Claude Code session by the two-tier
+   detector — either the pane carries the `@ccswitch-nudge=on` tmux
+   user option, or a descendant of the pane's shell PID
+   (`#{pane_pid}`) has a `comm` containing `claude` — and (b) shows
+   a rate-limit banner in the last 20 lines of its capture after
+   ANSI-escape stripping.  The process-ancestry walk replaces the
+   original `pane_current_command` shape-match so Claude Code's
+   native-installer argv[0] (a full path to a semver-named binary)
+   is caught by real process-tree membership instead of a fragile
+   string regex.  A single `ps -A -o pid=,ppid=,comm=` snapshot is
+   taken once per scan and the walk is depth-capped (50) against
+   pathological ppid cycles.  Implemented in
+   `tmux_service.fire_nudge()`.
 7. **Broadcast.** Emit `account_switched` over WebSocket.
 
 Steps 1–5 are the data move, ordered so that at every boundary either
@@ -648,17 +659,38 @@ warning if it detects another CCSwitch process running on the same
 DB file (via a file-lock sentinel in `settings.state_dir` — but
 that's gone, so use `~/.claude/ccswitch.lock`).
 
-### 9.6 `looks_stalled` false positives
+### 9.6 `looks_stalled` false positives and recall
 
-The tmux nudge heuristic matches rate-limit UI strings in the last
-200 lines of a pane. A user composing a message that contains a
-rate-limit word ("rate limited my experiment") can trigger a nudge.
-The implementation adds two guards:
+The tmux nudge heuristic matches a curated set of Claude Code
+rate-limit UI strings (usage-limit banners, `rate_limit_error`,
+`overloaded_error`, "5-hour limit resets HH:MM", etc.).  Two
+guards tighten precision without sacrificing recall:
 
-- Only nudge panes whose last-output timestamp is more than 60 s
-  old (i.e., pane is idle).
-- The match pattern is anchored on the specific Claude Code UI
-  string (`"You've hit your … limit"`), not a generic keyword.
+- **Tail window.** The stall regex runs only against the last 20
+  lines of the 200-line capture, after ANSI-escape stripping
+  (CSI including colon-form 24-bit SGR, OSC for hyperlinks and
+  titles).  A banner the user already resolved but that still
+  lives in scrollback above the prompt does not re-match on the
+  next swap.  A fresh banner always renders at the bottom of the
+  buffer, so recall is preserved.
+- **Claude-pane gate.** A pane is considered a Claude Code session
+  only if either (a) it carries the `@ccswitch-nudge=on` tmux user
+  option (explicit opt-in, bypasses the ancestry walk), or (b) the
+  pane's shell PID has a descendant process whose `comm` contains
+  `claude`.  The ancestry walk catches bare `claude` AND the
+  native installer's full-path argv[0]
+  (`/Users/.../local/share/claude/versions/2.1.109`), which the
+  pre-M2 `pane_current_command` shape-match missed.  Panes failing
+  both signals are skipped before `capture_pane` runs — no
+  scrollback of unrelated shells is ever read.
+
+The asymmetric cost model — false-positive = one typed word the
+user can backspace; false-negative = a sleeping pane waits for
+manual wake — justifies leaning toward recall.  A user composing
+a message that contains a rate-limit word ("rate limited my
+experiment") inside a genuinely-claude pane can still trigger a
+nudge; the message is typed as literal input, not executed as a
+shell command, so the cost is that one typo.
 
 ### 9.7 The empirical claim and how we verify it
 

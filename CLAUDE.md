@@ -117,8 +117,14 @@ backend/
                        SwitchLog + broadcasts + fires tmux nudge.
     settings_service.py  Typed get/set for Setting rows (bool/int/int_or_none/json).
     tmux_service.py    list_panes, send_keys, capture_pane, looks_stalled,
-                       wake_stalled_sessions, fire_nudge — nudges only panes whose
-                       pane_current_command looks like `claude`.
+                       wake_stalled_sessions, fire_nudge.  Two-tier claude-pane
+                       detection: ``@ccswitch-nudge=on`` tmux user option (explicit
+                       opt-in) OR a process-ancestry walk from the pane's shell PID
+                       to any descendant whose ``comm`` contains ``claude`` (catches
+                       bare ``claude`` and native-installer full-path argv[0] alike).
+                       ``looks_stalled`` matches only the last 20 lines of the capture
+                       after ANSI-escape stripping, so stale scrollback banners do
+                       not re-trigger nudges on every swap.
 frontend/
   index.html           HTML shell (Accounts page + Settings page + Add-account modal).
                        No shell-warn panel, no credential-targets panel.
