@@ -82,6 +82,28 @@ class LoginVerifyResult(BaseModel):
     already_exists: bool = False
 
 
+class RevalidateResult(BaseModel):
+    """Response from POST /api/accounts/{id}/revalidate.
+
+    HTTP status codes:
+    * 200 — ``success=True``.  Stale cleared.
+    * 409 — Conflict.  The account's current state does not permit
+            revalidation; ``stale_reason`` carries the accurate message
+            and ``active_refused`` distinguishes "active account —
+            switch first" from "refresh still failing — try later
+            or Re-login".
+
+    Using 409 on the failure path lets standard HTTP-error middleware
+    and the frontend's ``api.js`` error wrapper catch logical failures
+    without having to substring-match on success flags.
+    """
+
+    success: bool
+    stale_reason: Optional[str] = None
+    email: str
+    active_refused: bool = False
+
+
 class LoginSessionCaptureOut(BaseModel):
     output: str
 

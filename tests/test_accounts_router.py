@@ -415,3 +415,128 @@ def test_relogin_verify_wrong_email_returns_error(client_and_factory, monkeypatc
     assert acc.stale_reason == "Refresh token revoked"
     # save_new_vault_account never called for wrong-identity.
     assert save_calls == []
+
+
+# ── POST /api/accounts/{id}/revalidate ────────────────────────────────────
+
+
+def test_revalidate_endpoint_returns_200_on_success(client_and_factory, monkeypatch):
+    """Happy path — revalidate_account returns success dict → 200 body."""
+    client, _factory = client_and_factory
+
+    async def fake_revalidate(account_id, db):
+        return {
+            "success": True,
+            "stale_reason": None,
+            "email": "vault@example.com",
+            "active_refused": False,
+        }
+
+    monkeypatch.setattr(ac, "revalidate_account", fake_revalidate)
+
+    resp = client.post("/api/accounts/1/revalidate")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["stale_reason"] is None
+    assert body["email"] == "vault@example.com"
+    assert body["active_refused"] is False
+
+
+def test_revalidate_endpoint_404_for_missing_account(client_and_factory, monkeypatch):
+    """revalidate_account returns None → 404."""
+    client, _factory = client_and_factory
+
+    async def fake_revalidate(account_id, db):
+        return None
+
+    monkeypatch.setattr(ac, "revalidate_account", fake_revalidate)
+
+    resp = client.post("/api/accounts/999/revalidate")
+    assert resp.status_code == 404
+
+
+def test_revalidate_endpoint_409_on_refresh_failure(client_and_factory, monkeypatch):
+    """Refresh-failure path: 409 Conflict with the accurate stale_reason in the body.
+    Frontend error middleware can handle the 409 uniformly; the body stays readable."""
+    client, _factory = client_and_factory
+
+    async def fake_revalidate(account_id, db):
+        return {
+            "success": False,
+            "stale_reason": "Refresh token rejected — re-login required",
+            "email": "vault@example.com",
+            "active_refused": False,
+        }
+
+    monkeypatch.setattr(ac, "revalidate_account", fake_revalidate)
+
+    resp = client.post("/api/accounts/1/revalidate")
+    assert resp.status_code == 409
+    body = resp.json()
+    # FastAPI wraps HTTPException.detail under the "detail" key.
+    payload = body.get("detail", body)
+    assert payload["success"] is False
+    assert "rejected" in payload["stale_reason"].lower()
+    assert payload["active_refused"] is False
+
+
+def test_revalidate_endpoint_409_on_active_account(client_and_factory, monkeypatch):
+    """Active-account revalidate → 409 with active_refused=True and a message
+    that tells the user to switch first."""
+    client, _factory = client_and_factory
+
+    async def fake_revalidate(account_id, db):
+        return {
+            "success": False,
+            "stale_reason": "Refresh token rejected — re-login required",
+            "email": "active@example.com",
+            "active_refused": True,
+        }
+
+    monkeypatch.setattr(ac, "revalidate_account", fake_revalidate)
+
+    resp = client.post("/api/accounts/1/revalidate")
+    assert resp.status_code == 409
+    payload = resp.json().get("detail", resp.json())
+    assert payload["active_refused"] is True
+
+
+def test_revalidate_endpoint_broadcasts_account_updated_on_success(
+    client_and_factory, monkeypatch
+):
+    """Success broadcasts account_updated with stale_reason=None so connected
+    clients update the card immediately instead of waiting for next usage_updated.
+
+    (verify-relogin omits stale_reason in its broadcast, forcing the UI to wait
+    for a subsequent usage_updated poll — this endpoint fixes that for its own
+    flow.)
+    """
+    client, _factory = client_and_factory
+
+    async def fake_revalidate(account_id, db):
+        return {
+            "success": True,
+            "stale_reason": None,
+            "email": "vault@example.com",
+            "active_refused": False,
+        }
+
+    monkeypatch.setattr(ac, "revalidate_account", fake_revalidate)
+
+    broadcasts: list = []
+
+    async def fake_broadcast(msg):
+        broadcasts.append(msg)
+
+    from backend import ws as ws_mod
+    monkeypatch.setattr(ws_mod.ws_manager, "broadcast", fake_broadcast)
+
+    resp = client.post("/api/accounts/1/revalidate")
+    assert resp.status_code == 200
+    assert any(
+        b.get("type") == "account_updated"
+        and b.get("email") == "vault@example.com"
+        and b.get("stale_reason") is None
+        for b in broadcasts
+    )

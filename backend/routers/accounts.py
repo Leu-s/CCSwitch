@@ -13,6 +13,7 @@ from ..schemas import (
     AccountUpdate, AccountOut, AccountWithUsage, SwitchLogOut, UsageData,
     LoginSessionOut, LoginVerifyResult, LogCount,
     LoginSessionCaptureOut, LoginSessionSendRequest,
+    RevalidateResult,
 )
 from ..services import account_queries as aq
 from ..services import account_service as ac
@@ -402,3 +403,61 @@ async def verify_relogin(
         logger.warning("Post-relogin broadcast failed for %s", account.email)
 
     return LoginVerifyResult(success=True, email=new_email)
+
+
+# ── On-demand revalidate (stale-recovery short-path) ────────────────────────
+
+
+@router.post("/{account_id}/revalidate", response_model=RevalidateResult)
+async def revalidate(account_id: int, db: AsyncSession = Depends(get_db)):
+    """Try once to refresh the account's tokens and clear ``stale_reason``.
+
+    Recovery short-path for accounts that were escalated to stale by the
+    poll loop's transient-failure escalation but whose ``refresh_token``
+    is actually still valid (e.g., the failures were an Anthropic-side
+    hiccup or a single-use-token race that has since cleared).  Lets the
+    user recover the account in one click without walking through the
+    full re-login tmux flow.
+
+    HTTP semantics:
+    * ``200`` — success, ``stale_reason`` cleared in the DB, a
+                ``account_updated`` event with ``stale_reason: None`` is
+                broadcast on ``/ws`` so every connected client updates
+                the card immediately (verify-relogin's existing broadcast
+                omits ``stale_reason`` and forces the UI to wait for the
+                next ``usage_updated`` poll — this endpoint fixes that
+                for its own flow).
+    * ``409`` — conflict: refresh still failed OR the account is
+                currently active (the CLI owns that lifecycle and racing
+                it would corrupt the single-use refresh_token).  Response
+                body is the ``RevalidateResult`` under ``detail`` with an
+                accurate ``stale_reason`` and ``active_refused`` flag so
+                the frontend can show the right copy.
+    * ``404`` — account id unknown.
+    """
+    result = await ac.revalidate_account(account_id, db)
+    if result is None:
+        raise HTTPException(404, "Account not found")
+
+    # Success path — broadcast and return 200.
+    if result["success"]:
+        try:
+            await ws_manager.broadcast({
+                "type": "account_updated",
+                "id": account_id,
+                "email": result["email"],
+                "stale_reason": None,
+            })
+        except Exception:
+            logger.warning(
+                "Post-revalidate broadcast failed for %s", result["email"]
+            )
+        return RevalidateResult(**result)
+
+    # Failure path — 409 Conflict with the full RevalidateResult in `detail`
+    # so standard HTTP-error middleware (frontend's api.js wrapper etc.)
+    # can catch it uniformly while keeping the body readable.
+    raise HTTPException(
+        status_code=409,
+        detail=RevalidateResult(**result).model_dump(),
+    )
