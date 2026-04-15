@@ -200,6 +200,37 @@ async def test_perform_switch_writes_log_and_broadcasts(db_session, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_perform_switch_invalidates_target_cache(db_session, monkeypatch):
+    """After a successful swap the target's usage cache must be cleared so
+    maybe_auto_switch does not bounce back based on a stale probe."""
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(email="b@example.com", priority=1, threshold_pct=90.0),
+    ])
+    await db_session.commit()
+
+    # Pre-populate b@example.com's cache with over-threshold usage.
+    await _cache.set_usage(
+        "b@example.com", {"five_hour": {"utilization": 95.0}}
+    )
+    await _cache.set_token_info("b@example.com", {"token_expires_at": 123})
+
+    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
+    monkeypatch.setattr(ac, "swap_to_account", lambda _email: {})
+
+    ws = _FakeWS()
+    target = (await db_session.execute(
+        select(Account).where(Account.email == "b@example.com")
+    )).scalar_one()
+
+    await sw.perform_switch(target, "manual", db_session, ws)
+
+    # Target's cached usage cleared — next poll re-probes before auto-switch decides.
+    assert await _cache.get_usage_async("b@example.com") == {}
+    assert await _cache.get_token_info_async("b@example.com") is None
+
+
+@pytest.mark.asyncio
 async def test_perform_switch_swap_error_broadcasts_and_skips_log(db_session, monkeypatch):
     db_session.add_all([
         _make_account(email="a@example.com", priority=0),

@@ -105,6 +105,15 @@ async def perform_switch(
                 logger.warning("WS broadcast failed: %s", _bc_err)
             return
 
+        # Drop cached usage for the newly-active account so maybe_auto_switch
+        # does not immediately bounce back based on a stale probe result.
+        # Without this, a manual switch TO an over-threshold account is
+        # reverted by the next poll before the user has time to use the
+        # swapped-in credentials.  The next poll cycle (~15 s) re-probes
+        # and, if the account is really over threshold, auto-switch fires
+        # THEN with fresh data.
+        await cache.invalidate(target.email)
+
         from_acc = None
         if current_email:
             from_acc = await aq.get_account_by_email(current_email, db)
