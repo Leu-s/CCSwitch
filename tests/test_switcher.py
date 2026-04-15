@@ -200,16 +200,16 @@ async def test_perform_switch_writes_log_and_broadcasts(db_session, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_perform_switch_invalidates_target_cache(db_session, monkeypatch):
-    """After a successful swap the target's usage cache must be cleared so
-    maybe_auto_switch does not bounce back based on a stale probe."""
+async def test_manual_switch_opens_grace_window(db_session, monkeypatch):
+    """A manual switch must open the auto-switch grace window AND preserve
+    the target's cached usage so the UI can show its last-known state
+    (e.g. ``rate-limited``) instead of blanking out."""
     db_session.add_all([
         _make_account(email="a@example.com", priority=0),
         _make_account(email="b@example.com", priority=1, threshold_pct=90.0),
     ])
     await db_session.commit()
 
-    # Pre-populate b@example.com's cache with over-threshold usage.
     await _cache.set_usage(
         "b@example.com", {"five_hour": {"utilization": 95.0}}
     )
@@ -223,11 +223,77 @@ async def test_perform_switch_invalidates_target_cache(db_session, monkeypatch):
         select(Account).where(Account.email == "b@example.com")
     )).scalar_one()
 
+    before = sw._manual_switch_grace_until
     await sw.perform_switch(target, "manual", db_session, ws)
 
-    # Target's cached usage cleared — next poll re-probes before auto-switch decides.
-    assert await _cache.get_usage_async("b@example.com") == {}
-    assert await _cache.get_token_info_async("b@example.com") is None
+    # Grace window extended
+    assert sw._manual_switch_grace_until > before
+    # Target cache preserved — UI still shows the over-threshold state
+    usage = await _cache.get_usage_async("b@example.com")
+    assert usage.get("five_hour") == {"utilization": 95.0}
+    assert await _cache.get_token_info_async("b@example.com") is not None
+
+
+@pytest.mark.asyncio
+async def test_auto_switch_reason_does_not_extend_grace(db_session, monkeypatch):
+    """The grace window only opens for manual switches.  An auto-driven
+    switch (reason=='threshold' or 'rate_limited') must NOT defer further
+    auto-switches."""
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(email="b@example.com", priority=1),
+    ])
+    await db_session.commit()
+
+    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
+    monkeypatch.setattr(ac, "swap_to_account", lambda _email: {})
+    sw._manual_switch_grace_until = 0.0
+
+    ws = _FakeWS()
+    target = (await db_session.execute(
+        select(Account).where(Account.email == "b@example.com")
+    )).scalar_one()
+
+    await sw.perform_switch(target, "threshold", db_session, ws)
+    assert sw._manual_switch_grace_until == 0.0
+
+
+@pytest.mark.asyncio
+async def test_maybe_auto_switch_skips_during_grace(db_session, monkeypatch):
+    """With the manual-switch grace window open, maybe_auto_switch must NOT
+    fire even when the active account is rate-limited."""
+    import time as _time
+    db_session.add(Setting(key="service_enabled", value="true"))
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0, threshold_pct=50.0),
+        _make_account(email="b@example.com", priority=1),
+    ])
+    await db_session.commit()
+
+    # a@example.com is at 99% — far over threshold.
+    await _cache.set_usage(
+        "a@example.com", {"five_hour": {"utilization": 99.0}, "rate_limited": True}
+    )
+
+    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
+    swap_calls: list[str] = []
+    monkeypatch.setattr(
+        ac, "swap_to_account",
+        lambda email: swap_calls.append(email) or {},
+    )
+
+    # Open grace window 30s into the future.
+    sw._manual_switch_grace_until = _time.monotonic() + 30
+
+    ws = _FakeWS()
+    await sw.maybe_auto_switch(db_session, ws)
+
+    assert swap_calls == []
+    logs = (await db_session.execute(select(SwitchLog))).scalars().all()
+    assert logs == []
+
+    # Clean up grace for subsequent tests.
+    sw._manual_switch_grace_until = 0.0
 
 
 @pytest.mark.asyncio

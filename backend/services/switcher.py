@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -23,6 +24,13 @@ logger = logging.getLogger(__name__)
 # interleaving but this asyncio lock also serializes the DB write + broadcast
 # so clients see a clean "A → B" event instead of a partial overlap.
 _switch_lock = asyncio.Lock()
+
+# Monotonic deadline until which ``maybe_auto_switch`` skips its threshold
+# check.  Set whenever the user manually switches to an account so an
+# over-threshold target is NOT instantly reverted before they have a chance
+# to see its state.  60 seconds covers ~4 poll cycles at active cadence.
+_MANUAL_SWITCH_GRACE_SECONDS = 60
+_manual_switch_grace_until: float = 0.0
 
 
 async def get_next_account(current_email: str, db: AsyncSession) -> Account | None:
@@ -105,14 +113,18 @@ async def perform_switch(
                 logger.warning("WS broadcast failed: %s", _bc_err)
             return
 
-        # Drop cached usage for the newly-active account so maybe_auto_switch
-        # does not immediately bounce back based on a stale probe result.
-        # Without this, a manual switch TO an over-threshold account is
-        # reverted by the next poll before the user has time to use the
-        # swapped-in credentials.  The next poll cycle (~15 s) re-probes
-        # and, if the account is really over threshold, auto-switch fires
-        # THEN with fresh data.
-        await cache.invalidate(target.email)
+        # After a manual switch, grant a grace window so auto-switch does
+        # not instantly revert even if the target is already over its
+        # threshold — the user explicitly picked this account and needs
+        # time to observe or use it.  Keeping the target's cached usage
+        # intact is deliberate: the UI shows real last-known state
+        # (e.g. "already rate-limited") instead of an empty card.  Auto
+        # switches themselves never enter the grace window.
+        if reason == "manual":
+            global _manual_switch_grace_until
+            _manual_switch_grace_until = (
+                time.monotonic() + _MANUAL_SWITCH_GRACE_SECONDS
+            )
 
         from_acc = None
         if current_email:
@@ -184,6 +196,14 @@ async def maybe_auto_switch(db, ws: WebSocketManager) -> None:
                 })
             except Exception as _bc_err:
                 logger.warning("WS broadcast failed: %s", _bc_err)
+        return
+
+    # Respect the manual-switch grace window: the user just picked this
+    # account explicitly, possibly knowing it is over threshold.  Don't
+    # yank it out from under them for the next ~60 seconds.  Probing
+    # continues as normal during the grace so the UI still reflects live
+    # state; only the auto-switch decision is deferred.
+    if time.monotonic() < _manual_switch_grace_until:
         return
 
     current_usage = await cache.get_usage_async(current_email)
