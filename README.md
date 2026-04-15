@@ -19,9 +19,11 @@ If you've ever been deep in a Claude Code session and hit the 5-hour rate limit,
 
 ### Who is this for?
 
-- Power users running long Claude Code sessions who burn through a single subscription's rate window
-- Teams or solo developers paying for multiple Claude Pro / Max accounts and tired of swapping `CLAUDE_CONFIG_DIR` by hand
-- Anyone who wants a single pane of glass showing five-hour and seven-day utilization across every account they own
+- Solo developers running many long-lived Claude Code panes (cmux, tmux, iTerm, VS Code) against a single active account, who want to extend effective rate-limit budget over time by rotating between several paid subscriptions.
+- Anyone tired of swapping `CLAUDE_CONFIG_DIR` by hand or restarting tmux windows after every `/login`.
+- Users who want a single pane of glass showing five-hour and seven-day utilization across every account they own.
+
+This is **not** a load-balancer across parallel accounts — there are open-source proxies for that (ccflare, claude-balancer, ccNexus), which currently operate in the Anthropic ToS gray zone after the February 2026 policy tightening. CCSwitch keeps the native Claude Code binary, the native macOS Keychain, and the native OAuth flow; it only rotates which credentials sit in the standard Keychain entry at any given moment. No proxy, no token interception, no API redirection.
 
 ### How it feels
 
@@ -418,6 +420,25 @@ What is intentionally **not** done:
 - No cloud sync — everything lives in local SQLite + macOS Keychain
 - No Linux Keychain integration — Linux support would require an analogous vault/standard credential store
 - No rollback path for the one-shot vault migration (a one-time JSON backup is written to `~/.ccswitch-backup-2026-04-15.json` on the first upgrade)
+
+---
+
+## Prior art and positioning
+
+The OSS ecosystem around Claude multi-account management has converged on two branches. CCSwitch picks a third.
+
+**Branch 1 — `CLAUDE_CONFIG_DIR` per-profile wrappers** (the majority).
+Examples: [diranged/claude-profile](https://github.com/diranged/claude-profile), [burakdede/aisw](https://github.com/burakdede/aisw), [realiti4/claude-swap](https://github.com/realiti4/claude-swap), [kzheart/claude-code-switcher](https://github.com/kzheart/claude-code-switcher), [Second-Victor/cc-account-switcher-zsh](https://github.com/Second-Victor/cc-account-switcher-zsh), [ming86/cc-account-switcher](https://github.com/ming86/cc-account-switcher) (archived Feb 22, 2026 after Anthropic's ToS clarification). Each account lives in its own config directory; Claude Code's own Keychain-hashing (`sha256(config_dir)[:8]`) provides isolation. Switching is usually a shell-level env var flip and a manual `claude` restart. **No auto-switch.** The closest one to auto-switch is [dr5hn/ccm](https://github.com/dr5hn/ccm) (~15 stars, `ccm watch --threshold N --auto`) — a bash script without a dashboard.
+
+**Branch 2 — Local-proxy routers** (intercept `ANTHROPIC_BASE_URL`).
+Examples: [snipeship/ccflare](https://github.com/snipeship/ccflare) (~945 stars), [tombii/better-ccflare](https://github.com/tombii/better-ccflare), [snipeship/claude-balancer](https://github.com/snipeship/claude-balancer), [lich0821/ccNexus](https://github.com/lich0821/ccNexus), [codeking-ai/cligate](https://github.com/codeking-ai/cligate), [CaddyGlow/ccproxy-api](https://github.com/CaddyGlow/ccproxy-api), [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). These route subscription traffic through a local HTTP server that swaps credentials per request. **Powerful but operating in the Anthropic ToS gray zone** after the February 2026 policy clarification; several (better-ccflare, ccflare itself) have removed round-robin / tier-balancing to stay on the safe side.
+
+**Branch 3 — Native-CLI vault partition + in-place swap** (CCSwitch).
+Keep the native `claude` binary, the native macOS Keychain, and the native OAuth flow. Store inactive accounts in a private `ccswitch-vault` Keychain service namespace the CLI does not know about. Swap credentials into the standard `Claude Code-credentials` entry on a rate-limit trigger driven by proactive `/v1/messages` header polling. Nudge running tmux panes so they pick up the new identity without restart. No proxy, no token interception, no API redirection. **ToS-safe by construction.**
+
+No OSS project found with the full combination of (a) private Keychain namespace for inactive accounts, (b) proactive polling of `anthropic-ratelimit-unified-*` response headers, (c) automatic swap before threshold crossing, and (d) a real-time dashboard. The architectural parallels in other ecosystems are [`aws-vault`](https://github.com/99designs/aws-vault) (keychain partition, but `exec` model instead of promote-to-active) and [`gh auth switch`](https://github.com/cli/cli/blob/trunk/docs/multiple-accounts.md) (in-place identity flip via a hosts file, no auto-switch, no keychain namespace).
+
+The upstream feature requests in [anthropics/claude-code#20131](https://github.com/anthropics/claude-code/issues/20131) ("Multi-Account Profile Support", 54+ upvotes) and [#30031](https://github.com/anthropics/claude-code/issues/30031) ("Support like gh auth switch", 22+ upvotes) remain open as of this writing.
 
 ---
 

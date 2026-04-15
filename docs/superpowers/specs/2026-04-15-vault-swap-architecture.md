@@ -714,3 +714,92 @@ outside CCSwitch.
 
 The user instruction for this work is a hard cutover; the spec
 codifies that as "no rollback."
+
+---
+
+## 10. Prior art
+
+Multi-account Claude tooling in OSS clusters into two branches, and
+this spec picks a third.  Recorded here for orientation, not as a
+survey or a competitive claim.
+
+### 10.1 `CLAUDE_CONFIG_DIR` per-profile wrappers (most common)
+
+Each account lives in its own config directory; Claude Code's own
+`sha256(config_dir)[:8]` Keychain-entry hashing isolates the tokens.
+Switching is a shell env-var flip plus (usually) a manual `claude`
+restart.  No automatic switching on rate-limit headers; no central
+observability.  Examples: `diranged/claude-profile`, `burakdede/aisw`,
+`realiti4/claude-swap`, `kzheart/claude-code-switcher`,
+`Second-Victor/cc-account-switcher-zsh`, the archived
+`ming86/cc-account-switcher`.  The only member of this branch with
+anything like auto-switch is `dr5hn/ccm` (bash + jq, no dashboard,
+and it's unclear from the README whether it polls
+`anthropic-ratelimit-unified-*` headers or reacts to 429 after the
+fact).
+
+### 10.2 Local-proxy routers (ANTHROPIC_BASE_URL interception)
+
+Intercept the HTTP path and swap credentials per request.  High
+functional ceiling — arbitrary routing policies, multi-account
+concurrency — but operate in the Anthropic ToS gray zone after the
+Feb 20, 2026 policy clarification that third-party products must
+not "route requests through Free/Pro/Max plan credentials on behalf
+of their users."  Several tools in this branch have pulled
+round-robin / tier-balancing in response (e.g. `better-ccflare`
+replaced it with priority-based fallback).  Examples: `ccflare`,
+`claude-balancer`, `ccNexus`, `cligate`, `ccproxy-api`,
+`CLIProxyAPI`.
+
+### 10.3 Vault-partition + in-place swap (this spec)
+
+Neither isolates by CLI directory (§10.1) nor proxies the API
+(§10.2).  Instead, inactive accounts live in a private Keychain
+service namespace (`ccswitch-vault`) that the CLI does not enumerate
+or address; only the currently-active account's tokens live in the
+standard `Claude Code-credentials` entry.  The swap is a
+deterministic move between the two entries.  The active account's
+refresh lifecycle remains owned by the native CLI.  No proxy, no
+token interception, no ANTHROPIC_BASE_URL override, no forked CLI
+binary — the native `claude` runs unmodified against the system
+Keychain.  ToS-safe by construction under the post-February 2026
+policy language, because nothing CCSwitch does intercepts prompt
+traffic or routes credentials through its own infrastructure.
+
+### 10.4 Analogous patterns outside Claude
+
+The `aws-vault` project (99designs) is the closest architectural
+reference in the wider CLI-identity ecosystem: per-profile tokens
+in a dedicated macOS Keychain partition, subprocess-level injection
+on demand.  It differs in shape: `aws-vault` uses an `exec` model
+(spawn a child process with credentials in the env) rather than
+promote-to-active-in-place.  `gh auth switch` in the GitHub CLI is
+the closest in-place swap analog — named identities in the OS
+keyring, an active-user pointer in a hosts file — but without a
+private keychain namespace and without auto-switch.  `gcloud config
+configurations activate`, `kubectl config use-context`, and
+`docker context use` use the directory-named-config pattern (closer
+to §10.1).
+
+### 10.5 Why the §10.3 combination is rare for Claude specifically
+
+Based on the Feb 2026 survey:
+
+1. `CLAUDE_CONFIG_DIR` already namespaces Keychain entries via
+   sha256, so most authors never reached for a custom partition.
+2. Auto-switch demand became sharp only after Anthropic tightened
+   Max-20 limits in Q1 2026 (upstream #41788, #38335, #22876 report
+   5h-window exhaustion in ~70 min versus prior 3–4 h).
+3. The auto-failover use case was absorbed by the §10.2 proxy
+   branch early, before Anthropic's ToS clarification raised the
+   category-wide risk.
+4. Proactive polling of the `anthropic-ratelimit-unified-*` headers
+   via a near-empty probe is undocumented; most tools either watch
+   Claude's internal `usage-exact.json` cache or react to 429s
+   after the fact.
+5. A dashboard + FastAPI + WebSocket surface is overkill for the
+   "scratch my itch" scale most of §10.1 operates at.
+
+The upstream feature requests (`anthropics/claude-code` issues
+#20131 "Multi-Account Profile Support" and #30031 "Support like gh
+auth switch") remain open at the time of this spec.

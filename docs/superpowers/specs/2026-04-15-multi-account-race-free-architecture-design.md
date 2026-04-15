@@ -536,7 +536,9 @@ Operationally heavier but hermetic.
 
 ### 8.3 Only-if-constraints-change: Anthropic Official Multi-Account
 
-If Anthropic ships official multi-account support (per Issue #24798 or similar),
+If Anthropic ships official multi-account support (per the open feature
+requests in Issues #20131 "Multi-Account Profile Support" and #30031
+"Support like gh auth switch"),
 retire CCSwitch's custom switching layer. Keep UI as a thin wrapper over the
 official switch API. This is Section 5-not-5 — plan for it, don't build to it.
 

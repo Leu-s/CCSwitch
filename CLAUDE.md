@@ -22,6 +22,30 @@ freshly-swapped credentials.  CCSwitch automates what the user was
 doing manually — `claude /login` in one pane, then "continue" in all
 the others.
 
+### Positioning vs. other OSS Claude-multi-account tooling
+
+Two common branches exist elsewhere; CCSwitch deliberately sits in
+neither.
+
+- `CLAUDE_CONFIG_DIR` per-profile wrappers (`diranged/claude-profile`,
+  `burakdede/aisw`, `realiti4/claude-swap`, the archived
+  `ming86/cc-account-switcher`, etc.): per-account directories, each
+  with its own Claude-Code-hashed Keychain entry.  Manual switching,
+  no auto-failover on rate-limit, no central observability.
+- Local-proxy routers (`ccflare`, `claude-balancer`, `ccNexus`,
+  `cligate`, `ccproxy-api`): intercept `ANTHROPIC_BASE_URL` and swap
+  credentials per request.  Powerful but post-February 2026 they
+  operate in the Anthropic ToS gray zone ("route requests through
+  Pro/Max credentials on behalf of users"); several removed
+  round-robin / tier-balancing as a response.
+
+CCSwitch's approach is a third path: **keep the native `claude`
+binary, the native macOS Keychain, and the native OAuth flow; only
+rotate which credentials sit in the standard `Claude Code-credentials`
+Keychain entry at any given moment.**  No proxy, no token
+interception, no API redirection.  ToS-safe by construction.  The
+prior-art trade-offs are discussed in more depth in spec §10.
+
 ## Credential storage
 
 Everything lives in exactly two Keychain namespaces.
