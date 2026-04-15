@@ -503,6 +503,23 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes pulse { 50% { opacity: 0.35; } }
 
+  /* Stale-card dual action: Revalidate (secondary, fast recovery) +
+     Re-login (primary, definitive fix).  Both sit in the card footer
+     next to the threshold slider. */
+  .stale-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .stale-actions .btn {
+    flex: 1;
+  }
+  .revalidate-btn {
+    /* Lower-priority than re-login: the default .btn (no .primary) is
+       already the secondary visual style — lighter background, no
+       accent glow.  This class is reserved for future tweaks. */
+  }
+
   /* ── Switch Log sidebar ─────────────────────────────────────────────────── */
   .sl-header {
     padding: 2px 0 14px;

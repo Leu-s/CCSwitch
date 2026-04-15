@@ -1,6 +1,6 @@
 import { TERMINAL_REFRESH_MS } from "../constants.js";
 import { qs, escapeHtml } from "../utils.js";
-import { api, withLoading } from "../api.js";
+import { api, withLoading, revalidateAccount } from "../api.js";
 import { toast } from "../toast.js";
 
 // The Add Account modal doubles as the Re-login modal: the markup is the
@@ -109,6 +109,56 @@ export function initLoginListeners() {
   document.addEventListener("app:relogin-account", e => {
     const { accountId, email } = e.detail || {};
     if (accountId && email) openReloginModal(accountId, email);
+  });
+
+  // Sibling of app:relogin-account — fast-path recovery via the
+  // /revalidate endpoint.  On success the WS account_updated event
+  // clears the stale banner without any modal.  On 409 we branch on
+  // the structured err.body.detail payload to distinguish "active
+  // account refused" (warning, the user has to switch away first)
+  // from "refresh still failing" (error, try again later or Re-login).
+  document.addEventListener("app:revalidate-account", async e => {
+    const { accountId, email } = e.detail || {};
+    if (!accountId || !email) return;
+    try {
+      await revalidateAccount(accountId);
+      toast(
+        "Revalidated",
+        `${email} — tokens refreshed.`,
+        "success",
+      );
+    } catch (err) {
+      // The api() wrapper attaches err.status and err.body on non-2xx.
+      // A 409 from /revalidate carries the RevalidateResult under
+      // err.body.detail — read active_refused to branch the copy.
+      const payload = (err && err.body && err.body.detail) || {};
+      if (err && err.status === 409 && payload.active_refused) {
+        toast(
+          "Cannot revalidate active account",
+          `${email} is currently active. Switch to another account first, then retry.`,
+          "warning",
+          6000,
+        );
+        return;
+      }
+      if (err && err.status === 409) {
+        const reason = payload.stale_reason || err.message || "unknown error";
+        toast(
+          "Revalidate failed",
+          `${email}: ${reason}. Try again later or click Re-login if the problem persists.`,
+          "error",
+          6000,
+        );
+        return;
+      }
+      // Network error / timeout / unexpected status — no structured body.
+      toast(
+        "Revalidate request failed",
+        (err && err.message) || String(err),
+        "error",
+        6000,
+      );
+    }
   });
 
   qs("#open-terminal-btn").addEventListener("click", async () => {

@@ -176,10 +176,16 @@ function accountCardHtml(acc, index) {
           <span class="threshold-value" id="tval-${acc.id}">${threshold.toFixed(0)}%</span>
         </div>
         ${isStale
-          ? `<button class="btn primary relogin-btn" data-id="${acc.id}" data-email="${escapeHtml(acc.email)}" title="Open a terminal and re-authenticate this account">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-              Re-login
-            </button>`
+          ? `<div class="stale-actions">
+              <button class="btn secondary revalidate-btn" data-id="${acc.id}" data-email="${escapeHtml(acc.email)}" title="Try refreshing the tokens once. Use this when the account was marked stale after a transient Anthropic hiccup and you believe the refresh_token is still valid.">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                Revalidate
+              </button>
+              <button class="btn primary relogin-btn" data-id="${acc.id}" data-email="${escapeHtml(acc.email)}" title="Open a terminal and re-authenticate this account">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                Re-login
+              </button>
+            </div>`
           : `<button class="btn primary ${isActive?"outlined":""} switch-btn" data-id="${acc.id}" ${isActive?"disabled":""} title="${(!isActive && disabled) ? "Manual switch — available even when excluded from auto-switching" : ""}">
               ${isActive ? "Currently active" : "Switch to"}
             </button>`
@@ -281,6 +287,17 @@ function attachCardEvents() {
       // app:reload-accounts pattern used elsewhere).  login.js owns the
       // modal state machine and listens for this event in initLoginListeners.
       document.dispatchEvent(new CustomEvent("app:relogin-account", {
+        detail: { accountId: Number(btn.dataset.id), email: btn.dataset.email },
+      }));
+    });
+  });
+
+  qsa(".revalidate-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      // Fast-recovery sibling of Re-login: POSTs to /revalidate and, on
+      // success, the WS account update clears the stale banner without
+      // the full tmux dance.  login.js listens for this event.
+      document.dispatchEvent(new CustomEvent("app:revalidate-account", {
         detail: { accountId: Number(btn.dataset.id), email: btn.dataset.email },
       }));
     });
