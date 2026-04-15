@@ -1,7 +1,32 @@
 # Active-Ownership Refresh Model
 
 **Date:** 2026-04-14
-**Status:** Approved
+**Status:** **SUPERSEDED** — see `2026-04-15-vault-swap-architecture.md`.
+
+> This design tried to prevent CCSwitch↔CLI refresh races by partitioning
+> ownership through the `~/.ccswitch/active` pointer: CCSwitch would refresh
+> all inactive accounts, and skip whichever one the CLI was using.
+>
+> **Why superseded.** The user's real workflow is N parallel cmux panes
+> **sharing one active account** — not N parallel CLIs each on their own
+> account. The model's "CLI only touches the pointer target" premise was
+> built for a workflow that does not exist here. The new Vault-Swap
+> architecture eliminates the race *structurally* instead of through
+> ownership choreography: active credentials live in the standard
+> `Claude Code-credentials` Keychain entry (CLI writes it during refresh;
+> CCSwitch never does), inactive credentials live in private
+> `ccswitch-vault` entries the CLI cannot see. No partition logic, no
+> waiting state, no force-refresh escape hatch, no per-config-dir locks.
+>
+> The code, tests, docs, and UI described below are removed by the new
+> architecture.
+
+---
+
+## Original design (retained for history)
+
+**Date:** 2026-04-14
+**Status:** Approved (at time of writing)
 
 ## Problem
 
