@@ -185,3 +185,35 @@ async def test_wake_returns_zero_when_no_panes():
     with patch.object(ts, "list_panes", new=AsyncMock(return_value=[])):
         summary = await ts.wake_stalled_sessions("continue")
     assert summary == {"scanned": 0, "nudged": [], "errors": []}
+
+
+# ── _looks_like_claude_pane detection shapes ───────────────────────────────
+
+
+def test_looks_like_claude_pane_matches_real_world_shapes():
+    """Covers the three real pane_current_command shapes Claude Code
+    reports across install methods.  Regression guard: native-installer
+    builds (post-2.1.100) report the bare semver as the process name —
+    missing that shape meant ``wake_stalled_sessions`` silently skipped
+    every claude pane on modern installs."""
+    from backend.services import tmux_service as ts
+
+    # Legacy npm-global install + absolute paths + case variants.
+    assert ts._looks_like_claude_pane("claude")
+    assert ts._looks_like_claude_pane("/usr/local/bin/claude")
+    assert ts._looks_like_claude_pane("Claude")
+    # Wrapper invocations.
+    assert ts._looks_like_claude_pane("python -m claude")
+    assert ts._looks_like_claude_pane("python3.12 -m claude.cli")
+    # Native installer (2.1.100+): argv[0] is the bare version string.
+    assert ts._looks_like_claude_pane("2.1.108")
+    assert ts._looks_like_claude_pane("2.1.109")
+    assert ts._looks_like_claude_pane("1.0.24")
+    assert ts._looks_like_claude_pane("2.1.108-rc1")
+    # Negative: regular shells / non-semver / empty.
+    assert not ts._looks_like_claude_pane("zsh")
+    assert not ts._looks_like_claude_pane("bash")
+    assert not ts._looks_like_claude_pane("node")
+    assert not ts._looks_like_claude_pane("")
+    assert not ts._looks_like_claude_pane("1.2")  # not semver — two parts
+    assert not ts._looks_like_claude_pane("alpha.beta.gamma")  # non-numeric

@@ -161,21 +161,34 @@ def looks_stalled(capture: str) -> bool:
     return bool(_STALL_PATTERNS.search(capture))
 
 
+# Claude Code's native (post-2.1.100) installer ships the CLI with
+# argv[0] set to the bare version string — tmux then reports
+# ``pane_current_command = "2.1.108"`` instead of ``claude``.  Match that
+# shape so the nudge finds native-install panes, not just the legacy
+# ``npm i -g @anthropic-ai/claude-code`` ones.
+_SEMVER_COMMAND_RE = re.compile(r"^\d+\.\d+\.\d+([.\-+].*)?$")
+
+
 def _looks_like_claude_pane(command: str) -> bool:
     """True if ``command`` (from ``pane_current_command``) looks like a Claude
-    Code process.  Case-insensitive prefix match on the basename so absolute
-    paths (``/usr/local/bin/claude``) and wrapper invocations
-    (``python -m claude``) both count, while a regular ``zsh``/``bash`` pane
-    does not.
+    Code process.
 
-    Used by ``wake_stalled_sessions`` so a stray rate-limit substring in a
-    shell pane's scrollback does not cause us to type the nudge message into
-    that shell (which would execute it as a command — self-footgun).
+    Matches three real-world shapes:
+
+    * ``claude`` basename — legacy npm-global install
+      (``/usr/local/bin/claude`` or plain ``claude``).
+    * ``python -m claude`` — wrapper invocations.
+    * Bare semver like ``2.1.108`` — the post-2.1.100 native installer
+      ships the binary with argv[0] set to the version string, and
+      that's what tmux's ``pane_current_command`` reports.
+
+    Used by ``wake_stalled_sessions`` so a stray rate-limit substring in
+    a shell pane's scrollback does not cause us to type the nudge message
+    into that shell (which would execute it as a command — self-footgun).
     """
     if not command:
         return False
     cmd = command.strip().lower()
-    # Strip a leading directory so "/usr/local/bin/claude" matches.
     basename = os.path.basename(cmd.split()[0]) if cmd else ""
     if basename.startswith("claude"):
         return True
@@ -183,6 +196,9 @@ def _looks_like_claude_pane(command: str) -> bool:
     tokens = cmd.split()
     if len(tokens) >= 3 and tokens[0].startswith("python") and tokens[1] == "-m":
         return tokens[2].startswith("claude")
+    # Native installer (2.1.100+): pane_current_command == "2.1.108" etc.
+    if _SEMVER_COMMAND_RE.match(basename):
+        return True
     return False
 
 
