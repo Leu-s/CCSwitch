@@ -187,3 +187,31 @@ def test_parse_oauth_error_429_is_transient():
 def test_parse_oauth_error_5xx_is_transient():
     err = _make_http_status_error(503, None, "Service Unavailable")
     assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_error_field_null_is_transient():
+    """Body has explicit `error: null` — still transient (no terminal code)."""
+    err = _make_http_status_error(400, {"error": None})
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_error_field_non_string_is_transient():
+    """Body has `error` as a non-string type — isinstance guard forces transient."""
+    err = _make_http_status_error(400, {"error": 400})
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_403_is_transient():
+    """Status 403 must short-circuit to transient before body lookup fires."""
+    err = _make_http_status_error(403, {"error": "invalid_grant"})
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_400_with_error_description_preserves_terminal():
+    """A terminal `error` code stays terminal even when `error_description` is
+    also present — we read ONLY the `error` field, not the description."""
+    err = _make_http_status_error(
+        400,
+        {"error": "invalid_grant", "error_description": "Token was revoked by user"},
+    )
+    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
