@@ -247,17 +247,25 @@ are identified by `email`. Vault Keychain entries are derived as
 ### 3.3 Terminal `stale_reason` strings (the only kinds that remain)
 
 1. `"No access token in vault — re-login required"`
-2. `"Refresh token revoked — re-login required"` (HTTP 401 from `/oauth/token`)
-3. `"Refresh token rejected (400) — re-login required"` (HTTP 400 from `/oauth/token`)
+2. `"Refresh token revoked — re-login required"` (HTTP 401 or 400 from
+   `/oauth/token` with a body `error` in the terminal set — see §9.10)
+3. `"Refresh token rejected — re-login required"` (HTTP 400 from
+   `/oauth/token` with a terminal OAuth code like `invalid_grant`)
 4. `"Anthropic API returned 401 — re-login required"` (vault-account
    probe 401 after successful refresh — the account is genuinely
    unreachable)
+5. `"Refresh endpoint transient failure ×N over M min (last HTTP H) —
+   re-login required"` (escalated after 5 consecutive TRANSIENT
+   failures OR 24 h wall-clock since the first failure — see §9.10)
 
-The DB column `Account.stale_reason` is only written for these four
-cases — all of them require the user to re-login via the UI.
-Transient probe failures (network timeout, DNS failure, Anthropic
-5xx, 429) are cached as `{"error": ..., "rate_limited": ...}` entries
-in memory for the next poll cycle to re-evaluate; they never persist
+The DB column `Account.stale_reason` is only written for these five
+cases — all of them require the user to click either **Revalidate**
+(tries once on-demand without the full tmux login flow — for cases
+#5 and for phantom-stale accounts whose underlying condition has
+cleared) or **Re-login** via the UI.  Transient probe failures
+(network timeout, DNS failure, Anthropic 5xx, 429) are cached as
+`{"error": ..., "rate_limited": ...}` entries in memory for the next
+poll cycle to re-evaluate; they never persist
 to `stale_reason`. An **active-account probe 401** is explicitly not
 one of the four — it means "the stored access token is expired and
 CCSwitch refuses to refresh," which is a CLI-wake-up problem, not a
@@ -635,10 +643,12 @@ pre-rotation snapshot. The mitigation:
   the interim period), the re-read captures it.
 - If CCSwitch's vault entry for account A was briefly stale and A is
   promoted before a poll cycle refreshes the vault copy from the CLI,
-  the first refresh attempt via `/oauth/token` returns 400 (the
-  server already rotated). CCSwitch marks the account stale with
-  `"Refresh token rejected (400) — re-login required"`. Rare; the
-  user re-logs in.
+  the first refresh attempt via `/oauth/token` returns 400.  Per
+  §9.10, a 400 is only terminal if the body carries a terminal OAuth
+  code (`invalid_grant` etc.).  A genuinely rotated-out-from-under-us
+  refresh_token produces `{"error": "invalid_grant"}` → marked
+  `"Refresh token rejected — re-login required"`.  A 400 from any
+  other condition enters the transient backoff ladder instead.
 
 The spec accepts a narrow residual race for the benefit of not
 serializing with the CLI. This is a deliberate tradeoff — elimination
