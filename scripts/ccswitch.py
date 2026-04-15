@@ -88,18 +88,12 @@ def cmd_disable(args):
 
 
 def cmd_status(args):
-    status = api("get", "/api/settings/shell-status")
-    shell_ok = status.get("shell_configured", False)
-    active_ok = status.get("active_file_exists", False)
-    print(f"Shell configured:   {'yes' if shell_ok else 'NO — run: ccswitch shell setup'}")
-    print(f"Active file exists: {'yes' if active_ok else 'no'}")
-
+    service = api("get", "/api/service")
     accounts = api("get", "/api/accounts")
-    active = [a for a in accounts if a.get("is_active")]
-    if active:
-        print(f"Active account:     {active[0]['email']}")
-    else:
-        print("Active account:     (none)")
+    active_email = service.get("active_email")
+    print(f"Auto-switch:        {'ON' if service.get('enabled') else 'OFF'}")
+    print(f"Active account:     {active_email or '(none)'}")
+    print(f"Total accounts:     {len(accounts)}")
 
 
 def cmd_service_install(args):
@@ -119,12 +113,6 @@ def cmd_service_remove(args):
     if args.purge_logs:
         cmd.append("--purge-logs")
     os.execv("/bin/bash", cmd)
-
-
-def cmd_shell_setup(args):
-    result = api("post", "/api/settings/setup-shell")
-    for rc, status in result.get("results", {}).items():
-        print(f"{rc}: {status}")
 
 
 def cmd_log(args):
@@ -244,11 +232,6 @@ def build_parser():
     rm = svc_sub.add_parser("remove", help="Remove LaunchAgent")
     rm.add_argument("--purge-logs", action="store_true", help="Also delete log files")
     rm.set_defaults(func=cmd_service_remove)
-
-    # shell subgroup
-    shell = sub.add_parser("shell", help="Shell configuration")
-    shell_sub = shell.add_subparsers(dest="shell_command", required=True)
-    shell_sub.add_parser("setup", help="Add CLAUDE_CONFIG_DIR one-liner to .zshrc/.bashrc").set_defaults(func=cmd_shell_setup)
 
     # log
     log = sub.add_parser("log", help="Show server log")
