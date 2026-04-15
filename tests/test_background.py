@@ -34,12 +34,14 @@ async def _wipe_cache_between_tests():
     bg._backoff_until.clear()
     bg._backoff_count.clear()
     bg._last_nudge_at.clear()
+    bg._last_poll_monotonic = None
     yield
     _cache._usage.clear()
     _cache._token_info.clear()
     bg._backoff_until.clear()
     bg._backoff_count.clear()
     bg._last_nudge_at.clear()
+    bg._last_poll_monotonic = None
 
 
 def _make_account(**kwargs) -> Account:

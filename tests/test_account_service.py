@@ -308,8 +308,8 @@ def test_startup_integrity_rewrites_claude_json_on_disagreement(
 
 
 def test_startup_integrity_noop_when_they_agree(fake_keychain, fake_claude_home):
-    store = fake_keychain
-    store[("standard", "user")] = _blob("alice@example.com")
+    # fake_keychain is used via its monkeypatch side-effects; no direct indexing.
+    fake_keychain[("standard", "user")] = _blob("alice@example.com")
     identity_path = fake_claude_home / ".claude.json"
     identity_path.write_text(json.dumps({
         "oauthAccount": {"emailAddress": "alice@example.com"},

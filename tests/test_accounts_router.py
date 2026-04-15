@@ -205,6 +205,44 @@ def test_verify_login_writes_vault_and_autoswaps_first(client_and_factory, monke
     assert rows[0].email == "alice@example.com"
 
 
+def test_verify_login_duplicate_email_returns_already_exists(
+    client_and_factory, monkeypatch
+):
+    """Second verify-login for an email already in the DB must return
+    ``already_exists=True``, still write the (new) vault tokens, and
+    NOT broadcast account_added."""
+    client, factory = client_and_factory
+    # Pre-seed a row for alice so the second save_verified_account sees it.
+    _insert_account(factory, email="alice@example.com", priority=0)
+
+    monkeypatch.setattr(ls, "verify_login_session", lambda sid: {
+        "success": True,
+        "email": "alice@example.com",
+        "oauth_account": {"emailAddress": "alice@example.com"},
+        "user_id": "uid-alice",
+        "oauth_tokens": {"accessToken": "at", "refreshToken": "rt"},
+        "kind": "add",
+        "expected_email": None,
+    })
+    monkeypatch.setattr(ls, "cleanup_login_session", lambda sid: None)
+    monkeypatch.setattr(ac, "save_new_vault_account",
+                        lambda email, tokens, oauth, uid: True)
+    swap_calls: list[str] = []
+    monkeypatch.setattr(
+        ac, "swap_to_account",
+        lambda email: swap_calls.append(email) or {},
+    )
+
+    resp = client.post("/api/accounts/verify-login?session_id=abc")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["already_exists"] is True
+    # First-account auto-activation must NOT fire on a duplicate — the
+    # account already existed before this call.
+    assert swap_calls == []
+
+
 # ── DELETE /api/accounts/{id} — non-active ────────────────────────────────
 
 

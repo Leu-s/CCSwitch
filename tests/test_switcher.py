@@ -322,3 +322,113 @@ async def test_maybe_auto_switch_noop_when_service_disabled(db_session, monkeypa
     assert swap_calls == []
     logs = (await db_session.execute(select(SwitchLog))).scalars().all()
     assert logs == []
+
+
+@pytest.mark.asyncio
+async def test_maybe_auto_switch_rate_limited_triggers_switch(db_session, monkeypatch):
+    """Active account probed as rate_limited → auto-switch with reason
+    'rate_limited' even if utilization number is below threshold."""
+    db_session.add(Setting(key="service_enabled", value="true"))
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(email="b@example.com", priority=1),
+    ])
+    await db_session.commit()
+
+    await _cache.set_usage(
+        "a@example.com",
+        {"five_hour": {"utilization": 10.0}, "rate_limited": True},
+    )
+
+    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
+    swap_calls: list[str] = []
+    monkeypatch.setattr(ac, "swap_to_account",
+                        lambda email: swap_calls.append(email) or {})
+
+    ws = _FakeWS()
+    await sw.maybe_auto_switch(db_session, ws)
+
+    assert swap_calls == ["b@example.com"]
+    logs = (await db_session.execute(select(SwitchLog))).scalars().all()
+    assert len(logs) == 1
+    assert logs[0].reason == "rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_maybe_auto_switch_stale_fast_path_switches(db_session, monkeypatch):
+    """Current account with stale_reason triggers an immediate switch
+    with reason='stale', bypassing the usage/threshold check."""
+    db_session.add(Setting(key="service_enabled", value="true"))
+    db_session.add_all([
+        _make_account(
+            email="a@example.com", priority=0,
+            stale_reason="Refresh token revoked — re-login required",
+        ),
+        _make_account(email="b@example.com", priority=1),
+    ])
+    await db_session.commit()
+
+    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
+    swap_calls: list[str] = []
+    monkeypatch.setattr(ac, "swap_to_account",
+                        lambda email: swap_calls.append(email) or {})
+
+    ws = _FakeWS()
+    await sw.maybe_auto_switch(db_session, ws)
+
+    assert swap_calls == ["b@example.com"]
+    logs = (await db_session.execute(select(SwitchLog))).scalars().all()
+    assert len(logs) == 1
+    assert logs[0].reason == "stale"
+
+
+@pytest.mark.asyncio
+async def test_switch_if_active_disabled_bypasses_service_flag(db_session, monkeypatch):
+    """switch_if_active_disabled is triggered by an explicit user action;
+    it must swap regardless of the service_enabled master toggle."""
+    db_session.add(Setting(key="service_enabled", value="false"))
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(email="b@example.com", priority=1),
+    ])
+    await db_session.commit()
+
+    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
+    swap_calls: list[str] = []
+    monkeypatch.setattr(ac, "swap_to_account",
+                        lambda email: swap_calls.append(email) or {})
+
+    ws = _FakeWS()
+    disabled = (await db_session.execute(
+        select(Account).where(Account.email == "a@example.com")
+    )).scalar_one()
+    await sw.switch_if_active_disabled(disabled, db_session, ws)
+
+    # Even with service_enabled=false, the swap runs — user intent wins.
+    assert swap_calls == ["b@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_switch_if_active_disabled_noop_when_account_inactive(
+    db_session, monkeypatch
+):
+    """Disabling a non-active account is a no-op."""
+    db_session.add(Setting(key="service_enabled", value="true"))
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(email="b@example.com", priority=1),
+    ])
+    await db_session.commit()
+
+    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
+    swap_calls: list[str] = []
+    monkeypatch.setattr(ac, "swap_to_account",
+                        lambda email: swap_calls.append(email) or {})
+
+    ws = _FakeWS()
+    disabled = (await db_session.execute(
+        select(Account).where(Account.email == "b@example.com")
+    )).scalar_one()
+    await sw.switch_if_active_disabled(disabled, db_session, ws)
+
+    assert swap_calls == []

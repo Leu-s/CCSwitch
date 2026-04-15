@@ -186,9 +186,8 @@ def test_verify_login_session_missing_email(fake_tmux, tmpdir_home, monkeypatch)
 
     result = ls.verify_login_session(sid)
     assert result["success"] is False
-    assert "email" in (result.get("error") or "").lower() or \
-        "not found" in (result.get("error") or "").lower() or \
-        ".claude.json" in (result.get("error") or "")
+    # Error must specifically explain that login wasn't detected yet.
+    assert "Login not detected" in (result.get("error") or "")
 
 
 def test_verify_login_session_no_refresh_token(fake_tmux, tmpdir_home, monkeypatch):
@@ -210,9 +209,7 @@ def test_verify_login_session_no_refresh_token(fake_tmux, tmpdir_home, monkeypat
 
     result = ls.verify_login_session(sid)
     assert result["success"] is False
-    assert "credentials" in (result.get("error") or "").lower() or \
-        "refresh" in (result.get("error") or "").lower() or \
-        "login" in (result.get("error") or "").lower()
+    assert "Credentials not found" in (result.get("error") or "")
 
 
 # ── start_relogin_session ─────────────────────────────────────────────────
@@ -222,8 +219,7 @@ def test_start_relogin_rejects_duplicate_for_same_email(fake_tmux, tmpdir_home):
     ls.start_relogin_session("alice@example.com")
     with pytest.raises(ValueError) as excinfo:
         ls.start_relogin_session("alice@example.com")
-    assert "already active" in str(excinfo.value).lower() or \
-        "re-login" in str(excinfo.value).lower()
+    assert "already active" in str(excinfo.value).lower()
 
 
 # ── cleanup_login_session ────────────────────────────────────────────────

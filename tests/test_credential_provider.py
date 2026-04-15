@@ -208,6 +208,70 @@ def test_save_refreshed_vault_token_merges_into_nested(monkeypatch):
     assert c["claudeAiOauth"]["subscriptionType"] == "pro"
 
 
+def test_save_refreshed_vault_token_top_level_shape(monkeypatch):
+    """When the existing vault blob stores tokens at the top level (legacy
+    flat shape from some CLI builds), the refresh must update top-level
+    fields — not silently create a nested ``claudeAiOauth`` dict while
+    leaving the top-level fields stale."""
+    existing = {
+        "accessToken": "old",
+        "refreshToken": "old-rt",
+        "expiresAt": 1000,
+        "subscriptionType": "pro",
+    }
+    written: dict = {}
+
+    monkeypatch.setattr(cp, "read_vault", lambda email: existing)
+    monkeypatch.setattr(
+        cp, "write_vault",
+        lambda email, creds: (written.update({"email": email, "creds": creds})
+                              or True),
+    )
+
+    cp.save_refreshed_vault_token(
+        "alice@example.com",
+        access_token="new",
+        expires_at=2000,
+        refresh_token="new-rt",
+    )
+
+    c = written["creds"]
+    # Stays in the top-level shape.
+    assert "claudeAiOauth" not in c
+    assert c["accessToken"] == "new"
+    assert c["refreshToken"] == "new-rt"
+    assert c["expiresAt"] == 2000
+    # Unchanged field preserved.
+    assert c["subscriptionType"] == "pro"
+
+
+def test_save_refreshed_vault_token_empty_vault_writes_top_level(monkeypatch):
+    """When no vault entry exists yet, save_refreshed_vault_token writes
+    the refreshed tokens as a top-level blob (readable by access_token_of
+    which tolerates both shapes)."""
+    written: dict = {}
+
+    monkeypatch.setattr(cp, "read_vault", lambda email: None)
+    monkeypatch.setattr(
+        cp, "write_vault",
+        lambda email, creds: (written.update({"email": email, "creds": creds})
+                              or True),
+    )
+
+    cp.save_refreshed_vault_token(
+        "alice@example.com", access_token="new",
+        expires_at=2000, refresh_token="new-rt",
+    )
+
+    c = written["creds"]
+    assert c["accessToken"] == "new"
+    assert c["refreshToken"] == "new-rt"
+    assert c["expiresAt"] == 2000
+    # The resulting blob is readable by the extraction helpers.
+    assert cp.access_token_of(c) == "new"
+    assert cp.refresh_token_of(c) == "new-rt"
+
+
 # ── read_login_scratch / delete_login_scratch ──────────────────────────────
 
 
