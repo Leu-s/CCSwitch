@@ -450,11 +450,16 @@ _revalidate_locks: dict[str, asyncio.Lock] = {}
 
 
 def _get_revalidate_lock(email: str) -> asyncio.Lock:
-    lock = _revalidate_locks.get(email)
-    if lock is None:
-        lock = asyncio.Lock()
-        _revalidate_locks[email] = lock
-    return lock
+    # dict.setdefault is a single atomic insert-or-return in CPython so
+    # two callers racing on the same email cannot end up with two
+    # distinct Lock objects (which would defeat the serialisation goal).
+    return _revalidate_locks.setdefault(email, asyncio.Lock())
+
+
+def forget_revalidate_lock(email: str) -> None:
+    """Drop the per-email revalidate lock.  Call on account delete so the
+    dict doesn't grow unbounded across the app lifetime."""
+    _revalidate_locks.pop(email, None)
 
 
 async def revalidate_account(account_id: int, db) -> dict | None:

@@ -282,6 +282,8 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     # backoff / nudge-cooldown dicts do not grow unbounded across churn.
     from ..background import forget_account_state
     forget_account_state(account.email)
+    # Same story for the per-email revalidate lock dict in account_service.
+    ac.forget_revalidate_lock(account.email)
 
     try:
         await ws_manager.broadcast({"type": "account_deleted", "id": account_id})

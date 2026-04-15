@@ -21,6 +21,30 @@ from backend.services import account_service as ac
 from backend.services import credential_provider as cp
 
 
+@pytest.fixture(autouse=True)
+def _clear_revalidate_module_state():
+    """Module-level dicts in account_service survive across tests without
+    this.  Clear before AND after each test for test-order independence."""
+    ac._revalidate_locks.clear()
+    # Also clear the background dicts — revalidate mutates them on success.
+    try:
+        from backend import background as bg
+        bg._refresh_backoff_until.clear()
+        bg._refresh_backoff_count.clear()
+        bg._refresh_backoff_first_failure_at.clear()
+    except Exception:
+        pass
+    yield
+    ac._revalidate_locks.clear()
+    try:
+        from backend import background as bg
+        bg._refresh_backoff_until.clear()
+        bg._refresh_backoff_count.clear()
+        bg._refresh_backoff_first_failure_at.clear()
+    except Exception:
+        pass
+
+
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
 
@@ -523,6 +547,67 @@ async def test_revalidate_account_concurrent_calls_serialize(monkeypatch):
     # rotated credentials from the first call).
     assert all(r["success"] is True for r in results)
     assert refresh_calls == ["rt-live", "rt-new"]
+
+
+@pytest.mark.asyncio
+async def test_revalidate_account_concurrent_calls_are_strictly_serialised(monkeypatch):
+    """Stronger assertion than ..._serialize: verifies the SECOND concurrent
+    revalidate call does not begin its refresh block until the FIRST one has
+    fully released the lock.  Catches the failure mode where two coroutines
+    each acquire a different Lock object (broken _get_revalidate_lock)."""
+    from backend.models import Account
+
+    account = Account(
+        id=42, email="vault@example.com", enabled=True, priority=0,
+        threshold_pct=90,
+        stale_reason="Refresh token rejected — re-login required",
+    )
+    db = MagicMock()
+    db.commit = AsyncMock()
+
+    monkeypatch.setattr(
+        ac.aq, "get_account_by_id", AsyncMock(return_value=account),
+    )
+    monkeypatch.setattr(
+        ac, "get_active_email_async",
+        AsyncMock(return_value="other@example.com"),
+    )
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: {
+            "claudeAiOauth": {
+                "accessToken": "a", "refreshToken": "rt", "expiresAt": 0,
+            },
+        },
+    )
+
+    enter_times: list[float] = []
+    exit_times: list[float] = []
+
+    async def timed_refresh(refresh_token):
+        enter_times.append(asyncio.get_event_loop().time())
+        await asyncio.sleep(0.1)  # sizable hold so parallelism would be visible
+        exit_times.append(asyncio.get_event_loop().time())
+        return {"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600}
+
+    monkeypatch.setattr(ac.anthropic_api, "refresh_access_token", timed_refresh)
+    monkeypatch.setattr(ac.cp, "save_refreshed_vault_token", lambda *a, **kw: None)
+
+    # Two concurrent revalidate calls on the SAME email.
+    results = await asyncio.gather(
+        ac.revalidate_account(42, db),
+        ac.revalidate_account(42, db),
+    )
+
+    assert all(r["success"] for r in results)
+    assert len(enter_times) == 2 and len(exit_times) == 2
+    # The CORE assertion: second call entered strictly after first call exited.
+    # If the lock were broken (two separate Lock objects), enter_times[1]
+    # would be ≈ enter_times[0] (both fire in parallel), not > exit_times[0].
+    assert enter_times[1] >= exit_times[0] - 0.005, (
+        f"Concurrent revalidate calls overlapped: "
+        f"first exit={exit_times[0]}, second enter={enter_times[1]}"
+    )
 
 
 @pytest.mark.asyncio
