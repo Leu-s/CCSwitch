@@ -23,7 +23,6 @@ from backend.models import Account, Setting, SwitchLog
 from backend.services import account_service as ac
 from backend.services import switcher as sw
 from backend.services import tmux_service
-from backend.ws import WebSocketManager
 
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_switcher.db"

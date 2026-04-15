@@ -12,7 +12,6 @@ without touching the real Keychain.  Redirect the module's hardcoded
 ``~/.claude/`` paths at a ``tmp_path`` subdirectory per test.
 """
 import json
-import os
 
 import pytest
 
@@ -312,7 +311,6 @@ def test_startup_integrity_noop_when_they_agree(fake_keychain, fake_claude_home)
         "userID": "uid-alice",
         "projects": ["p1"],
     }))
-    mtime_before = os.stat(identity_path).st_mtime_ns
 
     ac.startup_integrity_check()
 

@@ -69,12 +69,10 @@ export function closeAddModal() {
   if (loginSession) {
     // Capture the session reference and null it immediately so a rapid
     // re-open cannot observe a stale loginSession value while the DELETE
-    // is still in flight. If the DELETE fails we intentionally do NOT restore
-    // loginSession — the UI is closed and any tmux cleanup is best-effort.
-    //
-    // The same /api/accounts/cancel-login endpoint serves both flows: the
-    // backend's cleanup_login_session inspects the session's "kind" and
-    // preserves the config dir for re-login sessions automatically.
+    // is still in flight.  If the DELETE fails we intentionally do NOT
+    // restore loginSession — the UI is closed and tmux cleanup is
+    // best-effort.  Both add and re-login flows use a throwaway scratch
+    // directory on the backend, so cancel-login unconditionally rmtree's it.
     const sessionId = loginSession.session_id;
     loginSession = null;
     api(`/api/accounts/cancel-login?session_id=${encodeURIComponent(sessionId)}`, {method:"DELETE"})

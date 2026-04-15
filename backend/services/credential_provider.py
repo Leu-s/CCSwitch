@@ -152,39 +152,6 @@ def _delete_password(service: str, account: str) -> None:
         logger.debug("Keychain delete raised for %s / %s: %s", service, account, e)
 
 
-def _list_services_matching(prefix: str) -> list[str]:
-    """Return every service name starting with ``prefix`` across the user's
-    login keychain.  Used by the migration's orphan sweep."""
-    try:
-        result = subprocess.run(
-            ["security", "dump-keychain"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except subprocess.TimeoutExpired:
-        logger.warning("security dump-keychain timed out")
-        return []
-    except Exception as e:  # pragma: no cover — defensive
-        logger.debug("security dump-keychain raised: %s", e)
-        return []
-
-    found: set[str] = set()
-    # Each keychain entry block has a line of the form:
-    #   "svce"<blob>="<service name>"
-    # Parse that by prefix match.
-    for line in result.stdout.splitlines():
-        marker = '"svce"<blob>="'
-        if marker in line:
-            start = line.index(marker) + len(marker)
-            end = line.rfind('"')
-            if end > start:
-                svc = line[start:end]
-                if svc.startswith(prefix):
-                    found.add(svc)
-    return sorted(found)
-
-
 # ── Standard entry (Claude Code-credentials) API ───────────────────────────
 #
 # The CLI's side of the partition.  CCSwitch writes only from inside the

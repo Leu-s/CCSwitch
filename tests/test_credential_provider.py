@@ -12,8 +12,6 @@ import hashlib
 import json
 import subprocess
 
-import pytest
-
 from backend.services import credential_provider as cp
 
 

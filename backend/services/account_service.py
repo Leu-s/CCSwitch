@@ -37,14 +37,6 @@ _CLAUDE_JSON_PATH = os.path.join(_CLAUDE_HOME, ".claude.json")
 _CREDENTIALS_JSON_PATH = os.path.join(_CLAUDE_HOME, ".credentials.json")
 
 
-def claude_home() -> str:
-    return _CLAUDE_HOME
-
-
-def claude_json_path() -> str:
-    return _CLAUDE_JSON_PATH
-
-
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -129,14 +121,6 @@ def read_credentials_for_email(email: str, active_email: str | None = None) -> d
     if email == active_email:
         return cp.read_standard()
     return cp.read_vault(email)
-
-
-def get_access_token(email: str, active_email: str | None = None) -> str | None:
-    return cp.access_token_of(read_credentials_for_email(email, active_email))
-
-
-def get_refresh_token(email: str, active_email: str | None = None) -> str | None:
-    return cp.refresh_token_of(read_credentials_for_email(email, active_email))
 
 
 def get_token_info(email: str, active_email: str | None = None) -> dict:

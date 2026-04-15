@@ -5,7 +5,6 @@ Uses a file-backed SQLite DB (dropped/recreated per test) so the async engine
 and all coroutines share the same event loop (via asyncio.run()).
 """
 import asyncio
-import pytest
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import select
 

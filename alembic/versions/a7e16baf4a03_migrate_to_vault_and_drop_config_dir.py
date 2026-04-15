@@ -289,9 +289,13 @@ def upgrade() -> None:
         )
         rows = [tuple(r) for r in result.fetchall()]
 
-    # Collect every legacy hashed Keychain service for the backup.
+    # Collect every legacy hashed Keychain service.  Only write a backup when
+    # there is actual legacy state to back up — otherwise a hypothetical
+    # re-run of upgrade() on an already-migrated DB would clobber the
+    # original backup with a near-empty one.
     legacy_services = _list_services_with_prefix(_STANDARD_SERVICE + "-")
-    _write_backup(rows, legacy_services)
+    if has_config_dir:
+        _write_backup(rows, legacy_services)
 
     # ── 1. Move credentials into the vault per-account ─────────────────────
     stale_ids: list[int] = []

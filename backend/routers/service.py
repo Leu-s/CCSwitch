@@ -13,7 +13,6 @@ swap), the first enabled account is activated.  Toggling OFF clears
 the flag.
 """
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query

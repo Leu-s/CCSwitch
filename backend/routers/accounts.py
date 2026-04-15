@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
-from ..background import cache
+from ..cache import cache
 from ..config import settings
 from ..database import get_db
 from ..models import Account, SwitchLog
@@ -111,7 +111,7 @@ async def verify_login(session_id: str, db: AsyncSession = Depends(get_db)):
 
     # First-ever account on this machine?  Activate it immediately so the
     # user can start using Claude Code right away without a manual switch.
-    if (await aq.get_all_accounts(db)).__len__() == 1:
+    if len(await aq.get_all_accounts(db)) == 1:
         try:
             await asyncio.to_thread(ac.swap_to_account, email)
         except Exception as e:
