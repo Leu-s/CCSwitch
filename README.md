@@ -62,6 +62,7 @@ You're refactoring a service in 20 tmux panes, all running `claude`. Around hour
 - **Keychain partition: zero refresh races by design** — CCSwitch stores every inactive account in a private `ccswitch-vault` Keychain namespace that the Claude Code CLI cannot see.  Active account lives in the standard `Claude Code-credentials` entry; the CLI owns its refresh lifecycle, CCSwitch never touches it.  CCSwitch is the sole refresher for vault accounts.  Different Keychain service name → no overlap → no single-use-refresh-token race possible.
 - **Atomic credential swap** — when the dashboard flips to a new account, a 5-step orchestrator moves credentials from vault → standard under a single lock, updates `~/.claude/.claude.json`, and rewrites the fallback `.credentials.json`.  Any crash between steps is reconciled on the next startup by the integrity check.
 - **Stale-account relogin** — if a refresh token is revoked or rotated by Anthropic, the dashboard marks the account stale and offers a one-click re-login flow (opens a tmux pane with `claude`, verifies new credentials, clears `stale_reason`)
+- **Transient-failure recovery** — when Anthropic's refresh endpoint returns an ambiguous 400 (not `invalid_grant`), CCSwitch backs off exponentially rather than demanding a re-login; after repeated failures it escalates, and a one-click **Revalidate** button on the stale card tries once on demand.
 - **Real-time dashboard** — vanilla-JS single-page app; account cards, drag-to-reorder priority, per-account threshold slider, switch log; no build step required
 - **Optional tmux nudge** — opt-in toggle on the Settings page: after every account switch, scan every `tmux` pane and send a configurable message (default `continue`) to any Claude Code pane (detected by process-ancestry walk, or explicit `@ccswitch-nudge=on` tmux user option) whose last 20 lines show a rate-limit banner. Off by default.
 - **CLI** (`ccswitch`) — list/switch/enable/disable accounts, tail logs, manage the LaunchAgent
@@ -403,6 +404,19 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
   alias cc='tmux set-option -p @ccswitch-nudge on 2>/dev/null; claude'
   ```
   The redirect means the `set-option` is a no-op (not an error) if you run `cc` outside tmux.
+
+**Account card shows "Refresh token rejected — re-login required" but tokens are actually valid**
+- This used to happen regularly before April 2026: Anthropic's refresh endpoint occasionally returns HTTP 400 for transient reasons (refresh-endpoint rate-limit, single-use-token rotation race with the CLI, account-side hiccups) and the old code interpreted any 400 as terminal.
+- Click **Revalidate** (secondary button on stale cards).  It runs a single refresh attempt on-demand.  If the refresh succeeds — which it typically does for transient 400s that have since cleared — the stale flag disappears and the account is back in rotation.  If it fails with a terminal OAuth code (`invalid_grant` / `invalid_client` / `unauthorized_client` / `unsupported_grant_type` / `invalid_scope`) the tokens really are dead; use Re-login.
+- The poll loop now distinguishes transient from terminal failures automatically (see spec §9.10).  You should only see this situation on accounts whose `stale_reason` was written BEFORE the April fix.
+
+**Revalidate says "currently active — switch first"**
+- CCSwitch refuses to revalidate the currently-active account.  The Claude CLI owns that account's refresh lifecycle, and running a concurrent CCSwitch refresh would race the CLI on the same single-use refresh_token and corrupt both.
+- The recovery path is: switch to any other account (manually from the card, or let auto-switch fire), then revalidate the now-vault entry, then switch back if you want.
+
+**Migrating accounts stuck in phantom-stale from before the upgrade**
+- The April 2026 upgrade does NOT auto-clear `stale_reason` values written by the old code — those accounts are not polled so nothing retriggers a refresh.
+- Go to each phantom-stale card and click **Revalidate**.  If the tokens were actually valid (the common case for accounts that hit the 5-hour rate window while the old code misclassified 400s) the flag clears in one click.  If a particular account really needs Re-login the Revalidate will fail with the accurate terminal reason.
 
 **WebSocket indicator stays disconnected**
 - Verify the server is running: `curl http://localhost:41924/health`

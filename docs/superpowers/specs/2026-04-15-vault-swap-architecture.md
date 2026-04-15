@@ -747,6 +747,90 @@ outside CCSwitch.
 The user instruction for this work is a hard cutover; the spec
 codifies that as "no rollback."
 
+### 9.10 Transient vs terminal refresh failures
+
+The pre-April-15 behaviour treated any 400 or 401 from Anthropic's
+`/oauth2/token` refresh endpoint as terminal: `stale_reason` was
+written, the poll loop stopped trying, and the UI demanded a full
+tmux re-login.  Empirical evidence showed this misclassified a large
+class of failures — refresh-endpoint rate-limits, single-use-refresh-
+token rotation races with CLI-owned tokens, Anthropic-side account-
+state hiccups — all of which clear within minutes to hours without
+any user action.  Accounts would get stuck with perfectly valid
+tokens and a phantom "re-login required" flag.
+
+Post-fix classification (`anthropic_api.parse_oauth_error`):
+
+| Response                                          | Kind                   | Action                                         |
+|---                                                |---                     |---                                             |
+| 401 with body `error` ∈ terminal set              | `TERMINAL_REVOKED`     | Set `stale_reason = "revoked"`, stop retrying. |
+| 400 with body `error` ∈ terminal set              | `TERMINAL_REJECTED`    | Set `stale_reason = "rejected"`, stop.         |
+| Bare 401 / 401 with non-terminal body             | `TRANSIENT`            | Exponential backoff, retry on next poll.       |
+| 400 with non-terminal body / no body              | `TRANSIENT`            | As above — conservative default.               |
+| 429 / 5xx / network                               | `TRANSIENT`            | As above.                                      |
+
+The terminal set is the five OAuth2 `error` codes from RFC 6749 §5.2
+that indicate a non-self-healing condition: `invalid_grant`,
+`invalid_client`, `unauthorized_client`, `unsupported_grant_type`,
+`invalid_scope`.  Bare 401 (no body or body without a terminal code)
+is treated as transient because Anthropic's edge proxy occasionally
+returns 401 for WAF / rate-limit / account-provisioning challenges
+that clear within minutes.
+
+Transient failures increment three module-level dicts (parallel to the
+existing 429 backoff): `_refresh_backoff_count[email]` for the
+consecutive-failure counter, `_refresh_backoff_until[email]` for the
+monotonic deadline of the next retry, and
+`_refresh_backoff_first_failure_at[email]` for the wall-clock timestamp
+of the first failure in the current streak.  On the next poll within
+the deadline, the refresh attempt is simply skipped — the stale cached
+access token is still returned (and may be valid, as in the motivating
+`leusnazarii` case where the CLI had refreshed it while the account was
+active).
+
+Escalation to terminal `stale_reason` fires when EITHER of these is
+true:
+
+- `_refresh_backoff_count[email] >= _TRANSIENT_REFRESH_ESCALATE_AFTER` (N=5)
+- `now - _refresh_backoff_first_failure_at[email] >= _TRANSIENT_REFRESH_ESCALATE_AFTER_SECONDS` (24 h)
+
+The second trigger defeats a pathological counter-reset loop where
+Anthropic intermittently succeeds and resets the count while the
+account is still net-broken.  The first failure's wall-clock timestamp
+is cleared on any successful refresh (alongside the count and deadline),
+so genuinely healthy accounts never accumulate.
+
+Recovery without re-login: `POST /api/accounts/{id}/revalidate` runs
+a single on-demand refresh attempt.  Two hard invariants:
+
+1. **Active-account refusal.**  The endpoint refuses (`HTTP 409`,
+   `active_refused=True`) on the currently-active account.  The CLI
+   owns the active account's refresh lifecycle, and a revalidate
+   would race its single-use refresh_token with the CLI's own
+   refresh — either side's loss corrupts the other.  The user
+   switches to another account first, then revalidates the now-vault
+   entry.
+
+2. **Per-email serialisation.**  `account_service._revalidate_locks`
+   holds one `asyncio.Lock` per email.  Two simultaneous POSTs on
+   the same account serialise; the second one sees the rotated
+   refresh_token the first one wrote, so both succeed instead of
+   the naive implementation's one-succeeds-one-fails-and-overwrites
+   failure mode.
+
+On success the account's `stale_reason` is cleared, all three in-memory
+backoff counters are dropped, and a `ws account_updated` broadcast
+fires with `stale_reason: None` so connected UIs update the card
+immediately instead of waiting for the next `usage_updated` poll
+cycle.
+
+The frontend exposes this as a secondary "Revalidate" button on stale
+cards, next to the primary "Re-login".  The 409 failure path carries
+the `RevalidateResult` under `detail` so the frontend's HTTP error
+middleware catches it uniformly and displays a differentiating toast:
+"switch first" (active-refused) vs "try again later or Re-login"
+(refresh-failed).
+
 ---
 
 ## 10. Prior art

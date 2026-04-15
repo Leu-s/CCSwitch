@@ -185,8 +185,21 @@ tests/
    - Active-probe 401: call `tmux_service.fire_nudge()` (rate-limited
      to at most once per 30 s per account) to wake any sleeping CLI,
      return last-known cached usage, do NOT mark stale.
-   - Vault-refresh 400/401: mark `stale_reason` with the precise
-     reason; skip the probe that would just repeat the failure.
+   - Vault-refresh 401 or 400 with a body `error` code in the terminal
+     set (`invalid_grant`, `invalid_client`, `unauthorized_client`,
+     `unsupported_grant_type`, `invalid_scope`): mark `stale_reason`
+     with the precise terminal reason; skip the probe.  The UI renders
+     a Re-login button.
+   - Vault-refresh bare 401, 400 with non-terminal body, 429, 5xx,
+     network: classified TRANSIENT by `anthropic_api.parse_oauth_error`.
+     Increment three in-memory per-account dicts (count, next-retry
+     deadline, first-failure timestamp); do NOT set `stale_reason`.
+     Return the last-known cached usage.  Next poll cycle skips the
+     refresh until the backoff deadline elapses.  Escalates to a
+     distinct terminal `stale_reason` when either (a) 5 consecutive
+     transients observed OR (b) ≥ 24 h since the first transient in
+     the current streak — whichever trips first.  A successful refresh
+     clears all three counters.
    Per-account 429 backoff (exponential 120 s → 3600 s cap) is
    preserved.  On sleep-wake detection (monotonic gap > 5 min), a
    random 0-30 s stagger runs before the refresh burst to avoid
