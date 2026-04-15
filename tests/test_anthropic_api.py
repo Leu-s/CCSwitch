@@ -215,3 +215,82 @@ def test_parse_oauth_error_400_with_error_description_preserves_terminal():
         {"error": "invalid_grant", "error_description": "Token was revoked by user"},
     )
     assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+
+
+# ── Anthropic nested-envelope classification ──────────────────────────
+
+
+def test_parse_oauth_error_400_anthropic_invalid_request_is_terminal():
+    """Anthropic's actual dead-refresh_token response — 400 with nested
+    envelope carrying error.type = 'invalid_request_error'.  Must be
+    classified terminal, not transient; otherwise Revalidate leaves the
+    user in an eternal 'try again later' loop with a genuinely dead token."""
+    err = _make_http_status_error(400, {
+        "type": "error",
+        "error": {"type": "invalid_request_error", "message": "Invalid request format"},
+        "request_id": "req_test",
+    })
+    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+
+
+def test_parse_oauth_error_401_anthropic_auth_error_is_terminal():
+    """Anthropic's vault-probe 401 response — nested envelope with
+    error.type = 'authentication_error'.  Treated as terminal revoked."""
+    err = _make_http_status_error(401, {
+        "type": "error",
+        "error": {"type": "authentication_error", "message": "Invalid authentication credentials"},
+        "request_id": "req_test",
+    })
+    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REVOKED
+
+
+def test_parse_oauth_error_400_anthropic_rate_limit_is_transient():
+    """Anthropic 'rate_limit_error' under the nested envelope is NOT
+    terminal — it's the server telling us to back off and retry."""
+    err = _make_http_status_error(429, {
+        "type": "error",
+        "error": {"type": "rate_limit_error", "message": "Too many requests"},
+    })
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_500_anthropic_overloaded_is_transient():
+    """Anthropic 'overloaded_error' under the nested envelope → transient."""
+    err = _make_http_status_error(500, {
+        "type": "error",
+        "error": {"type": "overloaded_error", "message": "Server overloaded"},
+    })
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_400_anthropic_missing_type_in_error_is_transient():
+    """Anthropic envelope with no 'type' field inside error → unknown code,
+    classify transient (conservative default)."""
+    err = _make_http_status_error(400, {
+        "type": "error",
+        "error": {"message": "Something wrong"},
+    })
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_400_anthropic_non_string_type_is_transient():
+    """Defensive: if Anthropic's envelope has a non-string 'type' (future
+    format drift), classify transient rather than crash."""
+    err = _make_http_status_error(400, {
+        "type": "error",
+        "error": {"type": 42, "message": "boom"},
+    })
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_rfc_and_anthropic_both_still_work():
+    """Regression guard: adding Anthropic-shape handling must NOT break
+    the RFC flat-shape path.  Feed both forms with the same terminal
+    intent and verify both classify as terminal."""
+    rfc = _make_http_status_error(400, {"error": "invalid_grant"})
+    anthropic = _make_http_status_error(400, {
+        "type": "error",
+        "error": {"type": "invalid_request_error", "message": "..."},
+    })
+    assert parse_oauth_error(rfc) == OAuthErrorKind.TERMINAL_REJECTED
+    assert parse_oauth_error(anthropic) == OAuthErrorKind.TERMINAL_REJECTED
