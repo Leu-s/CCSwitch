@@ -64,6 +64,31 @@ _STALL_PATTERNS = re.compile(
 # that capturing every pane is cheap.
 _CAPTURE_LINES = 200
 
+# Tail window the stall regex is allowed to match against.  Much narrower
+# than ``_CAPTURE_LINES`` so a rate-limit banner the user already resolved
+# 5 minutes ago and scrolled past does NOT keep matching on every swap.
+# A fresh banner always renders at the bottom of the buffer; restricting
+# the match to the last 20 lines keeps recall for real stalls and drops
+# the "stale scrollback A3 attack" surface from 200 lines to 20.
+_STALL_TAIL_LINES = 20
+
+# ANSI escape stripping before regex match.  Tmux's ``capture-pane -p``
+# already strips most SGR sequences, but colourised banners (24-bit RGB,
+# OSC sequences, mouse-tracking CSIs) can slip through on certain
+# terminals.  Matching the stall patterns against raw capture then failing
+# because of an embedded ``\x1b[31m`` would be a silent recall miss.
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-9;:?]*[ -/]*[@-~]"    # CSI (SGR inc. colon-form 24-bit, cursor)
+    r"|\x1b\][^\x07]*(?:\x07|\x1b\\)"  # OSC (hyperlinks, title)
+)
+
+
+def _strip_ansi(text: str) -> str:
+    # Fast-path: most captures have zero escapes; skip the regex scan.
+    if "\x1b" not in text:
+        return text
+    return _ANSI_RE.sub("", text)
+
 
 # Tab-separated so user-option values that contain spaces or shell metacharacters
 # survive intact.  A ``#{@user-option}`` that is unset expands to an empty string;
@@ -194,11 +219,21 @@ async def capture_pane(target: str, lines: int = _CAPTURE_LINES) -> str:
 
 
 def looks_stalled(capture: str) -> bool:
-    """True if the pane capture contains text that looks like a Claude Code
-    rate-limit / usage-limit notice waiting for the user to continue."""
+    """True if the pane capture shows a Claude Code rate-limit notice
+    **in its most recent output**.
+
+    The match is restricted to the last ``_STALL_TAIL_LINES`` lines
+    after ANSI escape stripping, so:
+
+    * A banner the user already resolved but that still lives in
+      scrollback above the prompt does NOT re-trigger a nudge on the
+      next swap.
+    * A colourised banner (``\\x1b[31m...\\x1b[0m``) still matches.
+    """
     if not capture:
         return False
-    return bool(_STALL_PATTERNS.search(capture))
+    tail = "\n".join(capture.splitlines()[-_STALL_TAIL_LINES:])
+    return bool(_STALL_PATTERNS.search(_strip_ansi(tail)))
 
 
 async def _process_snapshot() -> dict[int, tuple[int, str]]:

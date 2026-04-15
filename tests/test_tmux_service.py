@@ -137,6 +137,66 @@ def test_looks_stalled_ignores_benign_text(text):
     assert not looks_stalled(text)
 
 
+# ── looks_stalled tail-window + ANSI stripping ─────────────────────────────
+
+
+def test_looks_stalled_ignores_stale_scrollback_outside_tail_20():
+    """A3 regression guard: a rate-limit banner the user already resolved
+    and scrolled 30 lines up MUST NOT re-trigger a nudge."""
+    from backend.services.tmux_service import looks_stalled
+    capture = (
+        "Claude AI usage limit reached\n"           # old banner — line 1
+        + "\n".join([f"user command {i}" for i in range(30)])  # 30 benign lines
+        + "\n"
+        + "\n".join(["idle"] * 5)                    # fresh tail
+    )
+    assert not looks_stalled(capture)
+
+
+def test_looks_stalled_boundary_exactly_20_lines_matches():
+    """Banner on the FIRST line of a 20-line capture (line 20 from the
+    tail end) still matches — inclusive boundary."""
+    from backend.services.tmux_service import looks_stalled
+    capture = "Claude AI usage limit reached\n" + "\n".join(["l"] * 19)
+    assert looks_stalled(capture)
+
+
+def test_looks_stalled_boundary_banner_on_line_21_does_not_match():
+    """Banner on line 21 (one line outside the tail-20 window) is
+    ignored — exclusive boundary."""
+    from backend.services.tmux_service import looks_stalled
+    capture = "Claude AI usage limit reached\n" + "\n".join(["l"] * 20)
+    assert not looks_stalled(capture)
+
+
+def test_looks_stalled_matches_on_last_line():
+    from backend.services.tmux_service import looks_stalled
+    capture = "\n".join(["benign"] * 100) + "\nrate_limit_error"
+    assert looks_stalled(capture)
+
+
+def test_looks_stalled_strips_ansi_csi_before_match():
+    """Colourised banner with CSI (SGR) escapes still matches."""
+    from backend.services.tmux_service import looks_stalled
+    assert looks_stalled("\x1b[31;1mClaude AI usage limit reached\x1b[0m")
+    assert looks_stalled("\x1b[38;2;255;0;0m5-hour limit reached\x1b[0m")
+
+
+def test_looks_stalled_strips_ansi_osc_before_match():
+    """OSC sequences (hyperlinks, cwd-notify) do not block the match."""
+    from backend.services.tmux_service import looks_stalled
+    # OSC-8 hyperlink + BEL terminator
+    capture = "\x1b]8;;https://x\x07rate limit exceeded\x1b]8;;\x07"
+    assert looks_stalled(capture)
+
+
+def test_strip_ansi_preserves_plain_text():
+    from backend.services.tmux_service import _strip_ansi
+    assert _strip_ansi("hello world") == "hello world"
+    assert _strip_ansi("\x1b[0m\x1b[31mhello\x1b[0m") == "hello"
+    assert _strip_ansi("") == ""
+
+
 # ── wake_stalled_sessions ──────────────────────────────────────────────────
 
 
