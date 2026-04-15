@@ -7,12 +7,6 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./ccswitch.db"
     server_host: str = "127.0.0.1"
     server_port: int = 41924
-    # System-wide Claude Code config directory (~/.claude by default).
-    # Prefixed so the app never inherits the user's runtime CLAUDE_CONFIG_DIR,
-    # which typically points at a per-account isolated dir.
-    active_claude_dir: str = "~/.claude"
-    # Base directory for per-account isolated Claude config dirs
-    accounts_base_dir: str = "~/.ccswitch-accounts"
     haiku_model: str = "claude-haiku-4-5-20251001"
     poll_interval_active: int = 15      # seconds between polls while clients are connected
     poll_interval_idle: int = 300       # seconds between polls while nobody is watching
@@ -20,8 +14,6 @@ class Settings(BaseSettings):
     # Anthropic API URLs
     anthropic_messages_url: str = "https://api.anthropic.com/v1/messages"
     anthropic_refresh_url: str = "https://platform.claude.com/v1/oauth/token"
-    # State directory for cross-terminal account isolation
-    state_dir: str = "~/.ccswitch"
     # tmux session name created when no sessions exist
     tmux_session_name: str = "ccswitch"
     # Default threshold for new accounts (0–100 %)

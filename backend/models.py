@@ -9,15 +9,14 @@ class Account(Base):
     __tablename__ = "accounts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    # Isolated Claude config directory for this account (CLAUDE_CONFIG_DIR)
-    config_dir: Mapped[str] = mapped_column(String(512), nullable=False)
     # Per-account rate-limit threshold (0–100 %)
     threshold_pct: Mapped[float] = mapped_column(Float, default=95.0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     priority: Mapped[int] = mapped_column(Integer, default=0)
-    # Non-null when the account's credentials are no longer usable (refresh
-    # token revoked, 401 from probe, missing config_dir, etc.). Human-readable
-    # reason shown in the UI so the user knows they need to re-login.
+    # Non-null when the account's refresh token has been revoked / rejected
+    # and the user must re-login through the UI.  Transient probe failures
+    # (network, DNS, 5xx, timeouts, active-account 401) never populate this
+    # column — they are cached in-memory only.
     stale_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)

@@ -1,23 +1,27 @@
-import logging
 import asyncio
-import os
+import logging
+import random
 import time
+
 import httpx
 
 from sqlalchemy import select
 
+from .cache import cache
+from .config import settings
 from .database import AsyncSessionLocal
 from .models import Account
 from .services import account_service as ac
-from .services.account_service import build_usage
 from .services import anthropic_api
-from .services import settings_service as ss
+from .services import credential_provider as cp
 from .services import switcher as sw
+from .services import tmux_service
+from .services.account_service import build_usage
 from .ws import WebSocketManager
-from .config import settings
-from .cache import cache
+
 
 logger = logging.getLogger(__name__)
+
 
 # ── Per-account 429 backoff state ────────────────────────────────────────────
 # Maps email → monotonic deadline (seconds); if time.monotonic() < deadline,
@@ -29,92 +33,90 @@ _backoff_count: dict[str, int] = {}
 _BACKOFF_INITIAL = settings.rate_limit_backoff_initial
 _BACKOFF_MAX = settings.rate_limit_backoff_max
 
-# Active-ownership refresh model: CCSwitch is the SOLE refresher for every
-# INACTIVE account, so the wider 20-minute pre-expiry window is race-free
-# (no CLI is touching these credentials).  The active account is skipped
-# entirely by the gate at ``_process_single_account`` — Claude Code CLI
-# owns that account's refresh lifecycle.  Named constant so a future tuning
-# knob does not drift out of the design doc.
-_REFRESH_SKEW_MS_INACTIVE = 20 * 60 * 1000
+
+# Refresh window for vault accounts.  CCSwitch is the sole consumer of vault
+# entries, so widening the pre-expiry window past the CLI's own 5-minute
+# default is free — no race partner.  The active account is never refreshed
+# by CCSwitch, so this constant does not apply to it.
+_REFRESH_SKEW_MS = 20 * 60 * 1000
+
+
+# ── Active-probe nudge rate limit ────────────────────────────────────────────
+# Maps email → monotonic deadline before the next nudge is allowed.  Prevents
+# a chatty 401 loop from firing tmux-send-keys every 15 seconds.
+_NUDGE_COOLDOWN_SECONDS = 30
+_last_nudge_at: dict[str, float] = {}
+
+
+# ── Post-sleep stagger ───────────────────────────────────────────────────────
+# When the event loop wall-clock jumps by more than this much between
+# iterations, treat it as a sleep/wake event and add a random 0..30s stagger
+# before firing N concurrent /oauth/token refreshes.  Prevents an N-account
+# thundering herd on /oauth/token which could trip Anthropic rate limits.
+_SLEEP_DETECTION_THRESHOLD_SECONDS = 300.0
+_last_poll_monotonic: float | None = None
 
 
 class _RefreshTerminal(Exception):
-    """Raised when a refresh attempt returns a terminal status (400/401),
-    meaning the stored refresh_token is dead.  Skips the subsequent probe
-    (which would just fail with 401 and overwrite the precise stale_reason
-    with a generic one)."""
+    """Raised when a refresh attempt returned a terminal status (400/401),
+    meaning the stored refresh_token is dead.  Skips the subsequent probe."""
+
+
+def _maybe_nudge_active(email: str) -> None:
+    """Fire a single tmux nudge for an active-account probe 401, subject to
+    a per-account cooldown.  Runs the blocking fire_nudge call via an
+    asyncio thread so it does not block the event loop."""
+    now = time.monotonic()
+    deadline = _last_nudge_at.get(email, 0.0)
+    if now < deadline:
+        return
+    _last_nudge_at[email] = now + _NUDGE_COOLDOWN_SECONDS
+    try:
+        tmux_service.fire_nudge()
+    except Exception as e:  # pragma: no cover — tmux errors logged inside
+        logger.debug("fire_nudge raised: %s", e)
 
 
 async def _process_single_account(
     account: Account,
-    db,
-    active_cfg_dir: "str | None",
-) -> tuple[dict, "str | None"]:
-    """Fetch token, optionally refresh, probe usage, and update caches for one account.
+    active_email: str | None,
+) -> tuple[dict, str | None]:
+    """Fetch token, optionally refresh, probe usage, and update caches for
+    one account.
 
-    ``active_cfg_dir`` is the canonicalized path of ``~/.ccswitch/active`` snapped
-    once per poll cycle by ``poll_usage_and_switch``.  It partitions accounts into
-    the one whose refresh lifecycle belongs to Claude Code CLI (``is_active``) and
-    the N-1 others that CCSwitch alone consumes.  See the active-ownership refresh
-    model section in ``CLAUDE.md`` and the design doc under ``docs/superpowers/``.
-
-    Returns:
-        (usage_entry, new_stale_reason) where usage_entry is a dict with keys
-        ``id``, ``email``, ``usage``, ``error``, ``waiting_for_cli`` suitable for
-        the WS broadcast, and new_stale_reason is the (possibly None) stale reason
-        to persist.
+    Returns ``(usage_entry, new_stale_reason)`` — ``new_stale_reason`` is
+    the updated DB column value, or ``None`` if unchanged.
     """
     new_stale_reason: str | None = None
-    # Canonicalize via realpath so symlinked home dirs (macOS FileVault etc.)
-    # do not defeat the ownership check by producing different-looking strings
-    # for the same filesystem location.
-    abs_cfg_dir = os.path.realpath(account.config_dir)
-    is_active = active_cfg_dir is not None and abs_cfg_dir == active_cfg_dir
+    is_active = active_email is not None and account.email == active_email
+
     try:
-        token = await asyncio.to_thread(ac.get_access_token_from_config_dir, account.config_dir)
-        if not token:
-            new_stale_reason = "No access token in config dir — re-login required"
+        # Read credentials from the right Keychain namespace.
+        credentials = ac.read_credentials_for_email(account.email, active_email)
+        if not credentials:
+            new_stale_reason = "No access token in vault — re-login required"
             raise ValueError(new_stale_reason)
 
-        # Hydrate the token_info cache so GET /api/accounts can read
-        # expiry + subscription metadata without spawning a Keychain
-        # subprocess per account per request.
-        token_info = await asyncio.to_thread(ac.get_token_info, account.config_dir)
+        token = cp.access_token_of(credentials)
+        if not token:
+            new_stale_reason = "No access token in vault — re-login required"
+            raise ValueError(new_stale_reason)
+
+        # Hydrate the token-info cache so GET /api/accounts can read expiry
+        # + subscription metadata without spawning a Keychain subprocess
+        # per row.
+        token_info = cp.token_info_of(credentials)
         await cache.set_token_info(account.email, token_info)
 
-        # Refresh the token if it is about to expire (within 20 minutes).
-        # Active-ownership model: CCSwitch does NOT refresh the account whose
-        # config dir matches ``~/.ccswitch/active`` — Claude Code CLI owns that
-        # account's refresh lifecycle.  For inactive accounts CCSwitch is the
-        # sole consumer, so the 20 min window is free (no race surface).
-        # Stale accounts are also skipped — their refresh token is revoked,
-        # so retrying would just produce a 401 log entry on every poll cycle.
-        # Compute in integer milliseconds throughout to avoid float drift.
+        # Refresh the token if near expiry — ONLY for vault accounts.
+        # The active account's refresh lifecycle is owned by Claude Code;
+        # CCSwitch refreshing it would race with the CLI.
         if not account.stale_reason and not is_active:
             try:
-                expires_at_ms = (token_info or {}).get("token_expires_at")
+                expires_at_ms = token_info.get("token_expires_at")
                 now_ms = int(time.time() * 1000)
-                if expires_at_ms and now_ms > expires_at_ms - _REFRESH_SKEW_MS_INACTIVE:
-                    # Double-check ownership right before the refresh call.
-                    # The ``active_cfg_dir`` snap was taken at the start of the
-                    # poll cycle, but a manual switch during ``asyncio.gather``
-                    # could have flipped ownership to THIS account.  If so,
-                    # Claude Code will refresh it momentarily — do not race.
-                    current_active = await asyncio.to_thread(
-                        ac.get_active_config_dir_pointer
-                    )
-                    if (
-                        current_active
-                        and os.path.realpath(current_active) == abs_cfg_dir
-                    ):
-                        logger.info(
-                            "Skip refresh for %s — became active mid-cycle",
-                            account.email,
-                        )
-                        is_active = True  # re-sync for the rest of this pass
-                        refresh_token = None
-                    else:
-                        refresh_token = await asyncio.to_thread(ac.get_refresh_token_from_config_dir, account.config_dir)
+                if expires_at_ms and now_ms > expires_at_ms - _REFRESH_SKEW_MS:
+                    refresh_token = cp.refresh_token_of(credentials)
                     if refresh_token:
                         resp = await anthropic_api.refresh_access_token(refresh_token)
                         new_token = resp.get("access_token")
@@ -127,19 +129,18 @@ async def _process_single_account(
                             )
                             new_refresh = resp.get("refresh_token")
                             await asyncio.to_thread(
-                                ac.save_refreshed_token, account.config_dir, new_token,
+                                cp.save_refreshed_vault_token,
+                                account.email, new_token,
                                 new_expires_at_ms, new_refresh,
                             )
                             token = new_token
-                            logger.info("Refreshed access token for %s", account.email)
+                            logger.info("Refreshed vault token for %s", account.email)
             except httpx.HTTPStatusError as refresh_http_err:
                 status = refresh_http_err.response.status_code
                 # Anthropic returns 400 when the refresh_token has been
-                # rotated or invalidated (e.g. after a crash-loop race where
-                # our stored copy fell behind the server's current record),
-                # and 401 when the token is explicitly revoked.  Both are
-                # terminal — the probe would just fail with 401 — so we
-                # short-circuit by raising a marker exception that skips the
+                # rotated or invalidated and 401 when it is explicitly
+                # revoked.  Both are terminal — the follow-up probe would
+                # just fail with 401 — so we raise a marker that skips the
                 # probe and preserves the precise stale_reason.
                 if status in (400, 401):
                     reason_detail = "revoked" if status == 401 else "rejected (400)"
@@ -148,18 +149,19 @@ async def _process_single_account(
                         reason_detail, account.email,
                     )
                     new_stale_reason = f"Refresh token {reason_detail} — re-login required"
-                    # Mark token as permanently expired so we don't retry on every poll.
-                    await asyncio.to_thread(ac.save_refreshed_token, account.config_dir, token, expires_at=1)
                     raise _RefreshTerminal()
-                logger.warning("Token refresh HTTP error for %s: %s", account.email, refresh_http_err)
+                logger.warning(
+                    "Token refresh HTTP error for %s: %s",
+                    account.email, refresh_http_err,
+                )
             except _RefreshTerminal:
                 raise
             except Exception as refresh_err:
-                logger.warning("Token refresh failed for %s: %s", account.email, refresh_err)
+                logger.warning(
+                    "Token refresh failed for %s: %s", account.email, refresh_err
+                )
 
-        # Probe usage; a 401 here also means the credentials are dead.
-        # Skip the probe if the account is in a 429 backoff window — return
-        # stale cached data instead of hammering the endpoint.
+        # Probe usage — skip if in 429 backoff window.
         backoff_deadline = _backoff_until.get(account.email, 0)
         if time.monotonic() < backoff_deadline:
             remaining = int(backoff_deadline - time.monotonic())
@@ -175,16 +177,11 @@ async def _process_single_account(
             except Exception as _bu_err:
                 logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
                 flat_dict = {}
-            # Backoff ≠ waiting_for_cli — we're not stuck on a stale token,
-            # we're just politely not hammering a 429'd endpoint.  Clear the
-            # flag so the card shows its regular rate-limited treatment.
-            await cache.clear_waiting(account.email)
             return {
                 "id": account.id,
                 "email": account.email,
                 "usage": flat_dict,
                 "error": cached.get("error"),
-                "waiting_for_cli": False,
             }, new_stale_reason
 
         try:
@@ -192,71 +189,40 @@ async def _process_single_account(
         except httpx.HTTPStatusError as probe_err:
             status = probe_err.response.status_code
             if status == 401:
-                # Retry once after re-reading the Keychain: Claude Code may
-                # have just rotated the token while our cached copy went
-                # stale.  A fresh token in the Keychain means the probe
-                # should succeed on retry — and for the active account, a
-                # persistent 401 becomes a soft "waiting for CLI" state,
-                # never a persisted stale_reason.
-                fresh_token = await asyncio.to_thread(
-                    ac.get_access_token_from_config_dir, account.config_dir
-                )
-                retry_succeeded = False
-                if fresh_token and fresh_token != token:
+                if is_active:
+                    # Active-account 401 is NOT stale_reason — the stored
+                    # access token is stale because CCSwitch does not
+                    # refresh it (the CLI owns that lifecycle).  Nudge
+                    # any sleeping claude pane to wake up and force a
+                    # refresh on its next call, and return last-known
+                    # cached usage so the UI does not show a red error.
+                    _maybe_nudge_active(account.email)
+                    cached = await cache.get_usage_async(account.email)
+                    cached_dict = cached if isinstance(cached, dict) else {}
+                    cached_ti = await cache.get_token_info_async(account.email) or {}
                     try:
-                        usage = await anthropic_api.probe_usage(fresh_token)
-                        # Flag success BEFORE any follow-up work so a
-                        # CancelledError mid-bookkeeping can't reverse it.
-                        retry_succeeded = True
-                        await cache.set_token_info(
-                            account.email,
-                            await asyncio.to_thread(
-                                ac.get_token_info, account.config_dir
-                            ),
+                        flat = build_usage(cached_dict, cached_ti)
+                        flat_dict = flat.model_dump() if flat else {}
+                    except Exception as _bu_err:
+                        logger.warning(
+                            "build_usage failed for %s: %s",
+                            account.email, _bu_err,
                         )
-                    except Exception as _retry_err:
-                        logger.debug(
-                            "Probe retry after Keychain re-read failed for %s: %s",
-                            account.email, _retry_err,
-                        )
-                if not retry_succeeded:
-                    if is_active:
-                        # Soft waiting state — do NOT overwrite cache, do NOT
-                        # set stale_reason, do NOT broadcast an error entry.
-                        # Claude Code will refresh on its next API call and
-                        # the next poll cycle picks up the fresh token.
-                        cached = await cache.get_usage_async(account.email)
-                        cached_dict = cached if isinstance(cached, dict) else {}
-                        cached_ti = await cache.get_token_info_async(account.email) or {}
-                        try:
-                            flat = build_usage(cached_dict, cached_ti)
-                            flat_dict = flat.model_dump() if flat else {}
-                        except Exception as _bu_err:
-                            logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
-                            flat_dict = {}
-                        # Record the soft waiting state so GET /api/accounts
-                        # and subsequent cards see it without waiting for the
-                        # next poll cycle.
-                        await cache.set_waiting(account.email)
-                        # Preserve any pre-existing ``stale_reason`` so a
-                        # switch onto an already-stale account does NOT
-                        # inadvertently clear the DB flag — the user still
-                        # needs to re-login.
-                        return {
-                            "id": account.id,
-                            "email": account.email,
-                            "usage": flat_dict,
-                            "error": cached_dict.get("error"),
-                            "waiting_for_cli": True,
-                        }, account.stale_reason
-                    new_stale_reason = "Anthropic API returned 401 — re-login required"
-                    raise
-                # retry_succeeded → fall through to the success path below
+                        flat_dict = {}
+                    return {
+                        "id": account.id,
+                        "email": account.email,
+                        "usage": flat_dict,
+                        "error": cached_dict.get("error"),
+                    }, account.stale_reason
+                new_stale_reason = "Anthropic API returned 401 — re-login required"
+                raise
             elif status == 429:
-                # Compute exponential backoff: double the previous window, capped.
                 count = _backoff_count.get(account.email, 0) + 1
                 _backoff_count[account.email] = count
-                backoff_seconds = min(_BACKOFF_INITIAL * (2 ** (count - 1)), _BACKOFF_MAX)
+                backoff_seconds = min(
+                    _BACKOFF_INITIAL * (2 ** (count - 1)), _BACKOFF_MAX
+                )
                 _backoff_until[account.email] = time.monotonic() + backoff_seconds
                 logger.warning(
                     "429 for %s (offense #%d) — backing off %ds",
@@ -266,10 +232,9 @@ async def _process_single_account(
             else:
                 raise
 
-        # Successful probe — clear any backoff + waiting state for this account.
+        # Successful probe — clear backoff.
         _backoff_until.pop(account.email, None)
         _backoff_count.pop(account.email, None)
-        await cache.clear_waiting(account.email)
 
         await cache.set_usage(account.email, usage)
         token_info = await cache.get_token_info_async(account.email) or {}
@@ -284,13 +249,8 @@ async def _process_single_account(
             "email": account.email,
             "usage": flat_dict,
             "error": None,
-            "waiting_for_cli": False,
         }
     except _RefreshTerminal:
-        # Refresh returned a terminal 400/401 — skip probe, new_stale_reason
-        # is already set to the precise reason.  Return a cache-backed usage
-        # entry so the UI shows the error inline.  Stale overrides waiting.
-        await cache.clear_waiting(account.email)
         err_str = new_stale_reason or "Refresh token invalid"
         new_entry, err_str = await cache.set_usage_error(account.email, err_str, False)
         token_info = await cache.get_token_info_async(account.email) or {}
@@ -305,7 +265,6 @@ async def _process_single_account(
             "email": account.email,
             "usage": flat_dict,
             "error": err_str,
-            "waiting_for_cli": False,
         }
     except Exception as e:
         err_str = str(e)
@@ -320,17 +279,13 @@ async def _process_single_account(
                 pass
         logger.warning("Usage fetch failed for %s: %s", account.email, err_str)
 
-        # Prefer the response status code over string parsing — it's the
-        # only reliable signal that the API actually rate-limited us, and
-        # the auto-switch loop relies on this flag firing on every 429.
         if isinstance(e, httpx.HTTPStatusError):
             is_rate_limited = e.response.status_code == 429
         else:
             is_rate_limited = "429" in str(e) or "rate_limit" in str(e).lower()
-        # Any error branch supersedes the soft waiting state — the user
-        # needs to see the real reason, not a stale "waiting" badge.
-        await cache.clear_waiting(account.email)
-        new_entry, err_str = await cache.set_usage_error(account.email, err_str, is_rate_limited)
+        new_entry, err_str = await cache.set_usage_error(
+            account.email, err_str, is_rate_limited
+        )
 
         token_info = await cache.get_token_info_async(account.email) or {}
         try:
@@ -344,34 +299,41 @@ async def _process_single_account(
             "email": account.email,
             "usage": flat_dict,
             "error": err_str if "error" in new_entry else None,
-            "waiting_for_cli": False,
         }
 
     return usage_entry, new_stale_reason
 
 
-
 async def poll_usage_and_switch(ws: WebSocketManager) -> None:
+    global _last_poll_monotonic
+
     async with AsyncSessionLocal() as db:
-        # Polling always runs — the dashboard's usage bars must reflect live
-        # state regardless of whether auto-switching is on.  The
-        # ``service_enabled`` flag gates only the auto-switch decision, which
-        # is checked inside ``maybe_auto_switch`` below.
-        #
-        # Snap ``active_cfg_dir`` once per cycle so every _process_single_account
-        # call in this gather sees the same ownership partition.  Active-ownership
-        # model: the matching account is refreshed by Claude Code CLI; CCSwitch
-        # handles the N-1 others.
-        active_cfg_dir_raw = await asyncio.to_thread(ac.get_active_config_dir_pointer)
-        active_cfg_dir = (
-            os.path.realpath(active_cfg_dir_raw) if active_cfg_dir_raw else None
-        )
+        # Detect a sleep/wake boundary.  When the monotonic clock has
+        # jumped past the threshold since the last poll, every vault
+        # account's access_token has likely expired simultaneously — a
+        # burst of N concurrent /oauth/token POSTs looks like bot
+        # traffic to Anthropic.  A small random stagger removes the
+        # burst signature without meaningfully delaying recovery.
+        now_monotonic = time.monotonic()
+        if (
+            _last_poll_monotonic is not None
+            and now_monotonic - _last_poll_monotonic > _SLEEP_DETECTION_THRESHOLD_SECONDS
+        ):
+            stagger = random.uniform(0.0, 30.0)
+            logger.info(
+                "Sleep/wake detected (gap=%.1fs); staggering refresh burst by %.1fs",
+                now_monotonic - _last_poll_monotonic, stagger,
+            )
+            await asyncio.sleep(stagger)
+        _last_poll_monotonic = now_monotonic
+
+        active_email = await ac.get_active_email_async()
 
         accounts_result = await db.execute(select(Account))
         accounts = accounts_result.scalars().all()
 
         results = await asyncio.gather(
-            *[_process_single_account(account, db, active_cfg_dir) for account in accounts],
+            *[_process_single_account(account, active_email) for account in accounts],
             return_exceptions=True,
         )
 
@@ -380,55 +342,33 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
         for account, result in zip(accounts, results):
             # ``asyncio.gather(return_exceptions=True)`` captures both
             # Exception and BaseException subclasses (notably
-            # ``asyncio.CancelledError`` during lifespan shutdown), so the
-            # check must be against BaseException — not Exception — or a
-            # cancelled per-account coroutine lands in the ``else`` branch
-            # and crashes on the ``usage_entry, new_stale_reason = result``
-            # unpack.
+            # CancelledError during lifespan shutdown).
             if isinstance(result, BaseException):
                 logger.exception(
-                    "_process_single_account raised for %s: %s", account.email, result
+                    "_process_single_account raised for %s: %s",
+                    account.email, result,
                 )
-                # A crash in the per-account coroutine must not leave a stale
-                # waiting flag behind in the cache.  Without this clear, a
-                # subsequent GET /api/accounts would disagree with the WS
-                # broadcast (which emits waiting_for_cli=False below) and the
-                # card would flicker on reload.
-                try:
-                    await cache.clear_waiting(account.email)
-                except Exception as _cw_err:
-                    logger.debug(
-                        "clear_waiting failed in exception branch for %s: %s",
-                        account.email, _cw_err,
-                    )
                 usage_entry = {
                     "id": account.id,
                     "email": account.email,
                     "usage": {"error": str(result)},
                     "error": str(result),
-                    "waiting_for_cli": False,
                 }
-                new_stale_reason = account.stale_reason  # leave unchanged
+                new_stale_reason = account.stale_reason
             else:
                 usage_entry, new_stale_reason = result
 
-            # Every poll-loop broadcast entry now carries the live
-            # ``stale_reason`` so the frontend can flip a card in or out of
-            # stale state without waiting for a full reload.  This closes
-            # the pre-existing gap where a waiting→stale transition would
-            # leave other open tabs showing the Force-refresh button for
-            # up to one poll cycle after the DB was already updated.
             usage_entry["stale_reason"] = new_stale_reason
             updated.append(usage_entry)
 
-            # Flip stale_reason on the DB row if it changed. Rate-limiting is NOT
-            # staleness — we only set stale for 401-class auth failures.
             if new_stale_reason != account.stale_reason:
                 account.stale_reason = new_stale_reason
                 await cache.invalidate_token_info(account.email)
                 stale_changed = True
                 if new_stale_reason:
-                    logger.warning("Marking %s stale: %s", account.email, new_stale_reason)
+                    logger.warning(
+                        "Marking %s stale: %s", account.email, new_stale_reason
+                    )
                 else:
                     logger.info("Cleared stale flag for %s", account.email)
 

@@ -1,365 +1,370 @@
 """
-Credential reading and writing helpers.
+Credential reading and writing helpers for the vault-swap architecture.
 
-Handles macOS Keychain access and file-based credential fallbacks.
+Two disjoint Keychain namespaces:
+
+1. ``Claude Code-credentials`` (STANDARD_SERVICE): the entry Claude Code CLI
+   reads on every API call.  CCSwitch writes this only during a swap (the
+   ``swap_to_account`` orchestrator in ``account_service``).  Background
+   refresh never touches it — the CLI owns the active account's refresh
+   lifecycle.
+
+2. ``ccswitch-vault`` (VAULT_SERVICE): CCSwitch's private credential store,
+   one entry per email.  CCSwitch writes these on login, during the swap
+   checkpoint of the outgoing account, and on background refresh of
+   inactive accounts.  The CLI cannot reach these — different service
+   name, no enumeration API on the CLI side.
+
+All mutations go through ``_credential_lock`` so a background refresh
+cannot race a concurrent swap.
+
+During the login flow a transient scratch dir (``$TMPDIR/ccswitch-login-*``)
+holds a freshly-minted token in a CLI-hashed Keychain entry; the
+``read_login_scratch`` / ``delete_login_scratch`` helpers promote that
+material into the vault and clean up.
 """
+
 import getpass
 import hashlib
 import json
 import logging
-import os
 import subprocess
 import threading
 
-from ..config import settings
 
 logger = logging.getLogger(__name__)
 
-# The legacy (no-hash) Keychain service name used by Claude Code when
-# CLAUDE_CONFIG_DIR is unset.  Defined once here so both credential_provider
-# and account_service reference the same constant.
-LEGACY_KEYCHAIN_SERVICE = "Claude Code-credentials"
+# ── Keychain namespaces ────────────────────────────────────────────────────
 
-# Serializes every mutation to the four shared credential artefacts:
-#   1. HOME .claude.json                            (written by activate_account_config)
-#   2. Legacy "Claude Code-credentials" Keychain   (written by activate_account_config and save_refreshed_token)
-#   3. Hashed per-dir Keychain                     (written by save_refreshed_token)
-#   4. ~/.ccswitch/active pointer              (written by activate_account_config)
+STANDARD_SERVICE = "Claude Code-credentials"
+VAULT_SERVICE = "ccswitch-vault"
+
+_VAULT_COMMENT = (
+    "CCSwitch subscription vault — do not delete. "
+    "Managed by the CCSwitch dashboard at http://127.0.0.1:41924."
+)
+
+# Every ``security`` subprocess uses this timeout.  A locked Keychain can
+# hang the call indefinitely otherwise.
+_KEYCHAIN_SUBPROCESS_TIMEOUT = 5
+
+# ── Concurrency ────────────────────────────────────────────────────────────
 #
-# A switch (activate_account_config) acquires this lock for the full multi-step
-# dance, and a background token refresh (save_refreshed_token) acquires it for
-# its own Keychain writes.  Without this, a refresh's "is this dir the active
-# one?" check races with the switch's pointer update and can leave the legacy
-# Keychain holding one account's refreshed token while HOME .claude.json holds
-# another account's oauthAccount — exactly the "UI shows X, reality is Y" bug.
+# Serializes every mutation to the two Keychain service namespaces so a
+# background refresh (vault write) and a swap orchestrator (vault + standard
+# writes) cannot interleave and leave the system with one account's fresh
+# token in the vault while its identity file still points at another.
 #
-# Re-entrant so activate_account_config can call helpers that also want the
-# lock without deadlocking itself.
+# Re-entrant so ``save_refreshed_vault_token`` can call ``read_vault``
+# without deadlocking inside the same thread.
 _credential_lock = threading.RLock()
 
 
-def active_dir_pointer_path() -> str:
-    """Path of the file that records which isolated account dir is active.
-    Derived from settings.state_dir so users who override CCSWITCH_STATE_DIR
-    get a single, consistent location everywhere in the codebase.
-
-    Canonical definition lives here (not in account_service) because
-    account_service imports this module, not the other way around."""
-    return os.path.join(os.path.expanduser(settings.state_dir), "active")
+# ── Low-level Keychain helpers ─────────────────────────────────────────────
 
 
-def _load_json_safe(path: str) -> dict:
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+def _find_password(service: str, account: str) -> dict | None:
+    """Read a keychain entry and parse its value as JSON.
 
-
-def _keychain_service_name(config_dir: str) -> str:
-    """Claude Code uses sha256(config_dir)[:8] as the Keychain service suffix."""
-    h = hashlib.sha256(config_dir.encode()).hexdigest()[:8]
-    return f"Claude Code-credentials-{h}"
-
-
-def _read_keychain_credentials(config_dir: str) -> dict:
+    Returns ``None`` on miss, parse failure, timeout, or any other
+    error.  Callers treat ``None`` as "credentials not available";
+    distinguishing "locked keychain" from "entry missing" is the job of
+    ``probe_keychain_available``.
     """
-    On macOS, Claude Code stores OAuth tokens in the Keychain under a service
-    name derived from sha256(CLAUDE_CONFIG_DIR)[:8].  Returns the parsed JSON
-    or {} on any failure.
-    """
-    service = _keychain_service_name(config_dir)
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-s", service, "-w"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout.strip())
-    except Exception as e:
-        logger.debug("Keychain lookup failed for %s: %s", service, e)
-    return {}
-
-
-def _write_keychain_entry(service_name: str, credentials: dict) -> bool:
-    """Write credentials to a Keychain entry identified by service_name.
-
-    Returns True if credentials were successfully written, False otherwise.
-    """
-    acct = getpass.getuser()
-    cred_json = json.dumps(credentials)
-    try:
-        subprocess.run(
-            ["security", "delete-generic-password", "-s", service_name, "-a", acct],
-            capture_output=True, timeout=5,
-        )
-        result = subprocess.run(
-            ["security", "add-generic-password", "-s", service_name, "-a", acct, "-w", cred_json],
-            capture_output=True, text=True, timeout=5,
+            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+            capture_output=True,
+            text=True,
+            timeout=_KEYCHAIN_SUBPROCESS_TIMEOUT,
         )
         if result.returncode != 0:
+            return None
+        raw = result.stdout.strip()
+        if not raw:
+            return None
+        return json.loads(raw)
+    except subprocess.TimeoutExpired:
+        logger.warning("Keychain read timed out for %s / %s", service, account)
+        return None
+    except json.JSONDecodeError:
+        logger.warning("Keychain entry %s / %s is not valid JSON", service, account)
+        return None
+    except Exception as e:  # pragma: no cover — defensive
+        logger.debug("Keychain lookup failed for %s / %s: %s", service, account, e)
+        return None
+
+
+def _add_password(
+    service: str,
+    account: str,
+    credentials: dict,
+    comment: str | None = None,
+) -> bool:
+    """Write (or overwrite) a keychain entry.  Returns ``True`` on success."""
+    cred_json = json.dumps(credentials)
+    try:
+        # Idempotent overwrite: delete then add.  ``security`` has no single-
+        # call update.  The narrow window between delete and add is covered
+        # by ``_credential_lock`` for in-process concurrency; cross-process
+        # races are out of scope (see §9.5 of the design spec).
+        subprocess.run(
+            ["security", "delete-generic-password", "-s", service, "-a", account],
+            capture_output=True,
+            timeout=_KEYCHAIN_SUBPROCESS_TIMEOUT,
+        )
+        cmd = ["security", "add-generic-password", "-s", service, "-a", account, "-w", cred_json]
+        if comment:
+            cmd.extend(["-j", comment])
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_KEYCHAIN_SUBPROCESS_TIMEOUT,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Keychain add failed for %s / %s (rc=%s): %s",
+                service, account, result.returncode, (result.stderr or "").strip(),
+            )
             return False
         return True
-    except Exception:
+    except subprocess.TimeoutExpired:
+        logger.warning("Keychain write timed out for %s / %s", service, account)
+        return False
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning("Keychain write raised for %s / %s: %s", service, account, e)
         return False
 
 
-def _write_keychain_credentials(credentials: dict, service: str) -> bool:
-    """Returns True if credentials were successfully written, False otherwise."""
-    ok = _write_keychain_entry(service, credentials)
-    if not ok:
-        logger.warning("Keychain write failed for %s", service)
-    else:
-        logger.debug("Keychain credentials written for %s", service)
-    return ok
+def _delete_password(service: str, account: str) -> None:
+    """Best-effort delete.  Swallows "item not found" — that is the intended
+    final state."""
+    try:
+        subprocess.run(
+            ["security", "delete-generic-password", "-s", service, "-a", account],
+            capture_output=True,
+            timeout=_KEYCHAIN_SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("Keychain delete timed out for %s / %s", service, account)
+    except Exception as e:  # pragma: no cover — defensive
+        logger.debug("Keychain delete raised for %s / %s: %s", service, account, e)
 
 
-def get_token_info(config_dir: str) -> dict:
+def _list_services_matching(prefix: str) -> list[str]:
+    """Return every service name starting with ``prefix`` across the user's
+    login keychain.  Used by the migration's orphan sweep."""
+    try:
+        result = subprocess.run(
+            ["security", "dump-keychain"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("security dump-keychain timed out")
+        return []
+    except Exception as e:  # pragma: no cover — defensive
+        logger.debug("security dump-keychain raised: %s", e)
+        return []
+
+    found: set[str] = set()
+    # Each keychain entry block has a line of the form:
+    #   "svce"<blob>="<service name>"
+    # Parse that by prefix match.
+    for line in result.stdout.splitlines():
+        marker = '"svce"<blob>="'
+        if marker in line:
+            start = line.index(marker) + len(marker)
+            end = line.rfind('"')
+            if end > start:
+                svc = line[start:end]
+                if svc.startswith(prefix):
+                    found.add(svc)
+    return sorted(found)
+
+
+# ── Standard entry (Claude Code-credentials) API ───────────────────────────
+#
+# The CLI's side of the partition.  CCSwitch writes only from inside the
+# swap orchestrator; reads happen from the poll loop for active-account
+# rate-limit probes.
+
+
+def read_standard() -> dict | None:
+    """Read the standard ``Claude Code-credentials`` Keychain entry.
+
+    Returns the parsed credentials dict or ``None`` on miss.
     """
-    Return non-secret token metadata: token expiry timestamp and subscription type.
-    Does NOT return access/refresh tokens or rate limit tier.
-    Falls back to file-based credentials if Keychain is unavailable.
+    return _find_password(STANDARD_SERVICE, getpass.getuser())
+
+
+def write_standard(credentials: dict) -> bool:
+    """Write credentials to the standard entry.  Acquires the credential
+    lock.  Only called by the swap orchestrator — never by the background
+    refresh, which must not touch the active account."""
+    with _credential_lock:
+        return _add_password(STANDARD_SERVICE, getpass.getuser(), credentials)
+
+
+def delete_standard() -> None:
+    """Delete the standard entry.  Used when the last account is removed."""
+    with _credential_lock:
+        _delete_password(STANDARD_SERVICE, getpass.getuser())
+
+
+# ── Vault entry (ccswitch-vault) API ───────────────────────────────────────
+
+
+def read_vault(email: str) -> dict | None:
+    """Read the vault entry for ``email``.  Returns the parsed credentials
+    dict or ``None`` on miss."""
+    return _find_password(VAULT_SERVICE, email)
+
+
+def write_vault(email: str, credentials: dict) -> bool:
+    """Write credentials to ``ccswitch-vault / email``.
+
+    Acquires the credential lock.  Returns ``True`` on success.
     """
-    kc = _read_keychain_credentials(config_dir)
-    oauth = kc.get("claudeAiOauth", kc)
-    result = {}
-    if oauth.get("expiresAt"):
-        result["token_expires_at"] = oauth["expiresAt"]
-    if oauth.get("subscriptionType"):
-        result["subscription_type"] = oauth["subscriptionType"]
-    if result:
-        return result
-
-    # Fall back to file-based credentials
-    for filename in [".credentials.json", "credentials.json", ".claude.json"]:
-        path = os.path.join(config_dir, filename)
-        data = _load_json_safe(path)
-        oauth_data = data.get("claudeAiOauth", data)
-        if oauth_data.get("expiresAt"):
-            result["token_expires_at"] = oauth_data["expiresAt"]
-        if oauth_data.get("subscriptionType"):
-            result["subscription_type"] = oauth_data["subscriptionType"]
-        if result:
-            return result
-    return {}
+    with _credential_lock:
+        return _add_password(VAULT_SERVICE, email, credentials, comment=_VAULT_COMMENT)
 
 
-def _get_oauth_field(config_dir: str, field: str) -> str | None:
-    """
-    Look up an OAuth credential field from Keychain then files.
-
-    field: key inside the nested "claudeAiOauth" object (e.g. "accessToken", "refreshToken").
-           Also checked at the top level when claudeAiOauth is absent.
-    """
-    # 1. macOS Keychain (primary location for native Claude Code)
-    kc = _read_keychain_credentials(config_dir)
-    if kc:
-        token = (kc.get("claudeAiOauth") or {}).get(field)
-        if token:
-            return token
-        if kc.get(field):
-            return kc[field]
-
-    # 2. Fall back to credential files (Linux / older versions)
-    for fname in [".credentials.json", "credentials.json", ".claude.json"]:
-        path = os.path.join(config_dir, fname)
-        data = _load_json_safe(path)
-        if not data:
-            continue
-        if "claudeAiOauth" in data:
-            token = data["claudeAiOauth"].get(field)
-            if token:
-                return token
-        if data.get(field):
-            return data[field]
-    return None
+def delete_vault(email: str) -> None:
+    """Delete a vault entry.  No-op if missing."""
+    with _credential_lock:
+        _delete_password(VAULT_SERVICE, email)
 
 
-def get_access_token_from_config_dir(config_dir: str) -> str | None:
-    """
-    Try several locations Claude Code may use to persist the OAuth access token
-    when CLAUDE_CONFIG_DIR is set to a custom path.
-
-    On macOS (native build) Claude Code stores tokens in the Keychain.
-    On other platforms it writes credential files to the config directory.
-    """
-    return _get_oauth_field(config_dir, "accessToken")
+# ── Token-field extraction ─────────────────────────────────────────────────
+#
+# The CLI writes OAuth credentials in two slightly different shapes
+# depending on build / platform: either nested under ``claudeAiOauth`` or
+# at the top level.  All reader helpers must tolerate both.
 
 
-def get_refresh_token_from_config_dir(config_dir: str) -> str | None:
-    return _get_oauth_field(config_dir, "refreshToken")
+def _extract_field(credentials: dict | None, field: str) -> str | None:
+    if not credentials:
+        return None
+    nested = credentials.get("claudeAiOauth") or {}
+    return nested.get(field) or credentials.get(field)
 
 
-def save_refreshed_token(
-    config_dir: str,
+def access_token_of(credentials: dict | None) -> str | None:
+    return _extract_field(credentials, "accessToken")
+
+
+def refresh_token_of(credentials: dict | None) -> str | None:
+    return _extract_field(credentials, "refreshToken")
+
+
+def token_info_of(credentials: dict | None) -> dict:
+    """Return non-secret token metadata: expiry timestamp + subscription tier.
+    Never returns the access or refresh token itself."""
+    if not credentials:
+        return {}
+    nested = credentials.get("claudeAiOauth") or credentials
+    result: dict = {}
+    if nested.get("expiresAt"):
+        result["token_expires_at"] = nested["expiresAt"]
+    if nested.get("subscriptionType"):
+        result["subscription_type"] = nested["subscriptionType"]
+    return result
+
+
+# ── Vault refresh persistence ──────────────────────────────────────────────
+
+
+def save_refreshed_vault_token(
+    email: str,
     access_token: str,
     expires_at: int | None = None,
     refresh_token: str | None = None,
 ) -> None:
-    """
-    Persist a refreshed access token (and optionally a rotated refresh
-    token) back into the config dir.
+    """Persist a refreshed access token (and optionally a rotated refresh
+    token) back into the vault entry for ``email``.
 
-    Writes the first applicable credentials file (.credentials.json,
-    credentials.json, .claude.json) AND then updates the macOS Keychain
-    entries so a freshly launched `claude` picks up the new token without
-    needing CLAUDE_CONFIG_DIR.
-
-    Acquires ``_credential_lock`` for the full body so a background refresh
-    cannot clobber a concurrent account switch.  See the lock's docstring.
+    Only called from the background poll loop for inactive accounts.
+    CCSwitch is the sole consumer of vault entries, so there is no race
+    partner — the narrow write window inside ``_credential_lock`` is
+    sufficient.
     """
     with _credential_lock:
-        _save_refreshed_token_locked(config_dir, access_token, expires_at, refresh_token)
-
-
-def _save_refreshed_token_locked(
-    config_dir: str, access_token: str, expires_at: int | None,
-    refresh_token: str | None = None,
-) -> None:
-    # Update the first applicable credentials file found.  `break` (not
-    # `return`) so the Keychain update below still runs.
-    for filename in [".credentials.json", "credentials.json", ".claude.json"]:
-        path = os.path.join(config_dir, filename)
-        if not os.path.exists(path):
-            continue
-        data = _load_json_safe(path)
-        if "claudeAiOauth" in data:
-            data["claudeAiOauth"]["accessToken"] = access_token
+        current = read_vault(email) or {}
+        if "claudeAiOauth" in current:
+            current["claudeAiOauth"]["accessToken"] = access_token
             if expires_at is not None:
-                data["claudeAiOauth"]["expiresAt"] = expires_at
+                current["claudeAiOauth"]["expiresAt"] = expires_at
             if refresh_token is not None:
-                data["claudeAiOauth"]["refreshToken"] = refresh_token
-        elif "accessToken" in data:
-            data["accessToken"] = access_token
-            if expires_at is not None:
-                data["expiresAt"] = expires_at
-            if refresh_token is not None:
-                data["refreshToken"] = refresh_token
+                current["claudeAiOauth"]["refreshToken"] = refresh_token
         else:
-            continue
-        tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp_path, path)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except FileNotFoundError:
-                pass
-            raise
-        break
-
-    # Update the macOS Keychain so Claude Code picks up the refreshed token
-    # even when launched fresh without CLAUDE_CONFIG_DIR.
-    try:
-        kc = _read_keychain_credentials(config_dir)
-        if kc:
-            if "claudeAiOauth" in kc:
-                kc["claudeAiOauth"]["accessToken"] = access_token
-                if expires_at is not None:
-                    kc["claudeAiOauth"]["expiresAt"] = expires_at
-                if refresh_token is not None:
-                    kc["claudeAiOauth"]["refreshToken"] = refresh_token
-            else:
-                kc["accessToken"] = access_token
-                if expires_at is not None:
-                    kc["expiresAt"] = expires_at
-                if refresh_token is not None:
-                    kc["refreshToken"] = refresh_token
-            _write_keychain_credentials(kc, service=_keychain_service_name(config_dir))
-            # Only touch the legacy (no-hash) entry if THIS account is the
-            # one currently active system-wide; otherwise a background refresh
-            # of a non-active account would clobber the active account's
-            # credentials in the shared "Claude Code-credentials" entry.
-            #
-            # Under the active-ownership refresh model the poll loop never
-            # refreshes the currently-active account — so the only caller
-            # that actually reaches this branch is ``force_refresh_config_dir``
-            # (the user-triggered escape hatch).  The predicate stays as
-            # defense in depth against future refactors that might put the
-            # poll loop back in the active-account refresh business.
-            active_dir = ""
-            try:
-                with open(active_dir_pointer_path()) as f:
-                    active_dir = f.read().strip()
-            except Exception:
-                pass
-            if active_dir and os.path.abspath(active_dir) == os.path.abspath(config_dir):
-                _write_keychain_credentials(kc, service=LEGACY_KEYCHAIN_SERVICE)
-    except Exception as e:
-        logger.warning("Failed to update Keychain after token refresh for %s: %s", config_dir, e)
+            current["accessToken"] = access_token
+            if expires_at is not None:
+                current["expiresAt"] = expires_at
+            if refresh_token is not None:
+                current["refreshToken"] = refresh_token
+        write_vault(email, current)
 
 
-def wipe_credentials_for_config_dir(config_dir: str) -> None:
-    """Remove all OAuth credentials belonging to an isolated config directory.
+# ── Login-flow scratch entry helpers ───────────────────────────────────────
+#
+# The add-account and re-login flows launch `claude /login` in a tmux pane
+# with ``CLAUDE_CONFIG_DIR=$scratch_dir``, so the CLI writes the freshly
+# minted credentials to a hashed service name derived from that path.  We
+# read them back, promote them to the vault, and delete the scratch
+# hashed entry.  That hashed entry is the ONLY place in the new
+# architecture where a ``Claude Code-credentials-<sha>`` namespace still
+# exists — and it lives for seconds, not forever.
 
-    Deletes the hashed per-dir Keychain entry, the credential files inside
-    ``config_dir`` (``.credentials.json`` / ``credentials.json``), and strips
-    the ``oauthAccount`` / ``userID`` keys from ``.claude.json`` — other keys
-    in that file (projects, MCP state, etc.) are preserved.
 
-    Used to roll back a re-login attempt where the user authenticated as a
-    different account than the slot expects — this returns the config dir
-    to the same "no credentials" state a stale account already has, so the
-    user can try again without leaving a split-brain mix (one identity in
-    ``.claude.json``, a different one in the Keychain entry).
+def _scratch_service_name(scratch_dir: str) -> str:
+    h = hashlib.sha256(scratch_dir.encode()).hexdigest()[:8]
+    return f"{STANDARD_SERVICE}-{h}"
 
-    Best-effort: individual step failures are logged but do not abort the
-    remaining steps, because a half-wiped slot is still safer than one
-    where some of the bad credentials linger.
 
-    Acquires ``_credential_lock`` for the same reason token refresh does —
-    to not race with a concurrent switch or save_refreshed_token.
-    """
-    user = getpass.getuser()
+def read_login_scratch(scratch_dir: str) -> dict | None:
+    """Read the hashed Keychain entry Claude Code wrote for a login session
+    whose ``CLAUDE_CONFIG_DIR`` was ``scratch_dir``."""
+    return _find_password(_scratch_service_name(scratch_dir), getpass.getuser())
 
+
+def delete_login_scratch(scratch_dir: str) -> None:
+    """Delete the login scratch hashed entry after extraction."""
     with _credential_lock:
-        # 1. Hashed per-dir Keychain entry.  `security delete-generic-password`
-        #    exits non-zero when the item does not exist; that is fine and we
-        #    do not raise on it.
-        service = _keychain_service_name(config_dir)
-        try:
-            subprocess.run(
-                ["security", "delete-generic-password", "-s", service, "-a", user],
-                capture_output=True, timeout=5,
-            )
-        except Exception as e:
-            logger.debug("Keychain wipe for %s failed: %s", service, e)
+        _delete_password(_scratch_service_name(scratch_dir), getpass.getuser())
 
-        # 2. Credential files inside config_dir.
-        for fname in (".credentials.json", "credentials.json"):
-            path = os.path.join(config_dir, fname)
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                pass
-            except Exception as e:
-                logger.warning("wipe_credentials: failed to unlink %s: %s", path, e)
 
-        # 3. Strip oauthAccount / userID from .claude.json while preserving
-        #    every other key (projects, MCP state, user prefs, etc.).
-        claude_json = os.path.join(config_dir, ".claude.json")
-        if not os.path.exists(claude_json):
-            return
-        try:
-            data = _load_json_safe(claude_json)
-            if "oauthAccount" not in data and "userID" not in data:
-                return
-            data.pop("oauthAccount", None)
-            data.pop("userID", None)
-            tmp = f"{claude_json}.{os.getpid()}.{threading.get_ident()}.wipe.tmp"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            try:
-                with os.fdopen(fd, "w") as f:
-                    json.dump(data, f, indent=2)
-                os.replace(tmp, claude_json)
-            except Exception:
-                try:
-                    os.unlink(tmp)
-                except FileNotFoundError:
-                    pass
-                raise
-        except Exception as e:
-            logger.warning("wipe_credentials: failed to strip oauthAccount from %s: %s", claude_json, e)
+# ── Keychain availability probe ────────────────────────────────────────────
+
+
+def probe_keychain_available() -> bool:
+    """Return ``True`` if the login keychain is unlocked and readable.
+
+    Used on startup (main.lifespan) to detect the LaunchAgent-at-boot case
+    where the keychain may not yet be unlocked.  A short-circuit probe
+    against a non-existent service is enough: ``find-generic-password``
+    returns 44 (item not found) when the keychain is unlocked but the
+    entry is absent, 51 (interaction not allowed) or 36 (locked keychain)
+    when locked.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "security", "find-generic-password",
+                "-s", "__ccswitch_probe_does_not_exist__",
+                "-a", getpass.getuser(),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_KEYCHAIN_SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    except Exception:  # pragma: no cover — defensive
+        return False
+    # returncode 44 (item not found) means the keychain is unlocked and
+    # just doesn't have that entry.  Anything else — 36 (locked), 51
+    # (interaction not allowed), or another non-zero — means unavailable.
+    return result.returncode == 44

@@ -1,95 +1,102 @@
 """
-Login session lifecycle helpers.
+Login session lifecycle helpers for the vault-swap architecture.
 
-Two kinds of sessions live in the same tracking dict:
+Both the add-account flow and the re-login flow use a transient scratch
+directory under ``$TMPDIR/ccswitch-login-<session>/`` as a bootstrap
+vehicle for Claude Code's OAuth dance.  The scratch dir is only
+``CLAUDE_CONFIG_DIR`` for the child tmux process during the interactive
+login; after ``verify_login_session`` succeeds, credentials are promoted
+into the vault and the scratch dir (plus its hashed Keychain entry) is
+removed.
 
-* ``kind="add"`` — brand-new account enrollment.  ``start_login_session``
-  creates a throwaway isolated config directory under ``accounts_base``,
-  launches a tmux window running ``claude`` with ``CLAUDE_CONFIG_DIR``
-  pointing at that dir, and on cleanup / expiry the throwaway dir is
-  rm-r-ed.
-
-* ``kind="relogin"`` — re-authentication of an existing account whose
-  credentials have gone stale.  ``start_relogin_session`` reuses the
-  account's existing config directory (so the email, priority, threshold,
-  and credential-target mappings all stay intact), launches the same kind
-  of tmux window, and on cleanup / expiry the config dir is LEFT ALONE.
-  The slot is preserved.
-
-Sessions that are never verified are reaped automatically after
-``_SESSION_TIMEOUT`` seconds.
+Neither flow creates or preserves a per-account directory.  The account
+identity lives in the DB and the vault Keychain entry; on disk,
+``~/.claude/`` is the only Claude Code state location.
 """
 
+import json
 import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
 
 from ..config import settings
-from .credential_provider import get_access_token_from_config_dir
+from . import credential_provider as cp
+
 
 logger = logging.getLogger(__name__)
 
 # session_id → {
 #   "created_at": float,
 #   "pane_target": str,
-#   "config_dir": str,
-#   "kind": str,          # "add" | "relogin"
+#   "scratch_dir": str,
+#   "kind": "add" | "relogin",
+#   "expected_email": str | None,   # set for re-login to guard against wrong-identity
 # }
 _active_login_sessions: dict[str, dict] = {}
+
 # asyncio.to_thread dispatches to a pool with multiple worker threads, so
-# start / verify / cleanup can touch the dict concurrently. The RLock is
-# reentrant because _cleanup_expired_sessions iterates and then calls
-# cleanup_login_session, which also needs the lock.
+# start / verify / cleanup can touch the dict concurrently. Re-entrant
+# because ``_cleanup_expired_sessions`` iterates the dict and then calls
+# ``cleanup_login_session`` which also acquires the lock.
 _sessions_lock = threading.RLock()
 
-# Sessions older than this are considered expired — read from config for tunability.
+# Sessions older than this are reaped by ``_cleanup_expired_sessions``.
 _SESSION_TIMEOUT: int = settings.login_session_timeout
 
 
-# ── Private path helpers (inlined to avoid circular imports) ──────────────────
-
-def _accounts_base() -> str:
-    return os.path.expanduser(settings.accounts_base_dir)
+# ── Scratch directory helpers ─────────────────────────────────────────────
 
 
-def _make_account_config_dir(session_id: str) -> str:
-    path = os.path.join(_accounts_base(), f"account-{session_id}")
-    os.makedirs(path, exist_ok=True)
+def _make_scratch_dir(session_id: str) -> str:
+    """Create a transient directory for an interactive login session.
+
+    Lives under the system TMPDIR so it survives for the duration of the
+    login flow and is cleaned up by the OS (and by our own ``rmtree``)
+    once the session is verified or abandoned.
+    """
+    base = os.path.join(tempfile.gettempdir(), "ccswitch-login")
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    path = os.path.join(base, f"session-{session_id}")
+    os.makedirs(path, mode=0o700, exist_ok=True)
     return path
 
 
-def _get_email_from_config_dir(config_dir: str) -> str | None:
-    """Return the emailAddress stored in .claude.json inside config_dir."""
-    import json
-    path = os.path.join(config_dir, ".claude.json")
+def _read_scratch_identity(scratch_dir: str) -> tuple[dict | None, str | None, str | None]:
+    """Read the identity metadata Claude Code wrote to the scratch dir's
+    ``.claude.json``.  Returns ``(oauthAccount, userID, emailAddress)``.
+    """
+    path = os.path.join(scratch_dir, ".claude.json")
     try:
         with open(path) as f:
             data = json.load(f)
     except Exception:
-        data = {}
-    return (data.get("oauthAccount") or {}).get("emailAddress")
+        return None, None, None
+    oauth_account = data.get("oauthAccount")
+    user_id = data.get("userID")
+    email = None
+    if isinstance(oauth_account, dict):
+        email = oauth_account.get("emailAddress")
+    return (
+        oauth_account if isinstance(oauth_account, dict) else None,
+        user_id if isinstance(user_id, str) else None,
+        email if isinstance(email, str) else None,
+    )
 
 
-# ── Tmux helper (shared by add + relogin) ─────────────────────────────────────
+# ── Tmux helper (shared by add + relogin) ─────────────────────────────────
 
-def _open_claude_tmux_window(config_dir: str) -> str:
-    """Ensure tmux is running and launch a new window with ``claude`` inside
-    it, with ``CLAUDE_CONFIG_DIR`` pointing at ``config_dir``.  Returns the
-    new pane's target string (``session:window.pane``).
 
-    Shared by both enrollment and re-login so the exact same tmux setup,
-    error handling, and timeouts apply to both flows.  The caller is
-    responsible for recording the returned pane_target in
-    ``_active_login_sessions`` under the right kind.
+def _open_claude_tmux_window(scratch_dir: str) -> str:
+    """Ensure tmux is running and launch a new window with ``claude``
+    inside it, with ``CLAUDE_CONFIG_DIR`` pointing at ``scratch_dir``.
+
+    Returns the new pane's target string (``session:window.pane``).
     """
-    # Ensure at least one tmux server/session is running so new-window works.
-    # These two calls are best-effort setup; a hung tmux server that times out
-    # here is logged and we fall through to new-window, which has check=True
-    # and will surface any real problem to the caller as a 500.
     try:
         sessions = subprocess.run(
             ["tmux", "list-sessions", "-F", "#{session_name}"],
@@ -119,63 +126,57 @@ def _open_claude_tmux_window(config_dir: str) -> str:
     )
     pane_target = result.stdout.strip()
 
-    # Launch claude with the isolated config dir.
     subprocess.run(
         ["tmux", "send-keys", "-t", pane_target,
-         f"CLAUDE_CONFIG_DIR={config_dir} claude", "Enter"],
+         f"CLAUDE_CONFIG_DIR={scratch_dir} claude", "Enter"],
         check=True, capture_output=True, timeout=10,
     )
 
     return pane_target
 
 
-# ── Session lifecycle ─────────────────────────────────────────────────────────
+# ── Session lifecycle ─────────────────────────────────────────────────────
+
 
 def _cleanup_expired_sessions() -> None:
-    """Remove login session dirs for sessions that have exceeded _SESSION_TIMEOUT."""
+    """Remove sessions that have exceeded ``_SESSION_TIMEOUT``."""
     now = time.time()
     with _sessions_lock:
-        expired = [sid for sid, data in _active_login_sessions.items()
-                   if now - data["created_at"] > _SESSION_TIMEOUT]
+        expired = [
+            sid for sid, data in _active_login_sessions.items()
+            if now - data["created_at"] > _SESSION_TIMEOUT
+        ]
     for sid in expired:
         cleanup_login_session(sid)
         logger.debug("Expired login session cleaned up: %s", sid)
 
 
 def get_pane_target(session_id: str) -> str | None:
-    """Return the tmux pane target for an active login session, or None."""
     with _sessions_lock:
         data = _active_login_sessions.get(session_id)
     return data["pane_target"] if data else None
 
 
 def start_login_session() -> dict:
-    """
-    Create a fresh isolated config directory and open a tmux window where the
-    user can run `claude` (with CLAUDE_CONFIG_DIR set) to authenticate.
-
-    Returns session metadata including the pane target.
-    """
-    # Reap any abandoned sessions before creating a new one so the in-memory
-    # registry and the on-disk account dirs do not grow without bound.
+    """Create a fresh scratch directory and open a tmux window where the
+    user can run ``claude /login`` to authenticate a new account."""
     _cleanup_expired_sessions()
 
     session_id = str(uuid.uuid4())[:8]
-    config_dir = _make_account_config_dir(session_id)
-
-    pane_target = _open_claude_tmux_window(config_dir)
+    scratch_dir = _make_scratch_dir(session_id)
+    pane_target = _open_claude_tmux_window(scratch_dir)
 
     with _sessions_lock:
         _active_login_sessions[session_id] = {
             "created_at": time.time(),
             "pane_target": pane_target,
-            "config_dir": config_dir,
+            "scratch_dir": scratch_dir,
             "kind": "add",
+            "expected_email": None,
         }
 
     return {
         "session_id": session_id,
-        "config_dir": config_dir,
         "instructions": (
             "Authenticate in the terminal below. "
             "After login completes, click 'Verify & Save'."
@@ -183,47 +184,40 @@ def start_login_session() -> dict:
     }
 
 
-def start_relogin_session(config_dir: str) -> dict:
-    """
-    Open an interactive tmux login for an already-enrolled account's
-    existing ``config_dir``.
-
-    Used when the account's credentials have gone stale (refresh token
-    revoked, 401, missing token).  The slot's email, priority, threshold,
-    and credential-target mappings all stay intact — only the OAuth
-    material inside the isolated config dir is replaced when the user
-    finishes the interactive login.
-
-    Raises ``ValueError`` if another re-login session is already active
-    for the same ``config_dir``, so two tmux windows cannot fight over the
-    same Keychain entry concurrently.
+def start_relogin_session(expected_email: str) -> dict:
+    """Open a scratch login for an existing account whose credentials have
+    gone stale.  The scratch dir is a brand-new temporary directory — same
+    mechanism as an add-flow — with ``expected_email`` stored on the
+    session so ``verify_login_session`` can refuse wrong-identity logins.
     """
     _cleanup_expired_sessions()
 
-    # Duplicate guard — reject rather than spawn a second tmux window that
-    # would race the first one writing to the same hashed Keychain entry.
+    # Duplicate guard — reject a second re-login for the same email.
     with _sessions_lock:
         for data in _active_login_sessions.values():
-            if data.get("kind") == "relogin" and data.get("config_dir") == config_dir:
-                raise ValueError("A re-login session is already active for this account")
-
-    if not os.path.isdir(config_dir):
-        raise ValueError(f"Account config directory does not exist: {config_dir}")
+            if (
+                data.get("kind") == "relogin"
+                and data.get("expected_email") == expected_email
+            ):
+                raise ValueError(
+                    "A re-login session is already active for this account"
+                )
 
     session_id = str(uuid.uuid4())[:8]
-    pane_target = _open_claude_tmux_window(config_dir)
+    scratch_dir = _make_scratch_dir(session_id)
+    pane_target = _open_claude_tmux_window(scratch_dir)
 
     with _sessions_lock:
         _active_login_sessions[session_id] = {
             "created_at": time.time(),
             "pane_target": pane_target,
-            "config_dir": config_dir,
+            "scratch_dir": scratch_dir,
             "kind": "relogin",
+            "expected_email": expected_email,
         }
 
     return {
         "session_id": session_id,
-        "config_dir": config_dir,
         "instructions": (
             "Re-authenticate in the terminal below. "
             "After login completes, click 'Verify & Re-login'."
@@ -232,81 +226,91 @@ def start_relogin_session(config_dir: str) -> dict:
 
 
 def verify_login_session(session_id: str) -> dict:
-    """
-    Verify that a login session produced usable credentials.
+    """Verify that a login session produced usable credentials and extract
+    them from the scratch dir's hashed Keychain entry.
 
-    Returns ``{"success": True, "email": str, "config_dir": str, "kind": str}``
-    on success — the ``kind`` lets the router branch between enrollment
-    (save new DB row) and re-login (clear stale_reason) post-processing.
+    On success returns::
 
-    Returns ``{"success": False, "error": str}`` otherwise.  On success the
-    session is popped from the tracking dict; on failure it is left in
-    place so the user can finish logging in and retry ``verify`` without
-    having to restart the whole flow.
+        {
+            "success": True,
+            "email": str,
+            "oauth_account": dict,
+            "user_id": str | None,
+            "oauth_tokens": dict,   # ready to save into vault
+            "kind": "add" | "relogin",
+            "expected_email": str | None,
+        }
+
+    On failure returns ``{"success": False, "error": str}``.  On success
+    the session is popped from the tracking dict; on failure it is left
+    in place so the user can retry ``verify`` without restarting.
     """
     with _sessions_lock:
         data = _active_login_sessions.get(session_id)
     if not data:
         return {"success": False, "error": "Session not found"}
 
-    config_dir = data["config_dir"]
+    scratch_dir = data["scratch_dir"]
     kind = data.get("kind", "add")
+    expected_email = data.get("expected_email")
 
-    # For enrollment we ONLY accept paths that live inside the accounts base
-    # directory — defence in depth in case the session id somehow leaked into
-    # a place that could point it at an arbitrary directory.  Re-login paths
-    # come from DB rows we already trust.
-    if kind == "add":
-        real = os.path.realpath(config_dir)
-        base = os.path.realpath(_accounts_base())
-        if not real.startswith(base + os.sep):
-            return {"success": False, "error": "Invalid session"}
+    if not os.path.isdir(scratch_dir):
+        return {"success": False, "error": "Session scratch directory missing"}
 
-    if not os.path.isdir(config_dir):
-        return {"success": False, "error": "Session config directory missing"}
-
-    email = _get_email_from_config_dir(config_dir)
+    oauth_account, user_id, email = _read_scratch_identity(scratch_dir)
     if not email:
         return {
             "success": False,
             "error": "Login not detected yet — .claude.json not found or missing email",
         }
 
-    token = get_access_token_from_config_dir(config_dir)
-    if not token:
+    scratch_blob = cp.read_login_scratch(scratch_dir)
+    tokens = scratch_blob.get("claudeAiOauth") if scratch_blob else None
+    if not tokens or not tokens.get("refreshToken"):
         return {
             "success": False,
             "error": (
-                "Credentials not found in the config directory. "
+                "Credentials not found for the session. "
                 "Make sure the login completed in the terminal."
             ),
         }
 
-    # Successful verification — stop tracking this session so the registry
-    # does not keep a pointer to an already-promoted account dir.
+    # Success — stop tracking so the registry does not hold a handle to
+    # the scratch dir we are about to delete.
     with _sessions_lock:
         _active_login_sessions.pop(session_id, None)
-    return {"success": True, "email": email, "config_dir": config_dir, "kind": kind}
+
+    return {
+        "success": True,
+        "email": email,
+        "oauth_account": oauth_account,
+        "user_id": user_id,
+        "oauth_tokens": tokens,
+        "kind": kind,
+        "expected_email": expected_email,
+    }
 
 
 def cleanup_login_session(session_id: str) -> None:
-    """Remove a session from tracking.
+    """Remove a session entirely: pop from tracking, delete the scratch
+    hashed Keychain entry, and ``rmtree`` the scratch directory.
 
-    For ``kind="add"`` the isolated config directory is also deleted —
-    it was a throwaway created for this enrollment attempt.
-
-    For ``kind="relogin"`` the config directory belongs to an existing
-    account slot and MUST be preserved; only the registry entry is popped.
+    Used by explicit cancel, successful verification post-process, and
+    the expiry sweep.  Always safe: individual step failures are logged
+    but do not abort the remaining steps.
     """
     with _sessions_lock:
         data = _active_login_sessions.pop(session_id, None)
     if not data:
         return
-    if data.get("kind") != "add":
-        # Re-login (or any future non-add kind) — never touch the account dir.
+    scratch_dir = data.get("scratch_dir")
+    if not scratch_dir:
         return
-    config_dir = data.get("config_dir") or os.path.join(_accounts_base(), f"account-{session_id}")
-    real = os.path.realpath(config_dir)
-    base = os.path.realpath(_accounts_base())
-    if os.path.isdir(real) and real.startswith(base + os.sep):
-        shutil.rmtree(real, ignore_errors=True)
+    try:
+        cp.delete_login_scratch(scratch_dir)
+    except Exception as e:
+        logger.debug("delete_login_scratch failed for %s: %s", scratch_dir, e)
+    try:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+    except Exception as e:
+        logger.debug("rmtree failed for %s: %s", scratch_dir, e)

@@ -1,305 +1,75 @@
 """
-Account lifecycle service.
+Account lifecycle service — vault-swap architecture.
 
-Each managed account has an isolated Claude config directory under
-``~/.ccswitch-accounts/account-{uuid}/``.  Claude Code reads credentials
-from whatever ``CLAUDE_CONFIG_DIR`` points at, and every isolated dir has its
-own Keychain entry keyed by ``sha256(config_dir)[:8]``.
+Every managed account has one Keychain entry in the ``ccswitch-vault``
+service (see ``credential_provider.py``).  The currently active account's
+credentials also live in the standard ``Claude Code-credentials`` entry
+that Claude Code CLI reads on every API call.  A "swap" moves credentials
+from vault → standard, checkpoints the outgoing account back into the
+vault, and updates ``~/.claude/.claude.json`` with the new identity.
 
-Credential targets — the user-controlled mirror list
-----------------------------------------------------
-Different tools read ``oauthAccount`` from different ``.claude.json`` locations
-on the same machine (HOME root, HOME/.claude/, Gas Town, cmux, …).  This
-service no longer guesses which of those to update on a switch.  The user
-picks explicit targets in the dashboard; ``activate_account_config`` takes
-that list and delegates identity-key mirroring to
-``credential_targets.mirror_oauth_into_targets``.
-
-When the user enables a "system default" target — either ``$HOME/.claude.json``
-or ``$HOME/.claude/.claude.json`` — this service ALSO writes the legacy
-(no-hash) ``Claude Code-credentials`` Keychain entry and mirrors
-``.credentials.json`` into ``~/.claude/``, so a fresh ``claude`` invocation
-without ``CLAUDE_CONFIG_DIR`` picks up the switch.  With zero targets enabled,
-only the dashboard's own pointer file is touched.
+There are no per-account config directories and no pointer file.  The
+active account is the one whose email appears in
+``~/.claude/.claude.json``'s ``oauthAccount``.
 """
 
 import asyncio
-import getpass
+import json
 import logging
 import os
-import shutil
-import subprocess
 import threading
-import time
 
-
-from ..config import settings
-from ..models import Account
 from ..schemas import UsageData
-from .credential_provider import (
-    LEGACY_KEYCHAIN_SERVICE,
-    _load_json_safe as _load_json,
-    _read_keychain_credentials,
-    _write_keychain_credentials,
-    active_dir_pointer_path,
-    get_access_token_from_config_dir,
-    get_refresh_token_from_config_dir,
-    get_token_info,
-    save_refreshed_token,
-)
+from . import credential_provider as cp
+
 
 logger = logging.getLogger(__name__)
 
 
-# ── Path helpers ───────────────────────────────────────────────────────────────
+# ── Paths ──────────────────────────────────────────────────────────────────
+#
+# Hardcoded to ``~/.claude`` — Claude Code has no public override for this
+# location, and the previous configurable ``active_claude_dir`` setting was
+# dead weight.
 
-def accounts_base() -> str:
-    return os.path.expanduser(settings.accounts_base_dir)
-
-
-def active_claude_dir() -> str:
-    """The directory Claude Code uses as CLAUDE_CONFIG_DIR's fallback
-    (~/.claude by default). Used for commands/, agents/, settings.json,
-    history.jsonl, etc. — NOT for the .claude.json config file."""
-    return os.path.expanduser(settings.active_claude_dir)
+_CLAUDE_HOME = os.path.expanduser("~/.claude")
+_CLAUDE_JSON_PATH = os.path.join(_CLAUDE_HOME, ".claude.json")
+_CREDENTIALS_JSON_PATH = os.path.join(_CLAUDE_HOME, ".credentials.json")
 
 
-def active_config_file() -> str:
-    """Absolute path of the .claude.json file that Claude Code reads for
-    oauthAccount state when CLAUDE_CONFIG_DIR is unset. Lives in HOME, not
-    inside active_claude_dir()."""
-    return os.path.join(os.path.expanduser("~"), ".claude.json")
+def claude_home() -> str:
+    return _CLAUDE_HOME
 
 
-# ── Active (system) config helpers ────────────────────────────────────────────
-
-def get_active_email() -> str | None:
-    """Return the email of the currently-active account.
-
-    Reads the dashboard's pointer file first — that is the authoritative
-    source of "what this service thinks is active", independent of whether
-    the user has enabled any system-level credential target.  Falls back to
-    ``$HOME/.claude.json`` for the cold-start case (service just installed,
-    no switch yet) and then to ``$HOME/.claude/.claude.json`` so upgrades
-    from older installs still work.
-    """
-    pointer = get_active_config_dir_pointer()
-    if pointer:
-        data = _load_json(os.path.join(pointer, ".claude.json"))
-        email = (data.get("oauthAccount") or {}).get("emailAddress")
-        if email:
-            return email
-    data = _load_json(active_config_file())
-    email = (data.get("oauthAccount") or {}).get("emailAddress")
-    if email:
-        return email
-    legacy = _load_json(os.path.join(active_claude_dir(), ".claude.json"))
-    return (legacy.get("oauthAccount") or {}).get("emailAddress")
+def claude_json_path() -> str:
+    return _CLAUDE_JSON_PATH
 
 
-async def get_active_email_async() -> str | None:
-    """Async wrapper for get_active_email — runs the blocking file reads in a
-    worker thread so the event loop stays responsive."""
-    return await asyncio.to_thread(get_active_email)
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 
-def get_active_config_dir_pointer() -> str | None:
-    """Read ~/.ccswitch/active to find which isolated account dir is
-    currently marked active. Returns None if the file is missing or empty."""
+def _load_json_safe(path: str) -> dict:
     try:
-        with open(active_dir_pointer_path()) as f:
-            v = f.read().strip()
-            return v or None
-    except Exception:
-        return None
-
-
-def backup_active_config() -> dict:
-    """Snapshot $HOME/.claude.json so disable can restore the caller's original
-    credentials later. Returns {} if the file is missing."""
-    try:
-        with open(active_config_file()) as f:
-            return {"claude_json": f.read()}
+        with open(path) as f:
+            return json.load(f)
     except Exception:
         return {}
 
 
-def restore_config_from_backup(backup: dict) -> None:
-    if not backup.get("claude_json"):
-        return
-    path = active_config_file()
-    tmp_path = path + ".tmp"
-    try:
-        with open(tmp_path, "w") as f:
-            f.write(backup["claude_json"])
-        os.replace(tmp_path, path)
-    except Exception:
-        # Clean up orphaned temp file on write failure
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        raise
-    try:
-        os.chmod(path, 0o600)
-    except Exception:
-        pass
-    # Point new terminals at ~/.claude/ so they no longer export CLAUDE_CONFIG_DIR
-    # for a per-account dir that may have gone stale.
-    write_active_config_dir(active_claude_dir())
+def _atomic_write_json(path: str, data: dict, mode: int = 0o600) -> None:
+    """Write ``data`` as JSON to ``path`` via a same-dir tmp file + os.replace.
 
-
-# ── Activation ────────────────────────────────────────────────────────────────
-
-def clear_active_config_dir() -> None:
+    Creates the parent directory if needed.  Raises on failure so callers
+    that assume the write succeeded can treat a swap as failed.
     """
-    Remove the ~/.ccswitch/active pointer file so that new terminal
-    sessions do not export CLAUDE_CONFIG_DIR pointing at a stale or deleted
-    account directory.  Called when the last (or only) account is deleted and
-    there is no replacement to switch to.
-    """
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
-        os.remove(active_dir_pointer_path())
-        logger.debug("Cleared active config dir pointer")
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        logger.warning("Failed to clear active config dir pointer: %s", e)
-
-
-def write_active_config_dir(config_dir: str) -> None:
-    """
-    Write the active account's isolated config_dir to ~/.ccswitch/active.
-    Users can add to their shell profile:
-        _d=$(cat ~/.ccswitch/active 2>/dev/null); [ -n "$_d" ] && export CLAUDE_CONFIG_DIR="$_d"; unset _d
-    This ensures new terminal sessions use the correct account without Keychain gymnastics.
-    File is written with mode 0o600 (owner-read/write only) since the path is sensitive.
-
-    Raises on any failure — callers in ``_activate_account_config_locked``
-    assume success, so a silently-swallowed write would leave HOME/Keychain
-    holding the new identity while the pointer still references the previous
-    account (the very split-brain state the credential lock was designed to
-    prevent).
-    """
-    state_dir = os.path.expanduser(settings.state_dir)
-    active_path = os.path.join(state_dir, "active")
-    tmp_path = f"{active_path}.{os.getpid()}.{threading.get_ident()}.tmp"
-    try:
-        os.makedirs(state_dir, exist_ok=True)
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
         with os.fdopen(fd, "w") as f:
-            f.write(config_dir + "\n")
-        try:
-            os.replace(tmp_path, active_path)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except FileNotFoundError:
-                pass
-            raise
-        logger.debug("Active config dir written to %s", active_path)
-    except Exception as e:
-        logger.error("Failed to write active config dir file: %s", e)
-        raise
-
-
-def _clear_stale_legacy_keychain_entries() -> None:
-    """
-    Delete any 'Claude Code-credentials' Keychain entries whose account name
-    is NOT the current $USER. Older Claude Code versions wrote with
-    acct='claude-code', and they linger forever because find-generic-password
-    returns the newest/most-recent one by a heuristic we do not control — any
-    remaining stale entry is a landmine that can surface with the wrong token
-    if the user ever downgrades or runs a different Claude Code build.
-    """
-    service = LEGACY_KEYCHAIN_SERVICE
-    user = getpass.getuser()
-    for stale_acct in ("claude-code", "claude-code-user", "root"):
-        if stale_acct == user:
-            continue
-        try:
-            subprocess.run(
-                ["security", "delete-generic-password",
-                 "-s", service, "-a", stale_acct],
-                capture_output=True, timeout=5,
-            )
-        except Exception:
-            pass
-
-
-def _system_default_canonicals() -> set[str]:
-    """Canonical (symlink-resolved) paths Claude Code reads when
-    CLAUDE_CONFIG_DIR is unset.  Enabling *either* as a credential target
-    means the legacy Keychain entry and ``~/.claude/.credentials.json`` must
-    also move with the switch — that is the combination a fresh ``claude``
-    run pairs together."""
-    home = os.path.expanduser("~")
-    return {
-        os.path.realpath(os.path.join(home, ".claude.json")),
-        os.path.realpath(os.path.join(home, ".claude", ".claude.json")),
-    }
-
-
-def activate_account_config(
-    target_config_dir: str,
-    enabled_credential_targets: list[str] | None = None,
-) -> dict:
-    """
-    Make ``target_config_dir`` the active account.
-
-    Steps (order matters — the failure-prone credential install runs FIRST so
-    the identity mirror and pointer are only reached when the credentials
-    were actually installed):
-
-      1. If any enabled target is a system-default location
-         (``$HOME/.claude.json`` or ``$HOME/.claude/.claude.json``):
-           a. Atomically copy ``.credentials.json`` into ``~/.claude/`` via a
-              tmp file + ``os.replace`` in the same directory.  A failure
-              here raises BEFORE any identity state is touched, so the
-              previous account stays intact.
-           b. Write the legacy ``Claude Code-credentials`` Keychain entry.
-           c. Clean stale Keychain entries left by older Claude Code versions.
-      2. Mirror ``oauthAccount`` + ``userID`` from
-         ``target_config_dir/.claude.json`` into every file in
-         ``enabled_credential_targets`` (canonical paths).  With an empty
-         list, no ``.claude.json`` files outside the isolated account dir
-         are touched.
-      3. Update ``~/.ccswitch/active`` so the shell-profile snippet picks
-         up the new account in brand-new terminals that source it.
-
-    Acquires ``credential_provider._credential_lock`` for the full body so a
-    background token refresh running in another thread cannot interleave
-    between the legacy-Keychain write and the pointer update — see the lock's
-    docstring in ``credential_provider.py``.
-
-    Returns a summary dict:
-        {
-          "mirror": {"written": [...], "skipped": [...], "errors": [...]},
-          "keychain_written": bool,
-          "system_default_enabled": bool,
-        }
-    """
-    from .credential_provider import _credential_lock  # local import avoids cycle
-
-    with _credential_lock:
-        return _activate_account_config_locked(
-            target_config_dir, list(enabled_credential_targets or [])
-        )
-
-
-def _atomic_copy_credentials(src: str, dst: str) -> None:
-    """Copy ``src`` → ``dst`` via a same-dir tmp file + ``os.replace``.
-
-    Matches the tmp-path pattern in ``write_active_config_dir`` (pid + tid
-    suffix).  On any exception the tmp file is unlinked so failed attempts
-    do not leave junk behind.  The source is copied with ``shutil.copy2``
-    into the tmp path so metadata (mode/mtime) is preserved, exactly like
-    the previous single-step ``shutil.copy2`` call.
-    """
-    tmp = f"{dst}.{os.getpid()}.{threading.get_ident()}.tmp"
-    try:
-        shutil.copy2(src, tmp)
-        os.replace(tmp, dst)
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
     except Exception:
         try:
             os.unlink(tmp)
@@ -308,210 +78,322 @@ def _atomic_copy_credentials(src: str, dst: str) -> None:
         raise
 
 
-def _activate_account_config_locked(
-    target_config_dir: str, enabled_targets: list[str]
-) -> dict:
-    from . import credential_targets as ct
+def _extract_identity(credentials: dict | None) -> tuple[dict | None, str | None]:
+    """Return (oauthAccount, userID) from a vault blob, or (None, None)."""
+    if not credentials:
+        return None, None
+    oauth_account = credentials.get("oauthAccount")
+    user_id = credentials.get("userID")
+    return oauth_account if isinstance(oauth_account, dict) else None, user_id
 
-    target_config_dir = os.path.abspath(os.path.expanduser(target_config_dir))
 
-    # ── 1. System-default hooks (plaintext copy + legacy Keychain) ───────────
-    # Run the FAILURE-PRONE credential install BEFORE any identity mirroring
-    # so a copy failure cannot leave HOME/.claude.json or the Keychain holding
-    # the new identity while the pointer still points at the previous account.
-    system_defaults = _system_default_canonicals()
-    system_default_enabled = bool(set(enabled_targets) & system_defaults)
+def email_of_credentials(credentials: dict | None) -> str | None:
+    """Extract the account email from a vault blob's ``oauthAccount`` field."""
+    oauth_account, _ = _extract_identity(credentials)
+    return (oauth_account or {}).get("emailAddress")
 
-    keychain_written = False
-    if system_default_enabled:
-        claude_dir = active_claude_dir()
-        try:
-            os.makedirs(claude_dir, exist_ok=True)
-        except Exception:
-            pass
-        src_creds = os.path.join(target_config_dir, ".credentials.json")
-        if os.path.exists(src_creds):
-            # Atomic copy — raises on failure so steps 2 + 3 never run and
-            # the previous pointer/HOME identity stay as the best available
-            # fallback.
-            _atomic_copy_credentials(
-                src_creds, os.path.join(claude_dir, ".credentials.json")
-            )
 
-        kc = _read_keychain_credentials(target_config_dir)
-        if kc:
-            keychain_written = _write_keychain_credentials(
-                kc, service=LEGACY_KEYCHAIN_SERVICE
-            )
-            if not keychain_written:
-                logger.warning(
-                    "Legacy Keychain write failed for %s — a fresh `claude` "
-                    "run may still use stale credentials.",
-                    target_config_dir,
-                )
+# ── Active account accessors ──────────────────────────────────────────────
+
+
+def get_active_email() -> str | None:
+    """Return the email of the currently-active account.
+
+    The single source of truth is ``~/.claude/.claude.json``'s
+    ``oauthAccount.emailAddress``.  The Claude Code CLI reads the same
+    file to know which identity it is operating as.
+    """
+    data = _load_json_safe(_CLAUDE_JSON_PATH)
+    oauth_account = data.get("oauthAccount") or {}
+    email = oauth_account.get("emailAddress")
+    return email or None
+
+
+async def get_active_email_async() -> str | None:
+    return await asyncio.to_thread(get_active_email)
+
+
+# ── Vault helpers used by the poll loop ───────────────────────────────────
+
+
+def read_credentials_for_email(email: str, active_email: str | None = None) -> dict | None:
+    """Return the credentials dict for ``email``.
+
+    For the active account, reads the standard Keychain entry (the CLI's
+    home).  For inactive accounts, reads the vault.  Callers that already
+    know which account is active pass ``active_email`` to avoid a second
+    file read; otherwise this helper does the lookup itself.
+    """
+    if active_email is None:
+        active_email = get_active_email()
+    if email == active_email:
+        return cp.read_standard()
+    return cp.read_vault(email)
+
+
+def get_access_token(email: str, active_email: str | None = None) -> str | None:
+    return cp.access_token_of(read_credentials_for_email(email, active_email))
+
+
+def get_refresh_token(email: str, active_email: str | None = None) -> str | None:
+    return cp.refresh_token_of(read_credentials_for_email(email, active_email))
+
+
+def get_token_info(email: str, active_email: str | None = None) -> dict:
+    return cp.token_info_of(read_credentials_for_email(email, active_email))
+
+
+# ── The swap ───────────────────────────────────────────────────────────────
+
+
+class SwapError(RuntimeError):
+    """Raised when swap_to_account cannot complete atomically."""
+
+
+def swap_to_account(target_email: str) -> dict:
+    """Activate ``target_email`` by moving credentials into the standard
+    Keychain entry and rewriting the identity file.
+
+    Runs the 5-step sequence from §2.4 of the design spec inside the
+    credential lock.  Returns a summary dict::
+
+        {
+            "target_email": "...",
+            "previous_email": "..." | None,
+            "checkpoint_written": bool,
+        }
+
+    Raises ``SwapError`` if the vault entry for ``target_email`` is
+    missing or the standard Keychain write fails.  Step 4 (identity
+    file) and step 5 (file fallback) failures are logged and re-raised
+    — the standard Keychain entry already reflects the new account at
+    that point, so the user is told the swap half-committed.
+    """
+    with cp._credential_lock:
+        return _swap_to_account_locked(target_email)
+
+
+def _swap_to_account_locked(target_email: str) -> dict:
+    # ── Step 1: load incoming ─────────────────────────────────────────────
+    incoming = cp.read_vault(target_email)
+    if not incoming:
+        raise SwapError(
+            f"Cannot activate {target_email}: no vault entry (re-login required)"
+        )
+    if not cp.refresh_token_of(incoming):
+        raise SwapError(
+            f"Cannot activate {target_email}: vault entry has no refresh token"
+        )
+
+    # ── Step 2: checkpoint outgoing ───────────────────────────────────────
+    current_standard = cp.read_standard()
+    outgoing_email = email_of_credentials(current_standard)
+    checkpoint_written = False
+    if (
+        current_standard
+        and outgoing_email
+        and outgoing_email != target_email
+    ):
+        merged = _merge_checkpoint(outgoing_email, current_standard)
+        if cp.write_vault(outgoing_email, merged):
+            checkpoint_written = True
         else:
-            logger.warning(
-                "No Keychain entry found for %s — new terminals will use "
-                "whatever credentials currently live under 'Claude Code-credentials'.",
-                target_config_dir,
+            # Keychain write failures are rare but catastrophic — we are
+            # about to overwrite the standard entry and would lose the
+            # CLI's latest rotation if the checkpoint failed.  Refuse.
+            raise SwapError(
+                f"Failed to checkpoint outgoing account {outgoing_email} "
+                f"to vault — aborting swap to {target_email}"
             )
-        _clear_stale_legacy_keychain_entries()
+    elif current_standard and not outgoing_email:
+        # Orphan: standard entry has tokens but no oauthAccount metadata.
+        # Stash under a well-known key so the user can see and clean up
+        # in the Settings page.  Never silently drop.
+        logger.warning(
+            "Standard entry has no oauthAccount — stashing under "
+            "ccswitch-vault/__orphan_unknown__ before overwrite"
+        )
+        cp.write_vault("__orphan_unknown__", current_standard)
 
-    # ── 2. Mirror identity keys into every user-enabled target file ──────────
-    mirror_summary = ct.mirror_oauth_into_targets(target_config_dir, enabled_targets)
+    # ── Step 3: promote incoming ──────────────────────────────────────────
+    if not cp.write_standard(incoming):
+        raise SwapError(
+            f"Failed to write standard Keychain entry for {target_email}"
+        )
 
-    # ── 3. Update active-dir pointer file ────────────────────────────────────
-    # Written AFTER credential operations so the pointer is never advanced to
-    # a target whose credentials were not fully installed.
-    write_active_config_dir(target_config_dir)
+    # ── Step 4: update identity file ──────────────────────────────────────
+    _rewrite_claude_json_identity(incoming)
+
+    # ── Step 5: file fallback ─────────────────────────────────────────────
+    _atomic_write_json(_CREDENTIALS_JSON_PATH, incoming)
 
     return {
-        "mirror": mirror_summary,
-        "keychain_written": keychain_written,
-        "system_default_enabled": system_default_enabled,
+        "target_email": target_email,
+        "previous_email": outgoing_email,
+        "checkpoint_written": checkpoint_written,
     }
 
 
-def sync_active_to_targets(
-    enabled_credential_targets: list[str] | None = None,
-) -> dict:
-    """Re-mirror the currently active account's identity into every enabled
-    credential target without performing an account switch.
+def _merge_checkpoint(outgoing_email: str, fresh_standard: dict) -> dict:
+    """Build the vault blob for the outgoing account from its latest
+    standard-entry state, preserving the existing oauthAccount + userID
+    metadata that only lives in the vault."""
+    previous_vault = cp.read_vault(outgoing_email) or {}
+    merged = dict(previous_vault)
+    # The CLI always writes the tokens nested under claudeAiOauth.  If the
+    # standard entry has top-level token fields (legacy format), normalise
+    # to nested so the vault is consistent.
+    nested = fresh_standard.get("claudeAiOauth")
+    if isinstance(nested, dict):
+        merged["claudeAiOauth"] = nested
+    else:
+        token_fields = {
+            k: fresh_standard[k]
+            for k in ("accessToken", "refreshToken", "expiresAt", "subscriptionType")
+            if k in fresh_standard
+        }
+        if token_fields:
+            merged["claudeAiOauth"] = token_fields
+    # If fresh_standard carries fresh oauthAccount / userID (the CLI
+    # sometimes writes both), prefer them so the vault learns about
+    # upstream identity changes.
+    fresh_oauth = fresh_standard.get("oauthAccount")
+    if isinstance(fresh_oauth, dict):
+        merged["oauthAccount"] = fresh_oauth
+    if "userID" in fresh_standard:
+        merged["userID"] = fresh_standard["userID"]
+    return merged
 
-    Used by the "Sync now" button: the user has just enabled a new target and
-    wants to backfill it immediately so a fresh ``claude`` invocation reads
-    the right account, instead of waiting until the next switch.
 
-    Reads the active config dir from inside the credential lock so a
-    concurrent switch cannot race with us choosing the wrong dir.  Returns
-    the same summary shape as ``activate_account_config``.
+def _rewrite_claude_json_identity(credentials: dict) -> None:
+    """Replace the oauthAccount + userID keys in ``~/.claude/.claude.json``,
+    preserving every other key.  Creates the file (and parent dir) if missing."""
+    data = _load_json_safe(_CLAUDE_JSON_PATH)
+    oauth_account, user_id = _extract_identity(credentials)
+    if oauth_account is not None:
+        data["oauthAccount"] = oauth_account
+    if user_id is not None:
+        data["userID"] = user_id
+    _atomic_write_json(_CLAUDE_JSON_PATH, data)
+
+
+# ── Login / wipe helpers ──────────────────────────────────────────────────
+
+
+def save_new_vault_account(
+    email: str,
+    oauth_tokens: dict,
+    oauth_account: dict,
+    user_id: str | None,
+) -> bool:
+    """Write a freshly-minted account (new or re-login) into the vault.
+
+    ``oauth_tokens`` is the ``claudeAiOauth`` dict the CLI wrote to the
+    scratch Keychain entry.  ``oauth_account`` + ``user_id`` come from the
+    scratch ``.claude.json`` file.  Combines all three into the canonical
+    vault blob shape.
     """
-    from .credential_provider import _credential_lock  # local import avoids cycle
-
-    with _credential_lock:
-        pointer = get_active_config_dir_pointer()
-        if not pointer or not os.path.isdir(pointer):
-            return {
-                "mirror": {
-                    "written": [],
-                    "skipped": [],
-                    "errors": [
-                        "no active account — switch to an account first, then sync"
-                    ],
-                },
-                "keychain_written": False,
-                "system_default_enabled": False,
-            }
-        return _activate_account_config_locked(
-            pointer, list(enabled_credential_targets or [])
-        )
+    blob: dict = {"claudeAiOauth": oauth_tokens}
+    if isinstance(oauth_account, dict):
+        blob["oauthAccount"] = oauth_account
+    if user_id:
+        blob["userID"] = user_id
+    return cp.write_vault(email, blob)
 
 
-# ── Manual refresh ─────────────────────────────────────────────────────────────
-
-# Per-config-dir async locks serializing concurrent force-refresh callers.
-# Anthropic rotates refresh_tokens on every /oauth/token call and the old one
-# immediately 404s on reuse, so two concurrent force-refreshes would race:
-# the first rotates the stored token, the second — still holding the old one
-# in memory — fails and (without this lock) would mark the now-fresh
-# credentials stale.  Safe without a threading guard because all callers are
-# dispatched on the FastAPI event-loop thread; the dict get + assign runs
-# atomically between awaits.
-_force_refresh_locks: dict[str, asyncio.Lock] = {}
-
-
-def _get_force_refresh_lock(config_dir: str) -> asyncio.Lock:
-    lock = _force_refresh_locks.get(config_dir)
-    if lock is None:
-        lock = asyncio.Lock()
-        _force_refresh_locks[config_dir] = lock
-    return lock
-
-
-async def force_refresh_config_dir(config_dir: str) -> dict:
-    """Force-refresh OAuth tokens for ``config_dir`` and persist the new pair.
-
-    Intended for the "CCSwitch enabled, Claude Code not running" case where
-    the user explicitly asks us to refresh an account whose access token has
-    expired.  Under the active-ownership model the poll loop never refreshes
-    the active account by itself — this endpoint is the escape hatch.
-
-    Caller's responsibility: only call this when you are confident no other
-    process (e.g., a running Claude Code CLI) is about to refresh the same
-    refresh token.  The button in the UI is surfaced only while the active
-    card is in the ``waiting_for_cli`` soft state, so the user has already
-    acknowledged no CLI is running.
-
-    Returns the freshly-read ``token_info`` dict (including the new
-    ``token_expires_at``) on success.  Raises:
-
-    * ``ValueError`` — no refresh token stored for this config dir.  The
-      router maps this to ``409`` (user must re-login).
-    * ``RuntimeError`` — upstream responded 200 but without an
-      ``access_token`` field.  Mapped to ``502`` (upstream bug, retryable).
-    * ``httpx.HTTPStatusError`` — upstream 4xx/5xx.  The router maps 400/401
-      to ``409`` + stale_reason; everything else is ``502``.
-    * Any other exception surfaces untouched.
-
-    Concurrency: acquires a per-``config_dir`` ``asyncio.Lock`` across the
-    full read → HTTP → Keychain-write sequence so two simultaneous callers
-    cannot burn the same refresh_token.  The underlying Keychain write still
-    uses ``_credential_lock`` inside ``save_refreshed_token``.
+def delete_account_everywhere(email: str) -> None:
+    """Remove an account's credentials from the vault.  If the account is
+    currently active, also clear the standard entry and the identity file.
     """
-    from . import anthropic_api  # local import avoids cycle
+    with cp._credential_lock:
+        cp.delete_vault(email)
+        if get_active_email() == email:
+            cp.delete_standard()
+            data = _load_json_safe(_CLAUDE_JSON_PATH)
+            data.pop("oauthAccount", None)
+            data.pop("userID", None)
+            try:
+                _atomic_write_json(_CLAUDE_JSON_PATH, data)
+            except Exception as e:
+                logger.warning(
+                    "Failed to strip oauthAccount from %s: %s",
+                    _CLAUDE_JSON_PATH, e,
+                )
+            try:
+                os.unlink(_CREDENTIALS_JSON_PATH)
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                logger.debug(
+                    "Failed to remove %s: %s", _CREDENTIALS_JSON_PATH, e
+                )
 
-    async with _get_force_refresh_lock(config_dir):
-        refresh_token = await asyncio.to_thread(
-            get_refresh_token_from_config_dir, config_dir
+
+# ── Startup integrity check (§9.1) ────────────────────────────────────────
+
+
+def startup_integrity_check() -> None:
+    """Reconcile a crashed-mid-swap state on startup.
+
+    If ``~/.claude/.claude.json``'s active email disagrees with the
+    standard Keychain entry's ``oauthAccount.emailAddress`` (when both
+    are readable), rewrite the identity file to match the Keychain — the
+    Keychain is the later write in the swap sequence, so it wins.
+
+    Logs a prominent warning if a mismatch is detected.  Does nothing
+    when either side is empty or when they agree.
+    """
+    identity_email = get_active_email()
+    standard = cp.read_standard()
+    standard_email = email_of_credentials(standard)
+
+    if not standard_email:
+        return  # Standard entry has no identity metadata — nothing to reconcile.
+
+    if not identity_email:
+        # Identity file lacks an oauthAccount but the Keychain has one —
+        # most likely a fresh install where the user ran `claude login`
+        # before opening the CCSwitch dashboard.  Mirror the identity in.
+        logger.info(
+            "Startup: identity file missing oauthAccount; seeding from "
+            "standard Keychain entry (email=%s)",
+            standard_email,
         )
-        if not refresh_token:
-            raise ValueError("No refresh token stored for this account — re-login required")
+        try:
+            _rewrite_claude_json_identity(standard)
+        except Exception as e:
+            logger.warning("Startup identity seed failed: %s", e)
+        return
 
-        resp = await anthropic_api.refresh_access_token(refresh_token)
-        new_token = resp.get("access_token")
-        if not new_token:
-            raise RuntimeError("Refresh response missing access_token")
-
-        expires_in = resp.get("expires_in")
-        new_expires_at_ms = (
-            int(time.time() * 1000) + int(expires_in) * 1000 if expires_in else None
+    if identity_email != standard_email:
+        logger.warning(
+            "Startup integrity: ~/.claude/.claude.json says %s but "
+            "standard Keychain entry holds %s — reconciling to Keychain",
+            identity_email, standard_email,
         )
-        new_refresh = resp.get("refresh_token")
-
-        await asyncio.to_thread(
-            save_refreshed_token, config_dir, new_token,
-            new_expires_at_ms, new_refresh,
-        )
-        logger.info("Force-refreshed access token for %s", config_dir)
-
-        return await asyncio.to_thread(get_token_info, config_dir)
+        try:
+            _rewrite_claude_json_identity(standard)
+            _atomic_write_json(_CREDENTIALS_JSON_PATH, standard)
+        except Exception as e:
+            logger.warning("Startup integrity reconcile failed: %s", e)
 
 
-# ── Usage helpers ──────────────────────────────────────────────────────────────
+# ── Usage helpers (unchanged from old service) ────────────────────────────
+
 
 def build_usage(usage_raw: dict, token_info: dict) -> "UsageData | None":
-    """Convert a raw nested usage cache entry + token_info dict into a flat
-    UsageData.  Public wrapper around UsageData.from_raw so callers outside
-    the routers package can access it without importing schemas directly."""
+    """Convert a raw usage cache entry + token_info into a flat UsageData.
+    Public wrapper around UsageData.from_raw so callers outside routers can
+    use it without importing schemas directly."""
     return UsageData.from_raw(usage_raw, token_info)
 
 
 async def build_ws_snapshot(db) -> list[dict]:
-    """Build the initial WS snapshot from cache + DB id map.
+    """Build the initial WebSocket snapshot for a freshly connected client.
 
-    Used by the /ws endpoint to send the full state to a freshly connected
-    client without duplicating the cache → UsageData flattening logic.
-
-    Carries ``waiting_for_cli`` and ``stale_reason`` so a reconnecting tab
-    does not flash a healthy card for up to one poll cycle when either flag
-    is active — see Phase 3 review notes (build_ws_snapshot used to drop
-    both and each reconnect momentarily rendered every waiting card as
-    healthy until the next usage_updated broadcast arrived).
-
-    The ``waiting_for_cli`` field is gated by ``is_active`` — matching the
-    defense-in-depth guard in ``list_accounts`` — so a stale True that
-    leaked past a ``clear_waiting`` call cannot render a waiting banner on
-    a non-active card over WebSocket either.
+    Returns a list of dicts shaped like the ``usage_updated`` broadcast
+    entries so the client can render full state without waiting for the
+    next poll cycle.
     """
     from . import account_queries as aq
     from ..cache import cache as _cache
@@ -522,12 +404,9 @@ async def build_ws_snapshot(db) -> list[dict]:
     if not cache_snapshot:
         return []
     id_map = await aq.get_email_to_id_map(db)
-    # Pull stale_reason for every referenced email in one shot so the
-    # snapshot stays aligned with the DB.  A freshly reconnecting tab relies
-    # on this to render stale banners without waiting for the next poll.
     result = await db.execute(_select(_Account.email, _Account.stale_reason))
     stale_by_email = {email: reason for email, reason in result.all()}
-    active_email = await get_active_email_async()
+
     snapshot = []
     for email, usage in cache_snapshot.items():
         acct_id = id_map.get(email)
@@ -535,21 +414,11 @@ async def build_ws_snapshot(db) -> list[dict]:
             continue
         token_info = await _cache.get_token_info_async(email) or {}
         flat = build_usage(usage, token_info)
-        # Stale always wins over waiting — matching the frontend's isWaiting
-        # derivation in ``accounts.js`` (``isWaiting = !isStale && …``).  A
-        # freshly-reconnecting tab would otherwise briefly flash a blue
-        # waiting banner on a red-stale card before the next render.
-        waiting = (
-            email == active_email
-            and not stale_by_email.get(email)
-            and await _cache.is_waiting_async(email)
-        )
         snapshot.append({
             "id": acct_id,
             "email": email,
             "usage": flat.model_dump() if flat else {},
             "error": usage.get("error"),
-            "waiting_for_cli": waiting,
             "stale_reason": stale_by_email.get(email),
         })
     return snapshot

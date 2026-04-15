@@ -65,11 +65,6 @@ class UsageData(BaseModel):
 class AccountWithUsage(AccountOut):
     usage: Optional[UsageData] = None
     is_active: bool = False
-    # Active account's token expired and the poll loop refuses to refresh
-    # (active-ownership model — Claude Code CLI owns that lifecycle).  The
-    # dashboard surfaces a "waiting for CLI" state + a "Force refresh"
-    # button only while this flag is true and no stale_reason is set.
-    waiting_for_cli: bool = False
     model_config = {"from_attributes": True}
 
 
@@ -77,7 +72,6 @@ class AccountWithUsage(AccountOut):
 
 class LoginSessionOut(BaseModel):
     session_id: str
-    config_dir: str
     instructions: str
 
 
@@ -133,34 +127,7 @@ class SettingUpdate(BaseModel):
     value: str
 
 
-# ── Settings (response) ──────────────────────────────────────────────────────
-
-class ShellStatus(BaseModel):
-    active_file_exists: bool
-    shell_configured: bool
-
-
-class SetupShellResult(BaseModel):
-    results: dict[str, str]
-
-
 # ── Switch log (count) ────────────────────────────────────────────────────────
 
 class LogCount(BaseModel):
     total: int
-
-
-# ── Credential targets (auto-discovered .claude.json mirror list) ─────────────
-
-class CredentialTargetOut(BaseModel):
-    path: str
-    canonical: str
-    label: str
-    exists: bool
-    current_email: Optional[str] = None
-    enabled: bool
-
-
-class CredentialTargetUpdate(BaseModel):
-    canonical: str
-    enabled: bool

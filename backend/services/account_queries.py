@@ -45,7 +45,6 @@ async def get_email_to_id_map(db: AsyncSession) -> dict[str, int]:
 
 async def save_verified_account(
     email: str,
-    config_dir: str,
     threshold_pct: float,
     db: AsyncSession,
 ) -> Account | None:
@@ -63,7 +62,6 @@ async def save_verified_account(
 
     account = Account(
         email=email,
-        config_dir=config_dir,
         threshold_pct=threshold_pct,
         priority=(max_prio + 1) if max_prio is not None else 0,
     )

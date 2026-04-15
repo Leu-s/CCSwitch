@@ -5,22 +5,23 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..cache import cache
 from ..models import Account, SwitchLog
 from ..ws import WebSocketManager
-from . import account_service as ac
 from . import account_queries as aq
-from . import credential_targets as ct
+from . import account_service as ac
 from . import settings_service as ss
 from . import tmux_service
-from ..cache import cache
+
 
 logger = logging.getLogger(__name__)
 
-# Serializes every call to perform_switch.  activate_account_config touches
-# several shared artefacts (enabled mirror targets, legacy Keychain,
-# ~/.ccswitch/active) that must move together — two concurrent switches
-# can interleave and leave the system with one account's oauthAccount in one
-# file and a different account's Keychain entry.
+# Serializes every call to perform_switch.  swap_to_account touches several
+# shared Keychain entries + the identity file, so two concurrent switches
+# could interleave and leave one account's oauthAccount paired with another
+# account's tokens.  The underlying credential lock prevents intra-thread
+# interleaving but this asyncio lock also serializes the DB write + broadcast
+# so clients see a clean "A → B" event instead of a partial overlap.
 _switch_lock = asyncio.Lock()
 
 
@@ -31,18 +32,8 @@ async def get_next_account(current_email: str, db: AsyncSession) -> Account | No
     Filtering order:
       1. DB-level: enabled, not stale, not the current account.
       2. Cache-level: skip candidates whose last probe was rate-limited
-         (``rate_limited=True``) or whose recorded five-hour utilization is
-         already at or above their own ``threshold_pct``.
-
-    Rationale: switching to an account that is itself already exhausted
-    just causes another switch on the next poll cycle — or worse, leaves
-    the user on a non-working account until the next poll.  Candidates
-    with NO cached usage data are kept in the pool (benefit of the doubt
-    for newly-added or never-probed accounts).
-
-    Falls back to ``None`` if every eligible candidate is exhausted; the
-    caller broadcasts an error so the user knows all accounts are
-    saturated instead of silently picking a bad one.
+         or whose recorded five-hour utilization is already at or above
+         their own ``threshold_pct``.
     """
     result = await db.execute(
         select(Account)
@@ -60,8 +51,7 @@ async def get_next_account(current_email: str, db: AsyncSession) -> Account | No
             return candidate
         if usage.get("rate_limited"):
             logger.debug(
-                "Skipping %s: last probe rate-limited",
-                candidate.email,
+                "Skipping %s: last probe rate-limited", candidate.email
             )
             continue
         five_hour_pct = (usage.get("five_hour") or {}).get("utilization", 0) or 0
@@ -81,10 +71,8 @@ async def switch_if_active_disabled(
     db: AsyncSession,
     ws: WebSocketManager,
 ) -> None:
-    """
-    If the given account is the currently active account, switch away from it.
-    Called when an account is disabled via the API.
-    """
+    """If ``account`` is the currently active one, swap away from it.
+    Called when an account is disabled via the API."""
     if account.email != await ac.get_active_email_async():
         return
     service_enabled = await ss.get_bool("service_enabled", False, db)
@@ -93,16 +81,6 @@ async def switch_if_active_disabled(
     next_acc = await get_next_account(account.email, db)
     if next_acc:
         await perform_switch(next_acc, "manual", db, ws)
-
-
-async def perform_sync_to_targets(db: AsyncSession) -> dict:
-    """Re-mirror the active account's identity into every enabled credential
-    target.  Acquires ``_switch_lock`` so the sync cannot interleave with a
-    concurrent ``perform_switch`` and read a half-updated pointer.
-    """
-    async with _switch_lock:
-        enabled = await ct.enabled_canonical_paths(db)
-        return await asyncio.to_thread(ac.sync_active_to_targets, enabled)
 
 
 async def perform_switch(
@@ -114,27 +92,19 @@ async def perform_switch(
     async with _switch_lock:
         current_email = await ac.get_active_email_async()
 
-        # Fetch the user-chosen mirror targets while we hold the lock so two
-        # switches never observe different enabled sets and disagree about
-        # which system files to touch.
-        enabled_targets = await ct.enabled_canonical_paths(db)
+        try:
+            summary = await asyncio.to_thread(ac.swap_to_account, target.email)
+        except ac.SwapError as e:
+            logger.error("Swap to %s failed: %s", target.email, e)
+            try:
+                await ws.broadcast({
+                    "type": "error",
+                    "message": f"Swap to {target.email} failed: {e}",
+                })
+            except Exception as _bc_err:
+                logger.warning("WS broadcast failed: %s", _bc_err)
+            return
 
-        summary = await asyncio.to_thread(
-            ac.activate_account_config, target.config_dir, enabled_targets
-        )
-
-        # Clear any stale "waiting for CLI" flag from both sides of the
-        # switch.  The outgoing account is no longer active so CCSwitch
-        # will now refresh it directly on its next poll cycle — the old
-        # waiting badge is meaningless.  The incoming account gets a clean
-        # slate: CCSwitch begins deferring to Claude Code CLI for its
-        # refresh lifecycle starting now, and the next probe decides
-        # whether waiting should be re-entered.
-        await cache.clear_waiting(target.email)
-        if current_email and current_email != target.email:
-            await cache.clear_waiting(current_email)
-
-        # Log the switch
         from_acc = None
         if current_email:
             from_acc = await aq.get_account_by_email(current_email, db)
@@ -154,7 +124,7 @@ async def perform_switch(
                 "from": current_email,
                 "to": target.email,
                 "reason": reason,
-                "mirror": (summary or {}).get("mirror", {}),
+                "summary": summary,
             })
         except Exception as _bc_err:
             logger.warning("WS broadcast failed: %s", _bc_err)
@@ -176,16 +146,16 @@ async def maybe_auto_switch(db, ws: WebSocketManager) -> None:
     if not service_enabled:
         return
 
-    current_email = await asyncio.to_thread(ac.get_active_email)
+    current_email = await ac.get_active_email_async()
     if not current_email:
         return
 
-    # Find the current account to get its per-account threshold
     current_account = await aq.get_account_by_email(current_email, db)
     if not current_account:
         return
 
-    # Stale fast-path: if current account is dead, switch immediately regardless of usage
+    # Stale fast-path: if current account is dead, switch immediately
+    # regardless of usage.
     if current_account.stale_reason:
         next_account = await get_next_account(current_email, db)
         if next_account:
@@ -212,12 +182,6 @@ async def maybe_auto_switch(db, ws: WebSocketManager) -> None:
     threshold = current_account.threshold_pct
     is_rate_limited = bool(current_usage.get("rate_limited"))
 
-    # Two ways to trigger a switch:
-    #   1. Last good probe shows utilization above the per-account threshold.
-    #   2. Last probe came back 429 (or otherwise rate-limited).  In that
-    #      case we may have ZERO recent utilization data — but we still
-    #      know the current account is being throttled and we should move
-    #      on instead of waiting for backoff to expire.
     if is_rate_limited or five_hour_pct >= threshold:
         next_account = await get_next_account(current_email, db)
         if next_account:
