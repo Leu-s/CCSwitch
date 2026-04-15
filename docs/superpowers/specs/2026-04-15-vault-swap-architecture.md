@@ -20,7 +20,7 @@ N cmux panes ─ all share ONE Claude Code identity
       │
       ▼  (rate-limit hit on active account)
       │
- swap credentials in place (Keychain + ~/.claude/.claude.json)
+ swap credentials in place (Keychain + ~/.claude.json)
       │
       ▼  (nudge each pane)
       │
@@ -67,7 +67,7 @@ the other.
 ### 2.3 Refresh ownership, by construction
 
 - **Active account** (its email matches `oauthAccount.emailAddress` in
-  `~/.claude/.claude.json`): CCSwitch **never** refreshes. The CLI owns
+  `~/.claude.json`): CCSwitch **never** refreshes. The CLI owns
   the refresh lifecycle. CLI↔CLI coordination is handled upstream by
   Claude Code 2.1.101+'s intra-CLI file lock.
 - **Vault accounts** (every other account): CCSwitch is the **sole**
@@ -108,8 +108,8 @@ restart.
    MCP state, user prefs). If the file does not exist, create it with
    mode 0o600 containing only those two keys. This is the file Claude
    Code CLI consults on startup when `CLAUDE_CONFIG_DIR` is unset;
-   writing to `~/.claude/.claude.json` instead leaves the CLI's
-   `/stats` display stuck on the pre-swap identity.
+   writing to the NESTED `~/.claude/.claude.json` instead leaves the
+   CLI's `/stats` display stuck on the pre-swap identity.
 5. **File fallback.** Atomically rewrite `~/.claude/.credentials.json`
    with the new tokens at mode 0o600. This is a belt-and-braces mirror
    against any Claude Code build that falls back to the file (Linux,
@@ -124,7 +124,7 @@ the swap is visibly complete (all five steps landed) or the state is
 identifiable as mid-swap (see §9.1 for the startup reconciliation). In
 particular, the standard Keychain entry is written **after** the vault
 checkpoint and **before** the identity file, so the invariant
-"`~/.claude/.claude.json`'s email matches the standard entry's owner"
+"`~/.claude.json`'s email matches the standard entry's owner"
 is broken only during steps 3–4 — a window measured in tens of
 milliseconds — and is observable on restart.
 
@@ -187,7 +187,7 @@ active account.
 ### 2.7 First-account activation
 
 The very first account added becomes active immediately: its vault
-entry is copied to `Claude Code-credentials`, and `~/.claude/.claude.json`
+entry is copied to `Claude Code-credentials`, and `~/.claude.json`
 is updated with its `oauthAccount`. After that, every add is an
 inactive-by-default vault entry — the user activates it via manual
 switch or auto-switch picks it up.
@@ -196,7 +196,7 @@ switch or auto-switch picks it up.
 
 - **No `~/.claude/` directory.** Create it with `os.makedirs(path,
   mode=0o700, exist_ok=True)` before step 4.
-- **No `~/.claude/.claude.json` file.** Step 4 writes a minimal file
+- **No `~/.claude.json` file.** Step 4 writes a minimal file
   containing only `oauthAccount` and `userID` — the `_load_json_safe`
   helper already returns `{}` on a missing file, and the atomic
   rewrite then creates the target.
@@ -272,7 +272,7 @@ backup to `~/.ccswitch-backup-2026-04-15.json` containing:
 - the contents of every hashed `Claude Code-credentials-<hash>`
   Keychain entry the migration will touch, base64-encoded;
 - the contents of `~/.ccswitch/active`, if present;
-- the contents of `~/.claude/.claude.json`, if present.
+- the contents of `~/.claude.json`, if present.
 
 The backup is a one-shot safety net — the user can manually restore
 credentials from it if something catastrophic happens. It is not
@@ -299,12 +299,12 @@ After the backup is written:
 2. **Determine active.** Read `~/.ccswitch/active` if present to get
    the pointer target; map it back to an email via the DB. If the
    pointer is absent or unmappable, fall back to
-   `~/.claude/.claude.json`'s `oauthAccount.emailAddress`. If both are
+   `~/.claude.json`'s `oauthAccount.emailAddress`. If both are
    absent, leave the active state empty — the user picks one on first
    open.
 3. **Promote active.** Copy the active account's vault entry into
    `Claude Code-credentials` (idempotent — the vault write is the
-   source of truth). Update `~/.claude/.claude.json` with the active
+   source of truth). Update `~/.claude.json` with the active
    account's `oauthAccount` + `userID`, creating the file if it does
    not exist. Atomically rewrite `~/.claude/.credentials.json` with
    the active tokens.
@@ -356,7 +356,7 @@ step 0 by hand.
   - Rewrite: `activate_account_config` →
     `swap_to_account(target_email)`; `_activate_account_config_locked`
     → `_swap_to_account_locked`; `get_active_email` (reads
-    `~/.claude/.claude.json` directly); `build_ws_snapshot` (drops
+    `~/.claude.json` directly); `build_ws_snapshot` (drops
     `waiting_for_cli` and `config_dir`).
 - `backend/services/credential_provider.py`
   - Delete: `active_dir_pointer_path`, `_keychain_service_name`,
@@ -419,7 +419,7 @@ step 0 by hand.
     always suspect and untested.
 - `backend/routers/service.py`
   - Rewrite `enable_service`: if the current active email (read from
-    `~/.claude/.claude.json`) is already present in the DB as an
+    `~/.claude.json`) is already present in the DB as an
     enabled account, set `service_enabled = true` and return — do NOT
     swap. Only if no valid active account exists is the default (or
     first) enabled account activated. The current code's backup /
@@ -530,7 +530,7 @@ the observed workflow.
 - No "waiting for CLI" UI state. No force-refresh button. No soft
   stale reasons.
 - No pointer file (`~/.ccswitch/active`). Active account is read from
-  `~/.claude/.claude.json`.
+  `~/.claude.json`.
 - Migration is one-shot and destructive; burned-token accounts are
   re-logged by the user after deploy.
 
@@ -547,19 +547,19 @@ the architecture but must be handled correctly by the implementation.
 Because steps 3 and 4 of the swap are separate Keychain + filesystem
 writes, a crash between them leaves a visible inconsistency: the
 standard Keychain entry holds account B's tokens, but
-`~/.claude/.claude.json` still names account A as the active
+`~/.claude.json` still names account A as the active
 `oauthAccount`. The CLI, if it runs in that window, reads the standard
 entry (getting B's tokens) but displays A's identity.
 
 On every startup, before any background task runs, CCSwitch performs
 a single integrity check:
 
-1. Read the active email from `~/.claude/.claude.json` — call it
+1. Read the active email from `~/.claude.json` — call it
    `identity_email`.
 2. Read the standard `Claude Code-credentials` entry — extract the
    `oauthAccount` subfield if present, compare its
    `emailAddress` to `identity_email`.
-3. If they disagree, rewrite `~/.claude/.claude.json` with the
+3. If they disagree, rewrite `~/.claude.json` with the
    standard entry's `oauthAccount` (the later of the two writes in a
    crashed swap). Log a warning with enough detail to investigate.
 

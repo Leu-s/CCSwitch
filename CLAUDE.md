@@ -79,7 +79,7 @@ backend/
                             + vault refresh.
     account_service.py      swap_to_account(email) — the 5-step atomic swap.
                             Also save_new_vault_account, delete_account_everywhere,
-                            get_active_email (reads ~/.claude/.claude.json),
+                            get_active_email (reads ~/.claude.json),
                             startup_integrity_check, build_ws_snapshot.
     account_queries.py      DB query helpers (get_by_id, get_by_email, email→id map,
                             save_verified_account).
@@ -144,7 +144,7 @@ tests/
    independent of the `service_enabled` master toggle, so the
    dashboard's rate-limit bars stay live even when auto-switching is
    off.  For each account:
-   - Active account (email matches `~/.claude/.claude.json`'s
+   - Active account (email matches `~/.claude.json`'s
      `oauthAccount.emailAddress`): read the access token from the
      standard Keychain entry, probe `/v1/messages`, store the result.
      **Never refresh.**
@@ -164,10 +164,13 @@ tests/
 4. After polling, `switcher.maybe_auto_switch` gates on
    `service_enabled`: if off it returns.  Otherwise, if the active
    account crossed its `threshold_pct` (or came back 429, or is
-   stale), it picks the next enabled non-stale account by priority,
-   calls `switcher.perform_switch`, then calls
-   `tmux_service.fire_nudge()`.
-5. Every outcome is broadcast over `/ws` so the SPA updates live.
+   stale), it picks the next enabled non-stale account by priority
+   and calls `switcher.perform_switch`.
+5. Every successful `perform_switch` — auto OR manual — writes a
+   `SwitchLog` row, broadcasts `account_switched` over `/ws`, and
+   then calls `tmux_service.fire_nudge()` on its tail so every
+   running `claude` pane matching a rate-limit stall pattern wakes
+   up on the new Keychain credentials.
 
 ## Account switching = one swap_to_account call
 
@@ -185,7 +188,7 @@ sequence under `credential_provider._credential_lock`:
 3. **Promote.** Write the incoming credentials to the standard
    Keychain entry.
 4. **Identity file.** Atomically rewrite **`~/.claude.json`** (at HOME
-   ROOT — *not* `~/.claude/.claude.json`) — replacing only
+   ROOT — *not* the nested `~/.claude/.claude.json`) — replacing only
    `oauthAccount` and `userID`, preserving every other key (projects,
    MCP state, user prefs).  Creates the file if it does not exist.
    This is the file Claude Code CLI consults on startup for its
@@ -195,14 +198,17 @@ sequence under `credential_provider._credential_lock`:
    that prefer the file over the Keychain.
 
 After the lock is released, `perform_switch` writes a `SwitchLog` row,
-broadcasts `account_switched`, and `maybe_auto_switch` (if it was the
-caller) fires the tmux nudge.
+broadcasts `account_switched`, and fires `tmux_service.fire_nudge()`
+on its tail — regardless of who called it.  Manual switches from the
+UI, auto-switches from `maybe_auto_switch`, disable-cascade switches
+from `switch_if_active_disabled`, and re-login post-verify swaps all
+nudge.
 
 ## Startup integrity check
 
 Because step 3 (standard Keychain write) and step 4 (identity file
 write) are separate operations, a crash between them leaves the
-standard entry holding account B's tokens while `~/.claude/.claude.json`
+standard entry holding account B's tokens while `~/.claude.json`
 still names account A.  The CLI, if it runs in that window, uses B's
 tokens but displays A's email.
 

@@ -85,7 +85,6 @@
 
   * { box-sizing: border-box; }
   .hidden { display: none !important; }
-  .text-danger { color: var(--danger-text); }
   html, body { margin: 0; padding: 0; }
   body {
     font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
@@ -502,6 +501,7 @@
   .btn.loading { position: relative; pointer-events: none; color: transparent; }
   .btn.loading::after { content: ""; position: absolute; width: 14px; height: 14px; border: 2px solid var(--border-strong); border-top-color: var(--on-accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulse { 50% { opacity: 0.35; } }
 
   /* ── Switch Log sidebar ─────────────────────────────────────────────────── */
   .sl-header {

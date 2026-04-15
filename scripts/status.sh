@@ -62,8 +62,9 @@ else
     echo -e "${YELLOW}  LaunchAgent not installed${NC} (run: ccswitch service install)"
 fi
 
-# 4. Active account (read from ~/.claude/.claude.json oauthAccount)
-CLAUDE_JSON="$HOME/.claude/.claude.json"
+# 4. Active account (read from ~/.claude.json oauthAccount — HOME root,
+#    not ~/.claude/.claude.json; that's where Claude Code CLI reads it from)
+CLAUDE_JSON="$HOME/.claude.json"
 if [[ -f "$CLAUDE_JSON" ]]; then
     EMAIL=$(CLAUDE_JSON="$CLAUDE_JSON" python3 -c "import json,os; d=json.load(open(os.environ['CLAUDE_JSON'])); print(d.get('oauthAccount',{}).get('emailAddress','unknown'))" 2>/dev/null || echo "unknown")
     if [[ "$EMAIL" != "unknown" && -n "$EMAIL" ]]; then
