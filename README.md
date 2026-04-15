@@ -25,7 +25,7 @@ If you've ever been deep in a Claude Code session and hit the 5-hour rate limit,
 
 ### How it feels
 
-You're refactoring a service. The dashboard sits in a tab. Around hour 4, the active account's usage bar turns amber. At 95 % the app silently activates your second account, and — if you enabled the **Wake tmux sessions** toggle in Settings — scans every tmux pane and sends your configured message (default `continue`) to any `claude` session that's stalled on a rate-limit notice. A toast tells you what just happened. Your build never stops.
+You're refactoring a service in 20 tmux panes, all running `claude`. Around hour 4, the active account's usage bar turns amber. At 95 % the app atomically swaps your credentials to the next enabled account and — because the **Wake tmux sessions** toggle is on — sends a single keystroke to every pane that's stalled on a rate-limit notice. Every pane wakes up on the new account and continues from wherever it was. A toast tells you what just happened. Your build never stops.
 
 > **macOS only** for the full credential-switching path (Keychain via `security` CLI). Linux falls back to file-only credentials.
 > **tmux required** for the Add-Account login flow; the post-switch nudge also uses tmux when enabled.
@@ -40,7 +40,6 @@ You're refactoring a service. The dashboard sits in a tab. Around hour 4, the ac
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Running](#running)
-- [Shell Integration](#shell-integration)
 - [Architecture](#architecture)
 - [Project Structure](#project-structure)
 - [CLI Reference](#cli-reference)
@@ -58,16 +57,12 @@ You're refactoring a service. The dashboard sits in a tab. Around hour 4, the ac
 
 - **Live usage monitoring** — polls `/v1/messages` rate-limit headers every 15 s while the dashboard is open, every 5 min otherwise
 - **Auto-switch** — when the active account's five-hour utilization reaches a configurable threshold (default 95 %), or a stale credential is detected, the next enabled account is activated automatically
-- **Active-ownership refresh model** — CCSwitch never refreshes the token of the currently-active account; Claude Code CLI owns that refresh lifecycle.  When the CLI isn't running and the active account's token has expired, the card shows a **Waiting for Claude Code** badge and a **Force refresh** button for the one-click escape hatch.  This removes the single-use-refresh-token race that used to brick an account if CCSwitch and the CLI hit `/oauth/token` simultaneously.
-- **Stale-account relogin** — if a refresh token is revoked or expires, the dashboard marks the account stale and offers a one-click re-login flow (opens a tmux pane with `claude`, verifies new credentials, clears `stale_reason`)
-- **Opt-in credential targets** — the dashboard auto-discovers every `.claude.json` location on the machine and lets you tick which ones the switcher should mirror into. Nothing outside the isolated account dirs is touched unless you explicitly opt in.
-- **Two switch modes per target**:
-  - *Identity-only mirror* — the default for any user-enabled target: only `oauthAccount` and `userID` are mirrored, no credentials leave the account dir
-  - *System default* (`~/.claude.json` or `~/.claude/.claude.json`) — additionally writes the legacy `Claude Code-credentials` Keychain entry and copies `.credentials.json` into `~/.claude/`, so a fresh `claude` invocation immediately uses the new account
-- **Shell integration** — a one-liner in `.zshrc`/`.bashrc` exports `CLAUDE_CONFIG_DIR` from `~/.ccswitch/active`, so every new terminal picks up the active account without a restart
+- **Keychain partition: zero refresh races by design** — CCSwitch stores every inactive account in a private `ccswitch-vault` Keychain namespace that the Claude Code CLI cannot see.  Active account lives in the standard `Claude Code-credentials` entry; the CLI owns its refresh lifecycle, CCSwitch never touches it.  CCSwitch is the sole refresher for vault accounts.  Different Keychain service name → no overlap → no single-use-refresh-token race possible.
+- **Atomic credential swap** — when the dashboard flips to a new account, a 5-step orchestrator moves credentials from vault → standard under a single lock, updates `~/.claude/.claude.json`, and rewrites the fallback `.credentials.json`.  Any crash between steps is reconciled on the next startup by the integrity check.
+- **Stale-account relogin** — if a refresh token is revoked or rotated by Anthropic, the dashboard marks the account stale and offers a one-click re-login flow (opens a tmux pane with `claude`, verifies new credentials, clears `stale_reason`)
 - **Real-time dashboard** — vanilla-JS single-page app; account cards, drag-to-reorder priority, per-account threshold slider, switch log; no build step required
-- **Optional tmux nudge** — opt-in toggle on the Settings page: after every account switch, scan every `tmux` pane and send a configurable message (default `continue`) to any pane whose recent output matches a rate-limit notice (`usage limit reached`, `rate_limit_error`, HTTP 429, …). Off by default.
-- **CLI** (`ccswitch`) — list/switch/enable/disable accounts, tail logs, manage the LaunchAgent, set up shell integration
+- **Optional tmux nudge** — opt-in toggle on the Settings page: after every account switch, scan every `tmux` pane and send a configurable message (default `continue`) to any pane whose recent output matches a Claude Code rate-limit notice. Off by default.
+- **CLI** (`ccswitch`) — list/switch/enable/disable accounts, tail logs, manage the LaunchAgent
 - **macOS LaunchAgent** — optional auto-start on login
 
 ---
@@ -149,9 +144,6 @@ All settings use the `CCSWITCH_` environment variable prefix. Copy `.env.example
 | `CCSWITCH_SERVER_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` to listen on all interfaces) |
 | `CCSWITCH_SERVER_PORT` | `41924` | HTTP server port |
 | `CCSWITCH_DATABASE_URL` | `sqlite+aiosqlite:///./ccswitch.db` | SQLite connection string (relative to working dir) |
-| `CCSWITCH_ACTIVE_CLAUDE_DIR` | `~/.claude` | System-wide Claude Code config dir |
-| `CCSWITCH_ACCOUNTS_BASE_DIR` | `~/.ccswitch-accounts` | Base dir for isolated per-account config dirs |
-| `CCSWITCH_STATE_DIR` | `~/.ccswitch` | Holds the `active` pointer file |
 | `CCSWITCH_POLL_INTERVAL_ACTIVE` | `15` | Poll interval (seconds) while browser tab is open |
 | `CCSWITCH_POLL_INTERVAL_IDLE` | `300` | Poll interval (seconds) with no active WebSocket clients |
 | `CCSWITCH_POLL_INTERVAL_MIN` | `120` | Minimum floor for the DB-overridable idle interval |
@@ -197,26 +189,6 @@ ccswitch log -n 100         # last 100 lines
 
 ---
 
-## Shell Integration
-
-To make new terminals automatically use the currently-active account, add this one-liner to `~/.zshrc` or `~/.bashrc`:
-
-```bash
-_d=$(cat ~/.ccswitch/active 2>/dev/null); [ -n "$_d" ] && export CLAUDE_CONFIG_DIR="$_d"; unset _d
-```
-
-At shell startup it reads `~/.ccswitch/active` (a pointer file updated on every account switch) and exports `CLAUDE_CONFIG_DIR` to the active account's isolated directory. Claude Code reads that variable and uses the right credentials.
-
-**Automated setup:**
-
-```bash
-ccswitch shell setup    # appends the block above to .zshrc and/or .bashrc
-```
-
-After a switch, existing terminals can re-source their rc file (`source ~/.zshrc`) or simply open a new tab.
-
----
-
 ## Architecture
 
 ```
@@ -229,34 +201,42 @@ After a switch, existing terminals can re-source their rc file (`source ~/.zshrc
                          ┌───────────────────────────┼───────────────────┐
                          ▼                           ▼                   ▼
                 ┌─────────────────┐      ┌─────────────────┐  ┌──────────────────┐
-                │ SQLite DB       │      │ Anthropic API   │  │ ~/.claude/       │
-                │ (accounts,      │      │ /v1/messages    │  │ ~/.ccswitch/ │
-                │  settings,      │      │ (headers only)  │  │ macOS Keychain   │
+                │ SQLite DB       │      │ Anthropic API   │  │ macOS Keychain   │
+                │ (accounts,      │      │ /v1/messages    │  │ + ~/.claude/     │
+                │  settings,      │      │ (headers only)  │  │                  │
                 │  switch_log)    │      └─────────────────┘  └──────────────────┘
                 └─────────────────┘
 ```
 
 ### How credentials are stored
 
-Each account lives in its own isolated config dir under `~/.ccswitch-accounts/account-<uuid>/`. Inside that dir Claude Code keeps `.claude.json` (config + identity), and on macOS it also writes a Keychain entry whose service name is `Claude Code-credentials-<sha256(config_dir)[:8]>` (the *hashed per-dir entry*). Those two files plus the per-dir Keychain entry are the source of truth for an account — the dashboard never overwrites them on a switch.
+Two Keychain namespaces, disjoint by service name:
 
-What a switch *does* touch is determined by the **credential targets** the user has enabled in the dashboard. A target is a canonical path to a `.claude.json` file (e.g. `~/.claude.json`, `~/.claude/.claude.json`, or any other location where Claude Code looks). The dashboard auto-discovers them and shows a checkbox per target.
+| Service                   | Account       | Owner     | Purpose                                     |
+|---                        |---            |---        |---                                           |
+| `Claude Code-credentials` | `$USER`       | Claude Code CLI | The live credentials the CLI reads on every API call.  CCSwitch writes this only during an account swap. |
+| `ccswitch-vault`          | account email | CCSwitch  | Private store for inactive accounts.  Invisible to the CLI (different service name).  CCSwitch is the sole refresher.  |
+
+Invariant: each account's `refresh_token` lives in exactly one Keychain entry at any instant.  A swap physically moves credentials between the two services.  The CLI cannot enumerate Keychain entries by owner — its lookups are targeted at the exact `Claude Code-credentials` service — so vault entries are race-free by construction.
 
 ### Data flow
 
-1. **Startup** — `init_db()` runs Alembic migrations (creates the DB on first run), seeds default settings, syncs `~/.ccswitch/active`, then spawns two background tasks: the poll loop and a login-session cleanup loop (reaps expired add-account sessions every 5 min).
+1. **Startup** — `init_db()` runs Alembic migrations (creates the DB on first run, or on upgrade performs the one-shot vault migration from the legacy per-account-dir layout).  Seeds default settings.  Waits for the login keychain to unlock (exponential backoff up to 5 minutes, for the LaunchAgent-at-boot case where FileVault delays unlock).  Runs a startup integrity check to reconcile any crashed-mid-swap state.  Spawns the poll loop and the login-session cleanup loop.
 
-2. **Poll cycle** — Every 15 s with active WebSocket clients, every 5 min when idle. Per account: reads the access token from the isolated config dir, refreshes it if expiring within 20 min — but only for *inactive* accounts. The currently-active account's refresh lifecycle is owned by Claude Code CLI (see **Active-ownership refresh model** in `CLAUDE.md`), so a poll never races the CLI on Anthropic's single-use `/oauth/token` endpoint. POSTs a near-empty request to `/v1/messages` purely to read the `anthropic-ratelimit-unified-*` response headers (five-hour and seven-day utilization + reset times). Accounts that return 429 enter per-account exponential backoff (120 s → 3600 s cap). Results are cached in memory and broadcast over WebSocket.
+2. **Poll cycle** — Every 15 s with active WebSocket clients, every 5 min when idle.  Per account:
+   - *Active account* — reads the access token from the standard Keychain entry, POSTs a near-empty request to `/v1/messages` to read the `anthropic-ratelimit-unified-*` response headers, stores the result.  **Never refreshes.**  The CLI owns the active account's refresh lifecycle.
+   - *Vault account* — reads the access token from `ccswitch-vault / email`.  If it's within 20 minutes of expiry, CCSwitch refreshes via Anthropic's `/oauth/token` endpoint and persists the rotated token back into the vault entry.  Probes and stores.  The CLI cannot see this entry, so the refresh is race-free.
+   On a probe 401 for the active account, CCSwitch fires a one-shot tmux nudge to wake any sleeping `claude` pane (which will refresh the standard entry on its next API call) and returns the last-known cached usage.  On sleep/wake detection (monotonic gap > 5 min), a 0–30 s random stagger runs before the refresh burst to avoid tripping Anthropic's refresh-endpoint rate limit.  Accounts that return 429 enter per-account exponential backoff (120 s → 3600 s cap).
 
-3. **Auto-switch** — If the active account's five-hour utilization ≥ `threshold_pct` (or it returned 429, or has a `stale_reason`), `perform_switch()` runs `activate_account_config()` under a credential lock (so a concurrent token refresh cannot interleave). For the chosen account it:
-   - **Mirrors `oauthAccount` + `userID`** from the account's `.claude.json` into every user-enabled credential target — identity only, no tokens
-   - **If a system-default target is enabled** (`~/.claude.json` or `~/.claude/.claude.json`), additionally writes the legacy `Claude Code-credentials` Keychain entry, cleans stale legacy Keychain entries left by older Claude Code versions, and copies `.credentials.json` into `~/.claude/` as a plaintext fallback
-   - **Updates `~/.ccswitch/active`** *after* all credential operations succeed (so the pointer is never advanced to a half-installed state)
-   - Logs the event in `switch_log` and broadcasts `account_switched` over WebSocket
+3. **Auto-switch** — If the active account's five-hour utilization ≥ `threshold_pct` (or it returned 429, or has a `stale_reason`), `perform_switch()` calls `swap_to_account(email)` under a single asyncio lock:
+   1. Read `ccswitch-vault / target_email` — the incoming credentials.
+   2. Read the standard `Claude Code-credentials` entry immediately before the overwrite, and write those tokens into the vault entry for the *outgoing* email (preserving any last-moment CLI rotation).
+   3. Write the incoming credentials to the standard entry.
+   4. Atomically rewrite `~/.claude/.claude.json` — replace only `oauthAccount` + `userID`, preserve every other key (projects, MCP state, user prefs).
+   5. Atomically rewrite `~/.claude/.credentials.json` as a file-fallback mirror.
+   Log `switch_log`, broadcast `account_switched`, fire the tmux nudge so every running `claude` pane wakes up on the new credentials.
 
-4. **Shell pickup** — New terminals sourcing the rc snippet read `~/.ccswitch/active` and export `CLAUDE_CONFIG_DIR`; existing `claude` processes are unaffected until restarted.
-
-> **Note on the hashed per-dir Keychain entry:** the switcher does **not** rewrite it. It is owned by the account and updated only by `save_refreshed_token` when that account's own access token is refreshed. This is intentional — each account keeps its own credentials in its own slot, and a switch only touches the *system-default* entry that fresh `claude` invocations look for.
+4. **Running panes wake up** — Claude Code re-reads the Keychain after each nudge; one `continue` keystroke per pane is enough to pick up the new account and resume from where it was.  Panes that were idle at the moment of the swap just use the fresh credentials on their next API call.
 
 ---
 
@@ -272,20 +252,18 @@ What a switch *does* touch is determined by the **credential targets** the user 
 │   ├── cache.py                       # Thread-safe in-memory usage + token_info cache
 │   ├── auth.py                        # Optional Bearer token middleware
 │   ├── ws.py                          # WebSocketManager (broadcast, replay_since, seq stamping)
-│   ├── background.py                  # Per-account poll, token refresh, rate-limit backoff, auto-switch
+│   ├── background.py                  # Per-account poll + vault refresh + auto-switch
 │   ├── routers/
 │   │   ├── accounts.py                # /api/accounts CRUD + login flow (add + relogin)
 │   │   ├── service.py                 # /api/service enable/disable/default-account
-│   │   ├── settings.py                # /api/settings + shell snippet
-│   │   └── credential_targets.py      # /api/credential-targets list/rescan/toggle/sync
+│   │   └── settings.py                # /api/settings tmux nudge + poll interval
 │   └── services/
-│       ├── account_service.py         # Account lifecycle, activation, backup/restore
+│       ├── account_service.py         # swap_to_account orchestrator + vault account lifecycle
 │       ├── account_queries.py         # DB query helpers
-│       ├── login_session_service.py   # Add-account + relogin sessions (tmux, auto-expiry)
-│       ├── credential_provider.py     # Keychain read/write, token get/save/wipe, _credential_lock
-│       ├── credential_targets.py      # Auto-discover .claude.json targets + enable state
+│       ├── login_session_service.py   # Scratch-dir login sessions (add + relogin)
+│       ├── credential_provider.py     # Vault + standard Keychain helpers, _credential_lock
 │       ├── anthropic_api.py           # probe_usage() + refresh_access_token()
-│       ├── switcher.py                # get_next_account, perform_switch, maybe_auto_switch, relogin helpers
+│       ├── switcher.py                # get_next_account, perform_switch, maybe_auto_switch
 │       ├── settings_service.py        # Typed get/set for Setting DB rows
 │       └── tmux_service.py            # tmux pane ops + wake_stalled_sessions + fire_nudge
 ├── frontend/
@@ -304,8 +282,7 @@ What a switch *does* touch is determined by the **credential targets** the user 
 │           ├── accounts.js            # Account cards, drag-reorder, threshold slider, default-account selector
 │           ├── service.js             # Master-switch button (service enable/disable)
 │           ├── log.js                 # Switch log + pagination
-│           ├── login.js               # Add-account modal (multi-step tmux login)
-│           ├── credential_targets.js  # Settings-page Credential Targets panel
+│           ├── login.js               # Add-account + re-login modal (multi-step tmux login)
 │           └── tmux_nudge.js          # Settings-page Wake Tmux Sessions block
 ├── alembic/                           # Database migrations (run on startup)
 │   └── versions/                      # Alembic-backed schema migrations
@@ -329,8 +306,7 @@ ccswitch list                            # List all accounts with active marker 
 ccswitch switch <email>                  # Switch active account immediately
 ccswitch enable <email>                  # Include account in auto-switch rotation
 ccswitch disable <email>                 # Exclude account from auto-switch rotation
-ccswitch status                          # Server health, shell config, active account
-ccswitch shell setup                     # Append CLAUDE_CONFIG_DIR one-liner to rc files
+ccswitch status                          # Server health, active account
 ccswitch server start                    # Launch server in a new tmux window
 ccswitch server stop                     # Stop server (and unload LaunchAgent if running)
 ccswitch log [-f] [-n N]                # View server logs (-f: follow, -n: line count)
@@ -357,23 +333,16 @@ All `/api/*` routes require `Authorization: Bearer <token>` when `CCSWITCH_API_T
 | `PATCH` | `/api/accounts/{id}` | Update account (`enabled`, `threshold_pct`, `priority`) |
 | `DELETE` | `/api/accounts/{id}` | Delete account |
 | `POST` | `/api/accounts/{id}/switch` | Manual switch to account |
-| `POST` | `/api/accounts/{id}/force-refresh` | Force-refresh OAuth tokens when the active account is waiting for Claude Code (active-ownership escape hatch) |
 | `POST` | `/api/accounts/{id}/relogin` | Open tmux pane to re-authenticate a stale account |
 | `POST` | `/api/accounts/{id}/relogin/verify` | Verify re-login completed, clear `stale_reason` |
 | `GET` | `/api/accounts/log` | Paginated switch log |
 | `GET` | `/api/accounts/log/count` | Total switch log entry count |
 | `GET` | `/api/service` | Service status (`enabled`, `active_email`, `default_account_id`) |
-| `POST` | `/api/service/enable` | Enable auto-switching, activate default or first account |
-| `POST` | `/api/service/disable` | Disable and restore original credentials |
+| `POST` | `/api/service/enable` | Enable auto-switching (preserves existing active account when valid) |
+| `POST` | `/api/service/disable` | Disable auto-switching |
 | `PATCH` | `/api/service/default-account` | Set starting account for enable |
 | `GET` | `/api/settings` | List settings |
 | `PATCH` | `/api/settings/{key}` | Update a setting (`usage_poll_interval_seconds`, `tmux_nudge_*`) |
-| `GET` | `/api/settings/shell-status` | Check shell integration and active pointer status |
-| `POST` | `/api/settings/setup-shell` | Append shell snippet to `.zshrc` / `.bashrc` |
-| `GET` | `/api/credential-targets` | List auto-discovered `.claude.json` targets with enabled state |
-| `POST` | `/api/credential-targets/rescan` | Re-run target discovery |
-| `PATCH` | `/api/credential-targets` | Toggle the `enabled` flag for one canonical target |
-| `POST` | `/api/credential-targets/sync` | Re-mirror active account into all enabled targets |
 | `GET` | `/health` | Health check (always public) |
 
 **WebSocket:** `ws://localhost:41924/ws?since=<seq>` — streams `usage_updated`, `account_switched`, `account_deleted`, and `error` events. The `since` parameter requests buffered events the client may have missed; the server falls back to a full snapshot if the buffer gap is too large.
@@ -416,9 +385,9 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 - Ensure `security` is available (macOS only): `which security`
 - Check for a stale PID file: `rm ~/.local/state/ccswitch/server.pid`
 
-**Account switch not picked up in an existing terminal**
-- Open a new terminal tab — the shell snippet runs at startup
-- Or re-source your rc file: `source ~/.zshrc`
+**Account switch not picked up in an existing `claude` pane**
+- Enable the **Wake tmux sessions** toggle in Settings; it nudges stalled panes automatically after every swap.
+- Or press Enter / type any keystroke in the pane — the CLI re-reads the Keychain on its next request and will pick up the new credentials.
 
 **WebSocket indicator stays disconnected**
 - Verify the server is running: `curl http://localhost:41924/health`
@@ -446,9 +415,9 @@ Tests create isolated SQLite databases in a pytest-managed temp directory — no
 
 What is intentionally **not** done:
 - No multi-tenant support — one user per machine
-- No cloud sync — everything lives in local SQLite + `~/.ccswitch/`
-- No Linux Keychain integration — file-based fallback only
-- No GUI for credential targets beyond the dashboard checkbox list
+- No cloud sync — everything lives in local SQLite + macOS Keychain
+- No Linux Keychain integration — Linux support would require an analogous vault/standard credential store
+- No rollback path for the one-shot vault migration (a one-time JSON backup is written to `~/.ccswitch-backup-2026-04-15.json` on the first upgrade)
 
 ---
 

@@ -1,354 +1,265 @@
 """
 Tests for backend.services.switcher.
 
-perform_switch fetches the user-chosen mirror targets from the DB and
-passes them to account_service.activate_account_config alongside the target
-config dir.
+Covers ``get_next_account`` filtering, ``perform_switch`` orchestration,
+and ``maybe_auto_switch`` gating on ``service_enabled``.
+
+Patches:
+ - ``ac.swap_to_account`` returns a summary dict (no real Keychain touch)
+ - ``tmux_service.fire_nudge`` no-op (no real tmux)
+
+DB + cache state are set up directly on an in-memory SQLite engine; the
+tests bypass the router layer because the switcher is a pure service.
 """
-import asyncio
+from datetime import datetime, timezone
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from backend.cache import cache as _cache
+from backend.database import Base
+from backend.models import Account, Setting, SwitchLog
+from backend.services import account_service as ac
+from backend.services import switcher as sw
+from backend.services import tmux_service
+from backend.ws import WebSocketManager
 
 
-def make_account(id, email, priority, enabled=True, config_dir=None, stale_reason=None):
-    a = MagicMock()
-    a.id = id
-    a.email = email
-    a.priority = priority
-    a.enabled = enabled
-    a.config_dir = config_dir or f"/tmp/fake-account-{id}"
-    a.stale_reason = stale_reason
-    return a
+TEST_DB_URL = "sqlite+aiosqlite:///./test_switcher.db"
 
 
-def _make_account_for_next(id, email, priority, threshold_pct=80.0):
-    a = make_account(id, email, priority)
-    a.threshold_pct = threshold_pct
-    return a
+# ── DB fixture ─────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_get_next_account_skips_current():
-    from backend.services.switcher import get_next_account
-    accounts = [_make_account_for_next(2, "b@x.com", 1)]
-    mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = accounts
-    mock_db = AsyncMock()
-    mock_db.execute.return_value = mock_result
-    result = await get_next_account("a@x.com", mock_db)
-    assert result.email == "b@x.com"
+@pytest.fixture
+async def db_session():
+    """Yield a fresh AsyncSession backed by a dropped/recreated SQLite DB."""
+    engine = create_async_engine(TEST_DB_URL, echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        yield session
+    await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_get_next_account_returns_none_when_no_others():
-    from backend.services.switcher import get_next_account
-    mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = []
-    mock_db = AsyncMock()
-    mock_db.execute.return_value = mock_result
-    result = await get_next_account("only@x.com", mock_db)
-    assert result is None
+@pytest.fixture(autouse=True)
+async def _wipe_cache():
+    """Reset the module-level in-memory cache between tests."""
+    _cache._usage.clear()
+    _cache._token_info.clear()
+    yield
+    _cache._usage.clear()
+    _cache._token_info.clear()
 
 
-@pytest.mark.asyncio
-async def test_get_next_account_skips_stale():
-    """get_next_account must not return an account that has stale_reason set."""
-    from backend.services.switcher import get_next_account
-    mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = []
-    mock_db = AsyncMock()
-    mock_db.execute.return_value = mock_result
-    result = await get_next_account("current@x.com", mock_db)
-    assert result is None
+@pytest.fixture(autouse=True)
+def _silence_nudge(monkeypatch):
+    """fire_nudge is blocking tmux — tests never need the real one."""
+    monkeypatch.setattr(tmux_service, "fire_nudge", lambda: None)
 
 
-@pytest.mark.asyncio
-async def test_get_next_account_skips_rate_limited_candidate():
-    """A candidate whose last probe was rate-limited must be skipped, and
-    the next-in-priority account returned instead.
-    """
-    from backend.services.switcher import get_next_account
-    from backend.cache import cache
+def _make_account(**kwargs) -> Account:
+    defaults = dict(
+        email="a@example.com",
+        threshold_pct=95.0,
+        enabled=True,
+        priority=0,
+        stale_reason=None,
+        created_at=datetime.now(timezone.utc),
+    )
+    defaults.update(kwargs)
+    return Account(**defaults)
 
-    a = _make_account_for_next(1, "exhausted@x.com", 0, threshold_pct=80.0)
-    b = _make_account_for_next(2, "fresh@x.com", 1, threshold_pct=80.0)
 
-    await cache.set_usage("exhausted@x.com", {
-        "rate_limited": True,
-        "five_hour": {"utilization": 0, "resets_at": "2099-01-01T00:00:00Z"},
-    })
-    await cache.set_usage("fresh@x.com", {
-        "five_hour": {"utilization": 10.0, "resets_at": "2099-01-01T00:00:00Z"},
-    })
-
-    mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = [a, b]
-    mock_db = AsyncMock()
-    mock_db.execute.return_value = mock_result
-
-    try:
-        result = await get_next_account("current@x.com", mock_db)
-        assert result is b
-    finally:
-        await cache.invalidate("exhausted@x.com")
-        await cache.invalidate("fresh@x.com")
+# ── get_next_account ──────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_get_next_account_skips_candidate_over_threshold():
-    """A candidate whose cached utilization is >= its own threshold_pct must
-    be skipped (switching to it would immediately bounce back).
-    """
-    from backend.services.switcher import get_next_account
-    from backend.cache import cache
+async def test_get_next_account_skips_stale(db_session, monkeypatch):
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(
+            email="b@example.com", priority=1, stale_reason="Refresh token revoked",
+        ),
+        _make_account(email="c@example.com", priority=2),
+    ])
+    await db_session.commit()
 
-    a = _make_account_for_next(1, "over@x.com", 0, threshold_pct=80.0)
-    b = _make_account_for_next(2, "under@x.com", 1, threshold_pct=80.0)
-
-    await cache.set_usage("over@x.com", {
-        "five_hour": {"utilization": 90.0, "resets_at": "2099-01-01T00:00:00Z"},
-    })
-    await cache.set_usage("under@x.com", {
-        "five_hour": {"utilization": 20.0, "resets_at": "2099-01-01T00:00:00Z"},
-    })
-
-    mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = [a, b]
-    mock_db = AsyncMock()
-    mock_db.execute.return_value = mock_result
-
-    try:
-        result = await get_next_account("current@x.com", mock_db)
-        assert result is b
-    finally:
-        await cache.invalidate("over@x.com")
-        await cache.invalidate("under@x.com")
+    nxt = await sw.get_next_account("a@example.com", db_session)
+    assert nxt is not None
+    assert nxt.email == "c@example.com"
 
 
 @pytest.mark.asyncio
-async def test_get_next_account_returns_none_when_all_exhausted():
-    """If every candidate is either rate-limited or over threshold, return None
-    so the caller can surface an error to the user."""
-    from backend.services.switcher import get_next_account
-    from backend.cache import cache
+async def test_get_next_account_skips_rate_limited(db_session):
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(email="b@example.com", priority=1),
+        _make_account(email="c@example.com", priority=2),
+    ])
+    await db_session.commit()
 
-    a = _make_account_for_next(1, "a-ex@x.com", 0, threshold_pct=80.0)
-    b = _make_account_for_next(2, "b-ex@x.com", 1, threshold_pct=80.0)
+    # b has a rate-limited probe result in cache → switcher must skip it.
+    await _cache.set_usage("b@example.com", {"rate_limited": True})
 
-    await cache.set_usage("a-ex@x.com", {
-        "rate_limited": True,
-        "five_hour": {"utilization": 0, "resets_at": "2099-01-01T00:00:00Z"},
-    })
-    await cache.set_usage("b-ex@x.com", {
-        "five_hour": {"utilization": 95.0, "resets_at": "2099-01-01T00:00:00Z"},
-    })
-
-    mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = [a, b]
-    mock_db = AsyncMock()
-    mock_db.execute.return_value = mock_result
-
-    try:
-        result = await get_next_account("current@x.com", mock_db)
-        assert result is None
-    finally:
-        await cache.invalidate("a-ex@x.com")
-        await cache.invalidate("b-ex@x.com")
+    nxt = await sw.get_next_account("a@example.com", db_session)
+    assert nxt is not None
+    assert nxt.email == "c@example.com"
 
 
 @pytest.mark.asyncio
-async def test_get_next_account_includes_unprobed_candidate():
-    """A candidate with no cached usage data yet must be kept in the pool
-    (benefit of the doubt for newly-added accounts)."""
-    from backend.services.switcher import get_next_account
-    from backend.cache import cache
+async def test_get_next_account_skips_over_threshold(db_session):
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(email="b@example.com", priority=1, threshold_pct=80.0),
+        _make_account(email="c@example.com", priority=2, threshold_pct=95.0),
+    ])
+    await db_session.commit()
 
-    a = _make_account_for_next(1, "new@x.com", 0, threshold_pct=80.0)
-    await cache.invalidate("new@x.com")
-
-    mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = [a]
-    mock_db = AsyncMock()
-    mock_db.execute.return_value = mock_result
-
-    result = await get_next_account("current@x.com", mock_db)
-    assert result is a
-
-
-@pytest.mark.asyncio
-async def test_perform_switch_activates_with_enabled_targets_and_broadcasts():
-    """perform_switch should fetch enabled credential targets from the DB
-    and pass them to activate_account_config alongside the target dir."""
-    from backend.services.switcher import perform_switch
-
-    target = make_account(2, "new@x.com", 1, config_dir="/tmp/fake-account-2")
-
-    mock_db = MagicMock()
-    mock_result = MagicMock()
-    mock_result.scalars.return_value.first.return_value = None
-    mock_db.execute = AsyncMock(return_value=mock_result)
-    mock_db.commit = AsyncMock()
-
-    mock_ws = AsyncMock()
-
-    fake_enabled = ["/Users/me/.claude.json", "/Users/me/.claude-accounts/foo/.claude.json"]
-
-    with patch("backend.services.account_service.get_active_email", return_value="old@x.com"), \
-         patch("backend.services.credential_targets.enabled_canonical_paths",
-               AsyncMock(return_value=fake_enabled)), \
-         patch("backend.services.account_service.activate_account_config",
-               return_value={
-                   "mirror": {"written": fake_enabled, "skipped": [], "errors": []},
-                   "keychain_written": True,
-                   "system_default_enabled": True,
-               }) as mock_activate:
-        await perform_switch(target, "threshold", mock_db, mock_ws)
-
-    mock_activate.assert_called_once_with("/tmp/fake-account-2", fake_enabled)
-    mock_ws.broadcast.assert_called_once()
-    broadcast_data = mock_ws.broadcast.call_args[0][0]
-    assert broadcast_data["type"] == "account_switched"
-    assert broadcast_data["to"] == "new@x.com"
-    assert broadcast_data["reason"] == "threshold"
-    assert broadcast_data["mirror"]["written"] == fake_enabled
-
-
-@pytest.mark.asyncio
-async def test_perform_switch_serialized_by_lock():
-    """Two concurrent perform_switch() calls must not overlap.
-
-    The _switch_lock inside switcher.py ensures the second coroutine waits
-    for the first to finish.  We verify this by tracking the start/end times
-    of activate_account_config calls; the second call must start after the
-    first finishes.
-    """
-    import time
-    from backend.services import switcher as sw
-
-    sw._switch_lock = asyncio.Lock()
-
-    call_log: list[tuple[str, float]] = []
-
-    def slow_activate(config_dir, enabled_targets=None):
-        call_log.append(("start", time.monotonic()))
-        time.sleep(0.05)
-        call_log.append(("end", time.monotonic()))
-        return {
-            "mirror": {"written": [], "skipped": [], "errors": []},
-            "keychain_written": False,
-            "system_default_enabled": False,
-        }
-
-    target_a = make_account(1, "a@x.com", 0, config_dir="/tmp/fake-a")
-    target_b = make_account(2, "b@x.com", 1, config_dir="/tmp/fake-b")
-
-    def make_mock_db():
-        mock_db = MagicMock()
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.first.return_value = None
-        mock_db.execute = AsyncMock(return_value=mock_result)
-        mock_db.commit = AsyncMock()
-        return mock_db
-
-    mock_ws = AsyncMock()
-
-    with patch("backend.services.account_service.get_active_email", return_value="old@x.com"), \
-         patch("backend.services.credential_targets.enabled_canonical_paths",
-               AsyncMock(return_value=[])), \
-         patch("backend.services.account_service.activate_account_config", side_effect=slow_activate):
-        await asyncio.gather(
-            sw.perform_switch(target_a, "threshold", make_mock_db(), mock_ws),
-            sw.perform_switch(target_b, "threshold", make_mock_db(), mock_ws),
-        )
-
-    starts = [t for ev, t in call_log if ev == "start"]
-    ends = [t for ev, t in call_log if ev == "end"]
-    assert len(starts) == 2, "activate_account_config must be called exactly twice"
-    assert len(ends) == 2
-
-    first_end = min(ends)
-    second_start = max(starts)
-    assert second_start >= first_end - 1e-6, (
-        "Second perform_switch started before first finished — lock not working"
+    # b is at 90% — over its 80% threshold, must be skipped.
+    await _cache.set_usage(
+        "b@example.com", {"five_hour": {"utilization": 90.0}}
+    )
+    await _cache.set_usage(
+        "c@example.com", {"five_hour": {"utilization": 10.0}}
     )
 
-
-@pytest.mark.asyncio
-async def test_perform_switch_clears_waiting_for_both_sides():
-    """Regression guard for the active-ownership refresh model (E2).
-
-    perform_switch MUST clear ``cache._waiting`` for both the outgoing and
-    the incoming account.  The outgoing account is no longer waiting on the
-    CLI (CCSwitch owns its refresh from now on); the incoming account gets
-    a clean slate until its own poll cycle decides whether to re-enter
-    waiting.  Without this clear, a stale waiting flag can leak past a
-    switch and leave a yellow badge on a non-active card for up to one
-    poll cycle before the next probe clears it.
-    """
-    from backend.services.switcher import perform_switch
-    from backend.cache import cache
-
-    outgoing_email = "outgoing@example.com"
-    incoming_email = "incoming@example.com"
-
-    # Seed both sides as waiting so we can verify BOTH are cleared.
-    await cache.set_waiting(outgoing_email)
-    await cache.set_waiting(incoming_email)
-    assert await cache.is_waiting_async(outgoing_email) is True
-    assert await cache.is_waiting_async(incoming_email) is True
-
-    target = make_account(7, incoming_email, 2, config_dir="/tmp/incoming-dir")
-
-    mock_db = MagicMock()
-    mock_result = MagicMock()
-    mock_result.scalars.return_value.first.return_value = None
-    mock_db.execute = AsyncMock(return_value=mock_result)
-    mock_db.commit = AsyncMock()
-
-    mock_ws = AsyncMock()
-
-    with patch("backend.services.account_service.get_active_email",
-               return_value=outgoing_email), \
-         patch("backend.services.credential_targets.enabled_canonical_paths",
-               AsyncMock(return_value=[])), \
-         patch("backend.services.account_service.activate_account_config",
-               return_value={"mirror": {"written": [], "skipped": [], "errors": []},
-                             "keychain_written": False,
-                             "system_default_enabled": False}):
-        await perform_switch(target, "manual", mock_db, mock_ws)
-
-    # Both sides must have been cleared by perform_switch — neither can
-    # still carry a waiting flag in the cache.
-    assert await cache.is_waiting_async(outgoing_email) is False
-    assert await cache.is_waiting_async(incoming_email) is False
-
-    # Cleanup
-    await cache.invalidate(outgoing_email)
-    await cache.invalidate(incoming_email)
+    nxt = await sw.get_next_account("a@example.com", db_session)
+    assert nxt is not None
+    assert nxt.email == "c@example.com"
 
 
 @pytest.mark.asyncio
-async def test_cache_invalidate_drops_waiting_flag():
-    """``cache.invalidate(email)`` must also remove the email from
-    ``_waiting`` — otherwise a deleted account's stale waiting flag would
-    linger forever and a re-added account with the same email would see a
-    phantom waiting badge until its next probe."""
-    from backend.cache import cache
+async def test_get_next_account_returns_first_by_priority(db_session):
+    """With nothing in the cache, returns the lowest-priority candidate."""
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(email="b@example.com", priority=2),
+        _make_account(email="c@example.com", priority=1),
+    ])
+    await db_session.commit()
 
-    email = "invalidate-waiting@example.com"
+    nxt = await sw.get_next_account("a@example.com", db_session)
+    assert nxt is not None
+    assert nxt.email == "c@example.com"
 
-    # Seed usage, token_info, AND waiting so we verify invalidate wipes all three.
-    await cache.set_usage(email, {"five_hour": {"utilization": 42}})
-    await cache.set_token_info(email, {"token_expires_at": 9999})
-    await cache.set_waiting(email)
 
-    assert await cache.is_waiting_async(email) is True
-    assert await cache.get_usage_async(email) != {}
-    assert await cache.get_token_info_async(email) is not None
+# ── perform_switch ────────────────────────────────────────────────────────
 
-    await cache.invalidate(email)
 
-    # Every cache surface for this email must now be empty.
-    assert await cache.is_waiting_async(email) is False
-    assert await cache.get_usage_async(email) == {}
-    assert await cache.get_token_info_async(email) is None
+class _FakeWS:
+    """Minimal WebSocketManager stand-in that just records broadcasts."""
+    def __init__(self):
+        self.events: list[dict] = []
+
+    async def broadcast(self, payload: dict) -> int:
+        self.events.append(payload)
+        return len(self.events)
+
+
+@pytest.mark.asyncio
+async def test_perform_switch_writes_log_and_broadcasts(db_session, monkeypatch):
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(email="b@example.com", priority=1),
+    ])
+    await db_session.commit()
+
+    # Active email = a; swap_to_account returns a fake summary.
+    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
+    monkeypatch.setattr(
+        ac, "swap_to_account",
+        lambda email: {
+            "target_email": email,
+            "previous_email": "a@example.com",
+            "checkpoint_written": True,
+        },
+    )
+
+    ws = _FakeWS()
+    target = (await db_session.execute(
+        select(Account).where(Account.email == "b@example.com")
+    )).scalar_one()
+
+    await sw.perform_switch(target, "manual", db_session, ws)
+
+    # SwitchLog row persisted
+    logs = (await db_session.execute(select(SwitchLog))).scalars().all()
+    assert len(logs) == 1
+    assert logs[0].to_account_id == target.id
+    assert logs[0].reason == "manual"
+    assert logs[0].from_account_id is not None  # a@example.com maps to a row
+
+    # Broadcast sent
+    assert any(e.get("type") == "account_switched" for e in ws.events)
+
+    # Lock released
+    assert not sw._switch_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_perform_switch_swap_error_broadcasts_and_skips_log(db_session, monkeypatch):
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(email="b@example.com", priority=1),
+    ])
+    await db_session.commit()
+
+    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
+
+    def raise_swap(email):
+        raise ac.SwapError(f"vault for {email} missing")
+
+    monkeypatch.setattr(ac, "swap_to_account", raise_swap)
+
+    ws = _FakeWS()
+    target = (await db_session.execute(
+        select(Account).where(Account.email == "b@example.com")
+    )).scalar_one()
+
+    await sw.perform_switch(target, "manual", db_session, ws)
+
+    # No SwitchLog row written
+    logs = (await db_session.execute(select(SwitchLog))).scalars().all()
+    assert logs == []
+
+    # Error broadcast was sent
+    assert any(e.get("type") == "error" for e in ws.events)
+
+
+# ── maybe_auto_switch ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_maybe_auto_switch_noop_when_service_disabled(db_session, monkeypatch):
+    """With service_enabled=false, even a 100% active account must NOT
+    trigger a switch."""
+    # Seed service_enabled=false
+    db_session.add(Setting(key="service_enabled", value="false"))
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0, threshold_pct=80.0),
+        _make_account(email="b@example.com", priority=1),
+    ])
+    await db_session.commit()
+
+    # a is at 99% — well over threshold.
+    await _cache.set_usage(
+        "a@example.com", {"five_hour": {"utilization": 99.0}}
+    )
+
+    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
+    swap_calls: list[str] = []
+    monkeypatch.setattr(
+        ac, "swap_to_account",
+        lambda email: swap_calls.append(email) or {},
+    )
+
+    ws = _FakeWS()
+    await sw.maybe_auto_switch(db_session, ws)
+
+    assert swap_calls == []
+    logs = (await db_session.execute(select(SwitchLog))).scalars().all()
+    assert logs == []

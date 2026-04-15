@@ -1,271 +1,335 @@
 """
-Tests for the login-session lifecycle helpers in
-backend.services.login_session_service.
+Tests for backend.services.account_service.
+
+Covers the 5-step ``swap_to_account`` orchestrator, the
+``get_active_email`` accessor, ``save_new_vault_account``,
+``delete_account_everywhere``, and ``startup_integrity_check``.
+
+Strategy: replace the Keychain helpers (``cp.read_vault`` / ``write_vault``
+/ ``read_standard`` / ``write_standard``) with an in-memory dict so the
+assertions can inspect exactly which service/account keys were written
+without touching the real Keychain.  Redirect the module's hardcoded
+``~/.claude/`` paths at a ``tmp_path`` subdirectory per test.
 """
+import json
+import os
+
 import pytest
-from unittest.mock import patch
+
+from backend.services import account_service as ac
+from backend.services import credential_provider as cp
 
 
-# ── _cleanup_expired_sessions ──────────────────────────────────────────────────
-
-def test_cleanup_removes_expired_sessions():
-    """Sessions created more than _SESSION_TIMEOUT seconds ago are cleaned up."""
-    import backend.services.login_session_service as svc
-
-    session_id = "expired1"
-    creation_time = 0.0  # far in the past
-
-    # The realpath+startswith guard in cleanup_login_session only rmtrees
-    # paths that live inside accounts_base, so use a path under it.
-    svc._active_login_sessions[session_id] = {
-        "created_at": creation_time,
-        "pane_target": "add-accounts:1.0",
-        "config_dir": f"{svc._accounts_base()}/account-{session_id}",
-        "kind": "add",
-    }
-
-    # time.time() returns SESSION_TIMEOUT + 1 beyond the creation time → expired
-    fake_now = creation_time + svc._SESSION_TIMEOUT + 1
-
-    with patch("backend.services.login_session_service.time") as mock_time, \
-         patch("backend.services.login_session_service.shutil.rmtree") as mock_rmtree, \
-         patch("backend.services.login_session_service.os.path.isdir", return_value=True):
-        mock_time.time.return_value = fake_now
-
-        svc._cleanup_expired_sessions()
-
-    # Session must have been removed from the tracking dict
-    assert session_id not in svc._active_login_sessions
-
-    # The config dir must have been deleted
-    mock_rmtree.assert_called_once()
-    called_path = mock_rmtree.call_args[0][0]
-    assert session_id in called_path
+# ── Fixtures ───────────────────────────────────────────────────────────────
 
 
-def test_cleanup_keeps_fresh_sessions():
-    """Sessions created 0 seconds ago (just now) must not be cleaned up."""
-    import backend.services.login_session_service as svc
+@pytest.fixture
+def fake_keychain(monkeypatch):
+    """Replace the four vault/standard helpers with an in-memory store.
 
-    session_id = "fresh1"
-    creation_time = 1000.0
-
-    svc._active_login_sessions[session_id] = {
-        "created_at": creation_time,
-        "pane_target": "add-accounts:2.0",
-        "config_dir": "/tmp/fake-account-fresh1",
-        "kind": "add",
-    }
-
-    # time.time() is exactly at creation — 0 seconds elapsed → still fresh
-    fake_now = creation_time
-
-    with patch("backend.services.login_session_service.time") as mock_time, \
-         patch("backend.services.login_session_service.shutil.rmtree") as mock_rmtree, \
-         patch("backend.services.login_session_service.os.path.isdir", return_value=True):
-        mock_time.time.return_value = fake_now
-
-        svc._cleanup_expired_sessions()
-
-    # Session must still be tracked
-    assert session_id in svc._active_login_sessions
-    # No filesystem removal should have happened
-    mock_rmtree.assert_not_called()
-
-    # Clean up the injected entry so it does not leak into other tests
-    svc._active_login_sessions.pop(session_id, None)
-
-
-def test_get_pane_target_returns_stored_target():
-    """get_pane_target returns the pane_target for an active session."""
-    import backend.services.login_session_service as svc
-
-    session_id = "pane1"
-    svc._active_login_sessions[session_id] = {
-        "created_at": 100.0,
-        "pane_target": "add-accounts:3.0",
-        "config_dir": "/tmp/fake-account-pane1",
-        "kind": "add",
-    }
-    try:
-        assert svc.get_pane_target(session_id) == "add-accounts:3.0"
-    finally:
-        svc._active_login_sessions.pop(session_id, None)
-
-
-def test_get_pane_target_returns_none_for_unknown_session():
-    """get_pane_target returns None when the session is not tracked."""
-    import backend.services.login_session_service as svc
-
-    assert svc.get_pane_target("does-not-exist") is None
-
-
-# ── cleanup_login_session: kind-aware config_dir handling ─────────────────────
-
-def test_cleanup_add_session_deletes_config_dir():
-    """kind="add" sessions own a throwaway dir under accounts_base — cleanup
-    must rmtree it so abandoned enrolments do not accumulate on disk."""
-    import backend.services.login_session_service as svc
-
-    session_id = "addcln01"
-    # Use a path inside the real accounts_base so the realpath/startswith
-    # guard in cleanup_login_session passes.
-    config_dir = f"{svc._accounts_base()}/account-{session_id}"
-    svc._active_login_sessions[session_id] = {
-        "created_at": 1.0,
-        "pane_target": "add-accounts:9.0",
-        "config_dir": config_dir,
-        "kind": "add",
-    }
-
-    with patch("backend.services.login_session_service.shutil.rmtree") as mock_rmtree, \
-         patch("backend.services.login_session_service.os.path.isdir", return_value=True):
-        svc.cleanup_login_session(session_id)
-
-    assert session_id not in svc._active_login_sessions
-    mock_rmtree.assert_called_once()
-    called_path = mock_rmtree.call_args[0][0]
-    assert session_id in called_path
-
-
-def test_cleanup_relogin_session_preserves_config_dir():
-    """kind="relogin" sessions point at an existing account's config dir
-    that MUST NOT be deleted on cleanup — the slot has to stay alive so
-    the user can retry re-login."""
-    import backend.services.login_session_service as svc
-
-    session_id = "relcln01"
-    svc._active_login_sessions[session_id] = {
-        "created_at": 1.0,
-        "pane_target": "add-accounts:10.0",
-        "config_dir": "/Users/test/.ccswitch-accounts/account-real1",
-        "kind": "relogin",
-    }
-
-    with patch("backend.services.login_session_service.shutil.rmtree") as mock_rmtree, \
-         patch("backend.services.login_session_service.os.path.isdir", return_value=True):
-        svc.cleanup_login_session(session_id)
-
-    # Session removed from registry …
-    assert session_id not in svc._active_login_sessions
-    # … but the config dir was never touched.
-    mock_rmtree.assert_not_called()
-
-
-# ── start_relogin_session: duplicate-session guard ──────────────────────────
-
-def test_start_relogin_session_rejects_duplicate_for_same_config_dir():
-    """Two concurrent re-login sessions for the same config_dir would race
-    the same Keychain entry — the service must reject the second one."""
-    import backend.services.login_session_service as svc
-
-    existing_sid = "rel0dup0"
-    config_dir = "/Users/test/.ccswitch-accounts/account-dup1"
-    svc._active_login_sessions[existing_sid] = {
-        "created_at": 99999.0,  # far in the future so _cleanup_expired_sessions does not reap it
-        "pane_target": "add-accounts:11.0",
-        "config_dir": config_dir,
-        "kind": "relogin",
-    }
-
-    try:
-        with patch("backend.services.login_session_service.time") as mock_time:
-            mock_time.time.return_value = 99999.0
-            with pytest.raises(ValueError, match="already active"):
-                svc.start_relogin_session(config_dir)
-    finally:
-        svc._active_login_sessions.pop(existing_sid, None)
-
-
-def test_start_relogin_session_rejects_nonexistent_config_dir():
-    """A config_dir that does not exist on disk cannot be re-logged into."""
-    import backend.services.login_session_service as svc
-
-    with pytest.raises(ValueError, match="does not exist"):
-        svc.start_relogin_session("/tmp/definitely-not-a-real-path-xyz")
-
-
-# ── verify_login_session: reads config_dir from the session dict ───────────
-
-def test_verify_login_session_returns_kind():
-    """verify_login_session must include "kind" in the success result so
-    the router can branch between add-account save vs. re-login cleanup."""
-    import backend.services.login_session_service as svc
-
-    session_id = "verifyk1"
-    # Point at a path that DOES NOT exist so verify returns
-    # "config directory missing" early — we only care that the kind field
-    # would have been propagated had the config dir been there.
-    svc._active_login_sessions[session_id] = {
-        "created_at": 1.0,
-        "pane_target": "add-accounts:12.0",
-        "config_dir": "/tmp/definitely-missing-verify-kind",
-        "kind": "add",
-    }
-    try:
-        result = svc.verify_login_session(session_id)
-        # Config dir does not exist → should fail before reading email.
-        assert result["success"] is False
-        assert "missing" in result["error"].lower() or "invalid" in result["error"].lower()
-    finally:
-        svc._active_login_sessions.pop(session_id, None)
-
-
-# ── credential_provider.wipe_credentials_for_config_dir ────────────────────
-
-def test_wipe_credentials_removes_keychain_files_and_oauth_keys(tmp_path):
-    """wipe_credentials_for_config_dir must:
-      * call `security delete-generic-password` for the hashed Keychain entry
-      * unlink .credentials.json / credentials.json if present
-      * strip oauthAccount + userID from .claude.json, preserving other keys
+    Returns the backing dict ``store`` keyed on ``(service, account)`` so
+    tests can assert what ended up in each cell after a swap.
     """
-    import json as _json
-    from backend.services import credential_provider as cp
+    store: dict[tuple[str, str], dict] = {}
 
-    config_dir = tmp_path
-    # Seed .credentials.json and .claude.json with oauthAccount + other keys.
-    (config_dir / ".credentials.json").write_text('{"claudeAiOauth": {"accessToken": "bad"}}')
-    (config_dir / ".claude.json").write_text(_json.dumps({
-        "oauthAccount": {"emailAddress": "bob@bad.com"},
-        "userID": "abc",
-        "projects": {"foo": {"trust": "yes"}},
-        "mcpServers": {},
+    def read_vault(email):
+        return store.get(("vault", email))
+
+    def write_vault(email, creds):
+        store[("vault", email)] = dict(creds)
+        return True
+
+    def delete_vault(email):
+        store.pop(("vault", email), None)
+
+    def read_standard():
+        return store.get(("standard", "user"))
+
+    def write_standard(creds):
+        store[("standard", "user")] = dict(creds)
+        return True
+
+    def delete_standard():
+        store.pop(("standard", "user"), None)
+
+    monkeypatch.setattr(cp, "read_vault", read_vault)
+    monkeypatch.setattr(cp, "write_vault", write_vault)
+    monkeypatch.setattr(cp, "delete_vault", delete_vault)
+    monkeypatch.setattr(cp, "read_standard", read_standard)
+    monkeypatch.setattr(cp, "write_standard", write_standard)
+    monkeypatch.setattr(cp, "delete_standard", delete_standard)
+    return store
+
+
+@pytest.fixture
+def fake_claude_home(monkeypatch, tmp_path):
+    """Point ac.*_PATH constants at a tmp_path subdirectory."""
+    home = tmp_path / ".claude"
+    home.mkdir(mode=0o700)
+    monkeypatch.setattr(ac, "_CLAUDE_HOME", str(home))
+    monkeypatch.setattr(ac, "_CLAUDE_JSON_PATH", str(home / ".claude.json"))
+    monkeypatch.setattr(
+        ac, "_CREDENTIALS_JSON_PATH", str(home / ".credentials.json")
+    )
+    return home
+
+
+def _blob(email: str, refresh="rt", access="at") -> dict:
+    return {
+        "claudeAiOauth": {
+            "accessToken": access,
+            "refreshToken": refresh,
+            "expiresAt": 1_700_000_000_000,
+        },
+        "oauthAccount": {"emailAddress": email},
+        "userID": f"uid-{email.split('@')[0]}",
+    }
+
+
+# ── swap_to_account happy path ─────────────────────────────────────────────
+
+
+def test_swap_happy_path_a_to_b(fake_keychain, fake_claude_home):
+    """A is currently standard; B is in vault.  After swap: standard holds
+    B, vault[A] holds the checkpointed standard contents, .claude.json
+    names B."""
+    store = fake_keychain
+    store[("standard", "user")] = _blob("alice@example.com", refresh="a-rt")
+    store[("vault", "bob@example.com")] = _blob("bob@example.com", refresh="b-rt")
+
+    summary = ac.swap_to_account("bob@example.com")
+
+    assert summary["target_email"] == "bob@example.com"
+    assert summary["previous_email"] == "alice@example.com"
+    assert summary["checkpoint_written"] is True
+    # Standard now holds B's creds
+    assert store[("standard", "user")]["oauthAccount"]["emailAddress"] == "bob@example.com"
+    # Vault[A] exists and holds A's tokens (the checkpoint)
+    assert store[("vault", "alice@example.com")]["claudeAiOauth"]["refreshToken"] == "a-rt"
+    # .claude.json names B
+    data = json.loads((fake_claude_home / ".claude.json").read_text())
+    assert data["oauthAccount"]["emailAddress"] == "bob@example.com"
+
+
+def test_swap_first_activation_no_outgoing(fake_keychain, fake_claude_home):
+    """Standard empty, only vault[B] exists.  Swap promotes B, no checkpoint."""
+    store = fake_keychain
+    store[("vault", "bob@example.com")] = _blob("bob@example.com")
+
+    summary = ac.swap_to_account("bob@example.com")
+
+    assert summary["target_email"] == "bob@example.com"
+    assert summary["previous_email"] is None
+    assert summary["checkpoint_written"] is False
+    assert store[("standard", "user")]["oauthAccount"]["emailAddress"] == "bob@example.com"
+    data = json.loads((fake_claude_home / ".claude.json").read_text())
+    assert data["oauthAccount"]["emailAddress"] == "bob@example.com"
+
+
+# ── swap_to_account error paths ───────────────────────────────────────────
+
+
+def test_swap_raises_when_vault_missing(fake_keychain, fake_claude_home):
+    with pytest.raises(ac.SwapError) as excinfo:
+        ac.swap_to_account("ghost@example.com")
+    assert "no vault entry" in str(excinfo.value).lower() or "re-login" in str(excinfo.value).lower()
+
+
+def test_swap_raises_when_vault_has_no_refresh_token(fake_keychain, fake_claude_home):
+    # Vault blob with accessToken but no refreshToken
+    fake_keychain[("vault", "bob@example.com")] = {
+        "claudeAiOauth": {"accessToken": "at"},
+        "oauthAccount": {"emailAddress": "bob@example.com"},
+    }
+    with pytest.raises(ac.SwapError) as excinfo:
+        ac.swap_to_account("bob@example.com")
+    assert "refresh token" in str(excinfo.value).lower()
+
+
+def test_swap_checkpoint_failure_aborts_before_promote(monkeypatch, fake_keychain, fake_claude_home):
+    """If the checkpoint (vault write for outgoing) fails, the swap must
+    raise and NOT overwrite the standard entry."""
+    store = fake_keychain
+    store[("standard", "user")] = _blob("alice@example.com", refresh="a-rt")
+    store[("vault", "bob@example.com")] = _blob("bob@example.com", refresh="b-rt")
+
+    original_standard_snapshot = dict(store[("standard", "user")])
+
+    # Make write_vault fail ONLY for alice (the outgoing checkpoint).
+    original_write_vault = cp.write_vault
+
+    def failing_write_vault(email, creds):
+        if email == "alice@example.com":
+            return False
+        return original_write_vault(email, creds)
+
+    monkeypatch.setattr(cp, "write_vault", failing_write_vault)
+
+    with pytest.raises(ac.SwapError):
+        ac.swap_to_account("bob@example.com")
+
+    # Standard was NOT overwritten — still alice's credentials.
+    assert store[("standard", "user")] == original_standard_snapshot
+
+
+# ── .claude.json preservation ─────────────────────────────────────────────
+
+
+def test_swap_preserves_unrelated_claude_json_keys(fake_keychain, fake_claude_home):
+    """Existing .claude.json has projects + mcp keys.  After a swap those
+    keys must survive — only oauthAccount + userID are replaced."""
+    store = fake_keychain
+    store[("standard", "user")] = _blob("alice@example.com")
+    store[("vault", "bob@example.com")] = _blob("bob@example.com")
+
+    claude_json_path = fake_claude_home / ".claude.json"
+    claude_json_path.write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "alice@example.com"},
+        "userID": "uid-alice",
+        "projects": ["proj-1", "proj-2"],
+        "mcp": {"servers": ["filesystem"]},
     }))
 
-    with patch("backend.services.credential_provider.subprocess.run") as mock_run:
-        mock_run.return_value.returncode = 0
-        cp.wipe_credentials_for_config_dir(str(config_dir))
+    ac.swap_to_account("bob@example.com")
 
-    # Keychain delete was called at least once with delete-generic-password.
-    assert any(
-        call.args and call.args[0][:2] == ["security", "delete-generic-password"]
-        for call in mock_run.call_args_list
+    data = json.loads(claude_json_path.read_text())
+    assert data["oauthAccount"]["emailAddress"] == "bob@example.com"
+    assert data["projects"] == ["proj-1", "proj-2"]
+    assert data["mcp"] == {"servers": ["filesystem"]}
+
+
+# ── get_active_email ──────────────────────────────────────────────────────
+
+
+def test_get_active_email_reads_identity_file(fake_claude_home):
+    (fake_claude_home / ".claude.json").write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "carol@example.com"},
+        "userID": "uid-carol",
+    }))
+    assert ac.get_active_email() == "carol@example.com"
+
+
+def test_get_active_email_returns_none_when_missing(fake_claude_home):
+    # .claude.json does not exist → get_active_email returns None
+    assert ac.get_active_email() is None
+
+
+def test_get_active_email_returns_none_when_oauthaccount_absent(fake_claude_home):
+    (fake_claude_home / ".claude.json").write_text(json.dumps({
+        "projects": [],
+    }))
+    assert ac.get_active_email() is None
+
+
+# ── save_new_vault_account ─────────────────────────────────────────────────
+
+
+def test_save_new_vault_account_writes_blob(fake_keychain):
+    ac.save_new_vault_account(
+        email="dan@example.com",
+        oauth_tokens={"accessToken": "at", "refreshToken": "rt"},
+        oauth_account={"emailAddress": "dan@example.com"},
+        user_id="uid-dan",
     )
-
-    # Credential file is gone.
-    assert not (config_dir / ".credentials.json").exists()
-
-    # .claude.json was rewritten WITHOUT oauthAccount / userID, but
-    # every other key survived.
-    remaining = _json.loads((config_dir / ".claude.json").read_text())
-    assert "oauthAccount" not in remaining
-    assert "userID" not in remaining
-    assert remaining["projects"] == {"foo": {"trust": "yes"}}
-    assert remaining["mcpServers"] == {}
+    written = fake_keychain[("vault", "dan@example.com")]
+    assert written["claudeAiOauth"] == {"accessToken": "at", "refreshToken": "rt"}
+    assert written["oauthAccount"] == {"emailAddress": "dan@example.com"}
+    assert written["userID"] == "uid-dan"
 
 
-def test_wipe_credentials_is_noop_when_claude_json_has_no_oauth(tmp_path):
-    """If .claude.json exists but has no oauthAccount/userID, wipe should
-    not rewrite it (nothing to strip) and must not raise."""
-    import json as _json
-    from backend.services import credential_provider as cp
+# ── delete_account_everywhere ─────────────────────────────────────────────
 
-    config_dir = tmp_path
-    payload = {"projects": {"a": 1}}
-    (config_dir / ".claude.json").write_text(_json.dumps(payload))
 
-    with patch("backend.services.credential_provider.subprocess.run"):
-        cp.wipe_credentials_for_config_dir(str(config_dir))
+def test_delete_account_everywhere_active_clears_standard_and_identity(
+    fake_keychain, fake_claude_home
+):
+    store = fake_keychain
+    store[("vault", "alice@example.com")] = _blob("alice@example.com")
+    store[("standard", "user")] = _blob("alice@example.com")
+    (fake_claude_home / ".claude.json").write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "alice@example.com"},
+        "userID": "uid-alice",
+        "projects": [],
+    }))
 
-    # File untouched.
-    assert _json.loads((config_dir / ".claude.json").read_text()) == payload
+    ac.delete_account_everywhere("alice@example.com")
+
+    assert ("vault", "alice@example.com") not in store
+    assert ("standard", "user") not in store
+    data = json.loads((fake_claude_home / ".claude.json").read_text())
+    assert "oauthAccount" not in data
+    assert "userID" not in data
+    assert data.get("projects") == []  # unrelated key preserved
+
+
+def test_delete_account_everywhere_inactive_only_clears_vault(
+    fake_keychain, fake_claude_home
+):
+    """When deleting a non-active account, the standard entry and the
+    identity file must not be touched."""
+    store = fake_keychain
+    store[("vault", "bob@example.com")] = _blob("bob@example.com")
+    store[("standard", "user")] = _blob("alice@example.com")
+    (fake_claude_home / ".claude.json").write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "alice@example.com"},
+        "userID": "uid-alice",
+    }))
+
+    ac.delete_account_everywhere("bob@example.com")
+
+    assert ("vault", "bob@example.com") not in store
+    assert ("standard", "user") in store  # alice still standard
+    data = json.loads((fake_claude_home / ".claude.json").read_text())
+    assert data["oauthAccount"]["emailAddress"] == "alice@example.com"
+
+
+# ── startup_integrity_check ───────────────────────────────────────────────
+
+
+def test_startup_integrity_rewrites_claude_json_on_disagreement(
+    fake_keychain, fake_claude_home
+):
+    """Standard has bob, .claude.json has alice — rewrite to bob (Keychain wins)."""
+    store = fake_keychain
+    store[("standard", "user")] = _blob("bob@example.com")
+    (fake_claude_home / ".claude.json").write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "alice@example.com"},
+        "userID": "uid-alice",
+    }))
+
+    ac.startup_integrity_check()
+
+    data = json.loads((fake_claude_home / ".claude.json").read_text())
+    assert data["oauthAccount"]["emailAddress"] == "bob@example.com"
+
+
+def test_startup_integrity_noop_when_they_agree(fake_keychain, fake_claude_home):
+    store = fake_keychain
+    store[("standard", "user")] = _blob("alice@example.com")
+    identity_path = fake_claude_home / ".claude.json"
+    identity_path.write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "alice@example.com"},
+        "userID": "uid-alice",
+        "projects": ["p1"],
+    }))
+    mtime_before = os.stat(identity_path).st_mtime_ns
+
+    ac.startup_integrity_check()
+
+    # File may or may not be touched but content remains identical.
+    data = json.loads(identity_path.read_text())
+    assert data["oauthAccount"]["emailAddress"] == "alice@example.com"
+    assert data["projects"] == ["p1"]
+
+
+def test_startup_integrity_noop_when_standard_empty(fake_keychain, fake_claude_home):
+    # Standard has no entry at all → nothing to reconcile.
+    (fake_claude_home / ".claude.json").write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "alice@example.com"},
+        "userID": "uid-alice",
+    }))
+
+    ac.startup_integrity_check()
+
+    data = json.loads((fake_claude_home / ".claude.json").read_text())
+    assert data["oauthAccount"]["emailAddress"] == "alice@example.com"

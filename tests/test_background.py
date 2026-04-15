@@ -1,1141 +1,381 @@
 """
 Tests for backend.background.
 
-background.py now:
-- reads per-account threshold from account.threshold_pct instead of a global Setting
-- calls account_service.get_access_token_from_config_dir(account.config_dir)
-- calls account_service.get_active_email() (no args)
-- gates all work behind service_enabled setting — the old auto_switch_enabled
-  sub-flag has been removed; service_enabled now *is* the auto-switch decision
-- delegates auto-switch decisions to switcher.maybe_auto_switch, which also
-  fires a tmux nudge (tmux_service.fire_nudge) after every successful switch
-  when the user has opted in via settings.
+Covers the per-account poll body (``_process_single_account``) across
+active/vault distinctions, refresh terminal states, nudge rate-limiting,
+and the post-sleep stagger in ``poll_usage_and_switch``.
+
+All Keychain + network calls are monkeypatched — no real subprocess or
+HTTP traffic.
 """
 import time
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import httpx
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+
+from backend import background as bg
+from backend.cache import cache as _cache
+from backend.models import Account
+from backend.services import account_service as ac
+from backend.services import anthropic_api
+from backend.services import credential_provider as cp
+from backend.services import tmux_service
+
+
+# ── Shared fixtures ────────────────────────────────────────────────────────
 
 
 @pytest.fixture(autouse=True)
-def clear_backoff_state():
-    """Reset module-level 429 backoff state between tests."""
-    import backend.background as bg_mod
-    bg_mod._backoff_until.clear()
-    bg_mod._backoff_count.clear()
+async def _wipe_cache_between_tests():
+    _cache._usage.clear()
+    _cache._token_info.clear()
+    bg._backoff_until.clear()
+    bg._backoff_count.clear()
+    bg._last_nudge_at.clear()
     yield
-    bg_mod._backoff_until.clear()
-    bg_mod._backoff_count.clear()
+    _cache._usage.clear()
+    _cache._token_info.clear()
+    bg._backoff_until.clear()
+    bg._backoff_count.clear()
+    bg._last_nudge_at.clear()
 
 
-@pytest.mark.asyncio
-async def test_poll_broadcasts_usage_updated_when_service_enabled():
-    """When service_enabled=true and no accounts exist, still broadcasts usage_updated."""
-    from backend.background import poll_usage_and_switch
-
-    mock_ws = AsyncMock()
-    mock_db = AsyncMock()
-
-    def make_setting(value):
-        s = MagicMock()
-        s.value = value
-        return s
-
-    call_count = [0]
-
-    def execute_side_effect(query):
-        result = MagicMock()
-        call_count[0] += 1
-        if call_count[0] == 1:  # accounts query (first DB hit post-refactor)
-            result.scalars.return_value.all.return_value = []
-        elif call_count[0] == 2:  # service_enabled inside maybe_auto_switch → "true" to proceed
-            result.scalars.return_value.first.return_value = make_setting("true")
-        else:
-            result.scalars.return_value.first.return_value = None
-            result.scalars.return_value.all.return_value = []
-        return result
-
-    mock_db.execute = AsyncMock(side_effect=execute_side_effect)
-
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    # Should broadcast usage_updated with empty accounts list
-    mock_ws.broadcast.assert_called_once()
-    call_data = mock_ws.broadcast.call_args[0][0]
-    assert call_data["type"] == "usage_updated"
+def _make_account(**kwargs) -> Account:
+    defaults = dict(
+        id=1,
+        email="a@example.com",
+        threshold_pct=95.0,
+        enabled=True,
+        priority=0,
+        stale_reason=None,
+        created_at=datetime.now(timezone.utc),
+    )
+    defaults.update(kwargs)
+    return Account(**defaults)
 
 
-@pytest.mark.asyncio
-async def test_poll_disabled_still_broadcasts_usage_but_skips_switch():
-    """When service_enabled=false, polling still runs so the dashboard's
-    usage bars stay live — only the auto-switch decision inside
-    maybe_auto_switch is skipped.
-    """
-    from backend.background import poll_usage_and_switch
-
-    mock_ws = AsyncMock()
-    mock_db = AsyncMock()
-
-    def make_setting(value):
-        s = MagicMock()
-        s.value = value
-        return s
-
-    call_count = [0]
-
-    def execute_side_effect(query):
-        result = MagicMock()
-        call_count[0] += 1
-        if call_count[0] == 1:  # accounts query
-            result.scalars.return_value.all.return_value = []
-        elif call_count[0] == 2:  # service_enabled inside maybe_auto_switch → "false" → return
-            result.scalars.return_value.first.return_value = make_setting("false")
-        else:
-            result.scalars.return_value.first.return_value = None
-            result.scalars.return_value.all.return_value = []
-        return result
-
-    mock_db.execute = AsyncMock(side_effect=execute_side_effect)
-
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.services.switcher.perform_switch", new_callable=AsyncMock) as mock_switch:
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    # Polling always broadcasts usage_updated, even with zero accounts.
-    mock_ws.broadcast.assert_called_once()
-    assert mock_ws.broadcast.call_args[0][0]["type"] == "usage_updated"
-    # No auto-switch fires because service_enabled=false short-circuits maybe_auto_switch.
-    mock_switch.assert_not_called()
-
-
-# ── Race-condition fix: error path reads and writes cache inside one lock ──────
-
-def _make_account(email, config_dir="/tmp/fake", priority=0):
-    a = MagicMock()
-    a.id = 1
-    a.email = email
-    a.config_dir = config_dir
-    a.priority = priority
-    a.threshold_pct = 95.0
-    return a
-
-
-def _make_db_for_one_account(account):
-    """Return a mock async DB that yields one account for the probe loop and
-    stops maybe_auto_switch cold via service_enabled=false on its own query.
-
-    Post-refactor call order (poll_usage_and_switch no longer gates on
-    service_enabled before polling — usage bars are always live):
-      1. accounts query   → [account]
-      2. service_enabled  → "false" (inside maybe_auto_switch, triggers early return)
-    """
-    mock_db = AsyncMock()
-
-    def make_setting(value):
-        s = MagicMock()
-        s.value = value
-        return s
-
-    call_count = [0]
-
-    def execute_side_effect(query):
-        result = MagicMock()
-        call_count[0] += 1
-        if call_count[0] == 1:          # accounts
-            result.scalars.return_value.all.return_value = [account]
-        elif call_count[0] == 2:        # service_enabled (inside maybe_auto_switch)
-            result.scalars.return_value.first.return_value = make_setting("false")
-        else:
-            result.scalars.return_value.first.return_value = None
-            result.scalars.return_value.all.return_value = []
-        return result
-
-    mock_db.execute = AsyncMock(side_effect=execute_side_effect)
-    return mock_db
-
-
-@pytest.mark.asyncio
-async def test_rate_limited_error_preserves_previous_data():
-    """
-    When probe_usage raises a 429-like error and a valid previous entry exists,
-    the cache entry must gain rate_limited=True while keeping the original data.
-    This verifies the race-condition fix: read + write happen inside one lock.
-    """
-    import httpx
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
-
-    email = "rate-limited@example.com"
-    previous_data = {
-        "five_hour": {"utilization": 50.0, "resets_at": "2099-01-01T00:00:00Z"},
-        "seven_day": {"utilization": 20.0, "resets_at": "2099-01-01T00:00:00Z"},
+def _fresh_creds(expires_at_ms: int | None = None) -> dict:
+    return {
+        "claudeAiOauth": {
+            "accessToken": "at",
+            "refreshToken": "rt",
+            "expiresAt": expires_at_ms or int(time.time() * 1000) + 10_000_000,
+        },
+        "oauthAccount": {"emailAddress": "a@example.com"},
     }
 
-    # Pre-populate the cache with a valid entry
-    await cache.set_usage(email, dict(previous_data))
 
-    account = _make_account(email)
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
+def _http_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(str(status), request=request, response=response)
 
-    # Simulate a 429 rate-limit error from probe_usage
-    rate_limit_exc = Exception("HTTP 429 rate_limit exceeded")
 
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_access_token_from_config_dir", return_value="tok"), \
-         patch("backend.background.ac.get_token_info", return_value={}), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, side_effect=rate_limit_exc), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    entry = await cache.get_usage_async(email)
-
-    assert entry.get("rate_limited") is True, "cache entry must have rate_limited=True"
-    # Original usage data must be preserved
-    assert "five_hour" in entry, "five_hour key must be preserved after rate-limit"
-    assert "seven_day" in entry, "seven_day key must be preserved after rate-limit"
-    assert "error" not in entry, "error key must not be present when rate-limited with prev data"
-
-    # Cleanup
-    await cache.invalidate(email)
+# ── Active account behaviour ───────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_probe_401_marks_account_stale():
-    """A 401 from probe_usage should set account.stale_reason so the UI can
-    show a re-login prompt, and db.commit should be called once."""
-    import httpx
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
+async def test_active_account_reads_standard_never_refreshes(monkeypatch):
+    """The active account reads from the standard Keychain entry and never
+    calls refresh_access_token, even if the stored token is past expiry."""
+    account = _make_account(email="active@example.com")
 
-    email = "stale@example.com"
-    await cache.invalidate(email)
+    reads: list[tuple[str, str | None]] = []
 
-    account = _make_account(email)
-    account.stale_reason = None
+    def fake_read(email, active_email=None):
+        reads.append((email, active_email))
+        return _fresh_creds()
 
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
-    mock_db.commit = AsyncMock()
+    monkeypatch.setattr(ac, "read_credentials_for_email", fake_read)
 
-    # Fake a 401 HTTP error from probe_usage
-    resp = MagicMock()
-    resp.status_code = 401
-    resp.json = MagicMock(return_value={"error": {"message": "invalid token"}})
-    http_err = httpx.HTTPStatusError("401", request=MagicMock(), response=resp)
+    refresh_called = {"n": 0}
 
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_access_token_from_config_dir", return_value="tok"), \
-         patch("backend.background.ac.get_token_info", return_value={}), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, side_effect=http_err), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
+    async def fake_refresh(*args, **kwargs):
+        refresh_called["n"] += 1
+        return {}
 
-    assert account.stale_reason is not None
-    assert "401" in account.stale_reason or "re-login" in account.stale_reason.lower()
-    mock_db.commit.assert_called()
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
-    await cache.invalidate(email)
+    async def fake_probe(token):
+        return {"five_hour": {"utilization": 12.0, "resets_at": 1}}
+
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    entry, stale = await bg._process_single_account(account, "active@example.com")
+    assert stale is None
+    assert entry["email"] == "active@example.com"
+    # read_credentials_for_email was passed active_email so it routes to standard.
+    assert reads and reads[0][1] == "active@example.com"
+    # No refresh call for active account, even if near expiry.
+    assert refresh_called["n"] == 0
+
+
+# ── Vault account refresh ──────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_successful_probe_clears_stale_flag():
-    """When a previously-stale account's probe succeeds, the stale flag clears."""
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
+async def test_vault_account_near_expiry_refreshes(monkeypatch):
+    """A vault account within 20 min of expiry must refresh_access_token
+    and persist the new tokens via save_refreshed_vault_token."""
+    account = _make_account(email="vault@example.com")
+    # Expiry just inside the 20-minute skew — now + 5 minutes.
+    near_expiry_ms = int(time.time() * 1000) + 5 * 60 * 1000
+    creds = _fresh_creds(expires_at_ms=near_expiry_ms)
 
-    email = "recovered@example.com"
-    await cache.invalidate(email)
-
-    account = _make_account(email)
-    account.stale_reason = "Previously stale"  # seeded
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
-    mock_db.commit = AsyncMock()
-
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_access_token_from_config_dir", return_value="tok"), \
-         patch("backend.background.ac.get_token_info", return_value={}), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, return_value={"five_hour": {"utilization": 10}}), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    assert account.stale_reason is None
-    mock_db.commit.assert_called()
-
-    await cache.invalidate(email)
-
-
-@pytest.mark.asyncio
-async def test_generic_error_sets_error_entry():
-    """
-    When probe_usage raises a generic (non-rate-limit) error and the cache is
-    empty, the cache entry must have an 'error' field and no usage data.
-    """
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
-
-    email = "error-account@example.com"
-
-    # Ensure the cache starts empty for this account
-    await cache.invalidate(email)
-
-    account = _make_account(email)
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
-
-    generic_exc = RuntimeError("something went wrong internally")
-
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_access_token_from_config_dir", return_value="tok"), \
-         patch("backend.background.ac.get_token_info", return_value={}), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, side_effect=generic_exc), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    entry = await cache.get_usage_async(email)
-
-    assert "error" in entry, "cache entry must have an 'error' key after generic failure"
-    assert entry["error"], "error message must be non-empty"
-    assert "rate_limited" not in entry, "rate_limited must not appear on a generic error"
-
-    # Cleanup
-    await cache.invalidate(email)
-
-
-@pytest.mark.asyncio
-async def test_refresh_token_401_marks_permanently_expired():
-    """When refresh_access_token returns 401, the token should be marked as
-    permanently expired (expires_at=1) to prevent infinite retry."""
-    import httpx
-    from backend.background import poll_usage_and_switch
-
-    mock_ws = AsyncMock()
-
-    def make_setting(value):
-        s = MagicMock()
-        s.value = value
-        return s
-
-    # Create a mock account with a token that's about to expire
-    mock_account = MagicMock()
-    mock_account.id = 1
-    mock_account.email = "test@example.com"
-    mock_account.config_dir = "/tmp/fake-account"
-    mock_account.enabled = True
-    mock_account.threshold_pct = 95.0
-    mock_account.stale_reason = None
-
-    mock_db = AsyncMock()
-    mock_db.commit = AsyncMock()
-
-    call_count = [0]
-
-    def execute_side_effect(query):
-        result = MagicMock()
-        call_count[0] += 1
-        if call_count[0] == 1:  # accounts query (first DB hit post-refactor)
-            result.scalars.return_value.all.return_value = [mock_account]
-        elif call_count[0] == 2:  # service_enabled inside maybe_auto_switch → "false" → return
-            result.scalars.return_value.first.return_value = make_setting("false")
-        else:
-            result.scalars.return_value.first.return_value = None
-            result.scalars.return_value.all.return_value = []
-        return result
-
-    mock_db.execute = AsyncMock(side_effect=execute_side_effect)
-
-    mock_401_response = MagicMock()
-    mock_401_response.status_code = 401
-    mock_401_error = httpx.HTTPStatusError(
-        "401 Unauthorized", request=MagicMock(), response=mock_401_response
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email", lambda email, active_email=None: creds
     )
 
-    # Token expires in 60 s — within the 5-minute refresh buffer
-    future_expires = int(time.time() * 1000) + 60_000
+    async def fake_refresh(refresh_token):
+        assert refresh_token == "rt"
+        return {
+            "access_token": "new-at",
+            "expires_in": 3600,
+            "refresh_token": "new-rt",
+        }
 
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_access_token_from_config_dir",
-               return_value="old-access-token"), \
-         patch("backend.background.ac.get_token_info",
-               return_value={"token_expires_at": future_expires}), \
-         patch("backend.background.ac.get_refresh_token_from_config_dir",
-               return_value="old-refresh-token"), \
-         patch("backend.background.anthropic_api.refresh_access_token",
-               new_callable=AsyncMock, side_effect=mock_401_error) as mock_refresh, \
-         patch("backend.background.ac.save_refreshed_token") as mock_save, \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    saved: dict = {}
 
-        await poll_usage_and_switch(mock_ws)
+    def fake_save(email, access_token, expires_at=None, refresh_token=None):
+        saved["email"] = email
+        saved["access_token"] = access_token
+        saved["expires_at"] = expires_at
+        saved["refresh_token"] = refresh_token
 
-    # Verify refresh was attempted with the stored refresh token
-    mock_refresh.assert_called_once_with("old-refresh-token")
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", fake_save)
 
-    # Verify token was marked as permanently expired (expires_at=1).
-    # Accept either positional (arg[2]) or keyword form — background.py wraps
-    # the call in asyncio.to_thread which passes args positionally.
-    mock_save.assert_called_once()
-    args, kwargs = mock_save.call_args
-    expires_at = kwargs.get("expires_at", args[2] if len(args) >= 3 else None)
-    assert expires_at == 1, (
-        f"save_refreshed_token should be called with expires_at=1, got: {mock_save.call_args}"
+    async def fake_probe(token):
+        return {"five_hour": {"utilization": 10.0, "resets_at": 1}}
+
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    # Non-active: active_email is some other account.
+    _, stale = await bg._process_single_account(account, "someone-else@example.com")
+    assert stale is None
+    assert saved["email"] == "vault@example.com"
+    assert saved["access_token"] == "new-at"
+    assert saved["refresh_token"] == "new-rt"
+    assert saved["expires_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_vault_refresh_400_sets_rejected_stale_reason(monkeypatch):
+    account = _make_account(email="vault@example.com")
+    near_expiry_ms = int(time.time() * 1000) + 5 * 60 * 1000
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(expires_at_ms=near_expiry_ms),
     )
 
+    async def fake_refresh(refresh_token):
+        raise _http_error(400)
 
-# ── Auto-switch tests (_maybe_auto_switch exercised via poll_usage_and_switch) ──
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
+    probe_called = {"n": 0}
 
-def _make_db_for_auto_switch(account, current_account=None, next_account=None,
-                             tmux_nudge_enabled="false"):
-    """Return a mock async DB for auto-switch scenarios.
+    async def fake_probe(token):
+        probe_called["n"] += 1
+        return {}
 
-    Post-refactor call order:
-      1. accounts query (the one account to poll)
-      2. service_enabled (inside maybe_auto_switch) → "true"
-      3. get_account_by_email (current active account)
-      4. get_next_account
-      5. (if switch fires) tmux_nudge_enabled setting
-    """
-    mock_db = AsyncMock()
-    mock_db.commit = AsyncMock()
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
 
-    def make_setting(value):
-        s = MagicMock()
-        s.value = value
-        return s
-
-    call_count = [0]
-
-    def execute_side_effect(query):
-        result = MagicMock()
-        call_count[0] += 1
-        if call_count[0] == 1:          # accounts
-            result.scalars.return_value.all.return_value = [account]
-        elif call_count[0] == 2:        # service_enabled (inside maybe_auto_switch)
-            result.scalars.return_value.first.return_value = make_setting("true")
-        elif call_count[0] == 3:        # get_account_by_email (current)
-            result.scalars.return_value.first.return_value = current_account
-        elif call_count[0] == 4:        # get_next_account (uses .all() + iterate)
-            result.scalars.return_value.all.return_value = (
-                [next_account] if next_account is not None else []
-            )
-        elif call_count[0] == 5:        # tmux_nudge_enabled
-            result.scalars.return_value.first.return_value = make_setting(tmux_nudge_enabled)
-        else:
-            result.scalars.return_value.first.return_value = None
-            result.scalars.return_value.all.return_value = []
-        return result
-
-    mock_db.execute = AsyncMock(side_effect=execute_side_effect)
-    return mock_db
+    _, stale = await bg._process_single_account(account, "someone-else@example.com")
+    assert stale == "Refresh token rejected (400) — re-login required"
+    # probe was skipped
+    assert probe_called["n"] == 0
 
 
 @pytest.mark.asyncio
-async def test_auto_switch_triggered_when_threshold_exceeded():
-    """When usage exceeds the account's threshold_pct, perform_switch is called."""
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
+async def test_vault_refresh_401_sets_revoked_stale_reason(monkeypatch):
+    account = _make_account(email="vault@example.com")
+    near_expiry_ms = int(time.time() * 1000) + 5 * 60 * 1000
 
-    active_email = "active@example.com"
-    next_email = "next@example.com"
-
-    active_account = _make_account(active_email)
-    active_account.threshold_pct = 80.0
-    active_account.stale_reason = None
-
-    next_account = _make_account(next_email, config_dir="/tmp/next", priority=1)
-    next_account.id = 2
-
-    # Pre-populate cache with usage above threshold (85% > 80%)
-    await cache.set_usage(active_email, {
-        "five_hour": {"utilization": 85.0, "resets_at": "2099-01-01T00:00:00Z"},
-    })
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_auto_switch(
-        account=active_account,
-        current_account=active_account,
-        next_account=next_account,
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(expires_at_ms=near_expiry_ms),
     )
 
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_access_token_from_config_dir", return_value="tok"), \
-         patch("backend.background.ac.get_token_info", return_value={}), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, return_value={
-                   "five_hour": {"utilization": 85.0, "resets_at": "2099-01-01T00:00:00Z"},
-               }), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=active_email), \
-         patch("backend.services.switcher.perform_switch", new_callable=AsyncMock) as mock_switch, \
-         patch("backend.services.switcher.tmux_service.fire_nudge"):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
+    async def fake_refresh(refresh_token):
+        raise _http_error(401)
 
-    mock_switch.assert_called_once()
-    call_args = mock_switch.call_args
-    assert call_args[0][0] is next_account, "perform_switch should be called with the next account"
-    assert call_args[0][1] == "threshold", "perform_switch reason should be 'threshold'"
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
-    await cache.invalidate(active_email)
+    async def fake_probe(token):
+        return {}
+
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    _, stale = await bg._process_single_account(account, "someone-else@example.com")
+    assert stale == "Refresh token revoked — re-login required"
+
+
+# ── Active-account probe 401 ──────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_auto_switch_not_triggered_below_threshold():
-    """When usage is below the account's threshold_pct, perform_switch is NOT called."""
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
+async def test_active_probe_401_fires_nudge_once_and_keeps_cached(monkeypatch):
+    """Active-account probe 401 triggers fire_nudge once, does NOT set
+    stale_reason, and returns the cached last-known usage.  A second call
+    within the cooldown window is NOT re-nudged."""
+    account = _make_account(email="active@example.com")
 
-    active_email = "below-threshold@example.com"
-
-    active_account = _make_account(active_email)
-    active_account.threshold_pct = 80.0
-    active_account.stale_reason = None
-
-    # Pre-populate cache with usage below threshold (70% < 80%)
-    await cache.set_usage(active_email, {
-        "five_hour": {"utilization": 70.0, "resets_at": "2099-01-01T00:00:00Z"},
-    })
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_auto_switch(
-        account=active_account,
-        current_account=active_account,
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(),
     )
 
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_access_token_from_config_dir", return_value="tok"), \
-         patch("backend.background.ac.get_token_info", return_value={}), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, return_value={
-                   "five_hour": {"utilization": 70.0, "resets_at": "2099-01-01T00:00:00Z"},
-               }), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=active_email), \
-         patch("backend.services.switcher.perform_switch", new_callable=AsyncMock) as mock_switch:
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
+    async def fake_refresh(*args, **kwargs):
+        return {}
 
-    mock_switch.assert_not_called()
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
-    await cache.invalidate(active_email)
+    async def fake_probe(token):
+        raise _http_error(401)
 
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
 
-@pytest.mark.asyncio
-async def test_auto_switch_no_eligible_next_account():
-    """When usage exceeds threshold but no next account is available,
-    perform_switch is NOT called and an error is broadcast."""
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
+    nudge_calls = {"n": 0}
 
-    active_email = "no-next@example.com"
+    def fake_nudge():
+        nudge_calls["n"] += 1
 
-    active_account = _make_account(active_email)
-    active_account.threshold_pct = 80.0
-    active_account.stale_reason = None
+    monkeypatch.setattr(tmux_service, "fire_nudge", fake_nudge)
 
-    # Usage above threshold but no next account
-    await cache.set_usage(active_email, {
-        "five_hour": {"utilization": 90.0, "resets_at": "2099-01-01T00:00:00Z"},
-    })
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_auto_switch(
-        account=active_account,
-        current_account=active_account,
-        next_account=None,  # no eligible account
+    # Pre-seed cached "last known" usage.
+    await _cache.set_usage(
+        "active@example.com",
+        {"five_hour": {"utilization": 44.0, "resets_at": 1}},
     )
 
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_access_token_from_config_dir", return_value="tok"), \
-         patch("backend.background.ac.get_token_info", return_value={}), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, return_value={
-                   "five_hour": {"utilization": 90.0, "resets_at": "2099-01-01T00:00:00Z"},
-               }), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=active_email), \
-         patch("backend.services.switcher.perform_switch", new_callable=AsyncMock) as mock_switch:
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
+    entry1, stale1 = await bg._process_single_account(account, "active@example.com")
+    entry2, stale2 = await bg._process_single_account(account, "active@example.com")
 
-    mock_switch.assert_not_called()
-
-    # Should have broadcast an error message (second broadcast after usage_updated)
-    assert mock_ws.broadcast.call_count >= 2, "Expected at least 2 broadcasts (usage_updated + error)"
-    error_call = mock_ws.broadcast.call_args_list[-1]
-    error_data = error_call[0][0]
-    assert error_data["type"] == "error"
-    assert "no eligible" in error_data["message"].lower()
-
-    await cache.invalidate(active_email)
+    # Neither call marked stale — active-probe 401 is soft.
+    assert stale1 is None
+    assert stale2 is None
+    # First call fires nudge; second is rate-limited out by _last_nudge_at.
+    assert nudge_calls["n"] == 1
+    # Cached usage is returned (non-empty dict).
+    assert entry1["usage"]  # non-empty UsageData
 
 
-# ── Regression: stale accounts must NOT trigger refresh_access_token ─────────
+# ── Active-account probe 429 ──────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_stale_account_skips_token_refresh():
-    """
-    Regression guard for backend/background.py::_process_single_account.
-
-    When an account already has a non-null ``stale_reason``, its refresh token
-    is known to be revoked. Calling ``refresh_access_token`` on it again would
-    just produce a 401 on every poll cycle, flooding logs and wasting API calls.
-    The ``if not account.stale_reason:`` guard around the refresh block prevents
-    this — if that guard is accidentally removed in a future refactor, this
-    test should fail.
-    """
-    import httpx
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
-
-    email = "already-stale@example.com"
-    await cache.invalidate(email)
-
-    account = _make_account(email)
-    account.stale_reason = "Refresh token revoked — re-login required"  # already stale
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
-    mock_db.commit = AsyncMock()
-
-    # Token info would normally trigger a refresh (expires in 60 s — inside
-    # the 5-minute buffer). We want to prove the guard skips the refresh
-    # anyway because the account is already stale.
-    future_expires = int(time.time() * 1000) + 60_000
-
-    # Probe raises 401 (account stays stale), so the control flow lands in
-    # the exception handler without ever needing a real probe response.
-    probe_resp = MagicMock()
-    probe_resp.status_code = 401
-    probe_resp.json = MagicMock(return_value={"error": {"message": "invalid token"}})
-    probe_401 = httpx.HTTPStatusError("401", request=MagicMock(), response=probe_resp)
-
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_access_token_from_config_dir",
-               return_value="old-access-token"), \
-         patch("backend.background.ac.get_token_info",
-               return_value={"token_expires_at": future_expires}), \
-         patch("backend.background.ac.get_refresh_token_from_config_dir",
-               return_value="old-refresh-token"), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.refresh_access_token",
-               new_callable=AsyncMock) as mock_refresh, \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, side_effect=probe_401), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    # The guard must have skipped the refresh call entirely.
-    mock_refresh.assert_not_called()
-
-    await cache.invalidate(email)
-
-
-@pytest.mark.asyncio
-async def test_non_stale_account_triggers_token_refresh():
-    """
-    Control case for the stale-skip guard: when ``stale_reason is None`` and
-    the token is about to expire, ``refresh_access_token`` MUST be called.
-    This makes the companion ``test_stale_account_skips_token_refresh``
-    meaningful — without this pair, a bug that disables refresh entirely
-    would still pass the negative assertion.
-    """
-    import httpx
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
-
-    email = "healthy@example.com"
-    await cache.invalidate(email)
-
-    account = _make_account(email)
-    account.stale_reason = None  # healthy
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
-    mock_db.commit = AsyncMock()
-
-    future_expires = int(time.time() * 1000) + 60_000  # expires in 60 s
-
-    # A 401 from the probe keeps the test footprint small — the refresh
-    # path still executes before the probe is attempted.
-    probe_resp = MagicMock()
-    probe_resp.status_code = 401
-    probe_resp.json = MagicMock(return_value={"error": {"message": "invalid token"}})
-    probe_401 = httpx.HTTPStatusError("401", request=MagicMock(), response=probe_resp)
-
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_access_token_from_config_dir",
-               return_value="old-access-token"), \
-         patch("backend.background.ac.get_token_info",
-               return_value={"token_expires_at": future_expires}), \
-         patch("backend.background.ac.get_refresh_token_from_config_dir",
-               return_value="old-refresh-token"), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.refresh_access_token",
-               new_callable=AsyncMock,
-               return_value={"access_token": "new-token", "refresh_token": "new-rt", "expires_in": 3600}) as mock_refresh, \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, side_effect=probe_401), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    # The healthy account must have attempted a refresh with its stored token.
-    mock_refresh.assert_called_once_with("old-refresh-token")
-
-    await cache.invalidate(email)
-
-
-# ── Active-ownership refresh model (E2) ───────────────────────────────────────
-#
-# The poll loop must not refresh the access token of the account whose
-# config_dir matches ``~/.ccswitch/active`` — that refresh lifecycle belongs
-# to Claude Code CLI.  When the active account's access token has expired
-# and no CLI is running, a probe returns 401 and the poll loop enters a
-# "soft waiting" state (no stale_reason, no error broadcast) until either
-# Claude Code refreshes via its own lifecycle or the user clicks Force
-# refresh in the dashboard.  These tests protect that invariant and the
-# waiting-flag bookkeeping that drives the UI.
-
-
-@pytest.mark.asyncio
-async def test_active_account_skipped_from_refresh():
-    """The active account's token refresh is OWNED by Claude Code CLI — the
-    poll loop must skip calling refresh_access_token even when the stored
-    token is about to expire.  Instead the probe runs directly with the
-    existing access token and whatever outcome that yields is what the UI
-    sees for that cycle."""
-    import httpx
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
-
-    email = "active-no-refresh@example.com"
-    await cache.invalidate(email)
-
-    account = _make_account(email, config_dir="/tmp/active-dir")
-    account.stale_reason = None
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
-    mock_db.commit = AsyncMock()
-
-    future_expires = int(time.time() * 1000) + 60_000  # 60 s — inside refresh buffer
-
-    # The active_cfg_dir pointer resolves to THIS account's config dir, so the
-    # poll loop classifies this account as active and must skip refresh.
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_active_config_dir_pointer",
-               return_value="/tmp/active-dir"), \
-         patch("backend.background.ac.get_access_token_from_config_dir",
-               return_value="existing-token"), \
-         patch("backend.background.ac.get_token_info",
-               return_value={"token_expires_at": future_expires}), \
-         patch("backend.background.ac.get_refresh_token_from_config_dir",
-               return_value="rt"), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.refresh_access_token",
-               new_callable=AsyncMock) as mock_refresh, \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock,
-               return_value={"five_hour": {"utilization": 10}}), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    # The active-ownership invariant: the poll loop must NOT refresh the
-    # active account — that is Claude Code CLI's job.
-    mock_refresh.assert_not_called()
-
-    await cache.invalidate(email)
-
-
-@pytest.mark.asyncio
-async def test_active_account_401_enters_waiting_state():
-    """Active account + expired access token + no CLI: the probe 401s, the
-    Keychain re-read retry also 401s, and the poll loop must enter the soft
-    waiting state — NOT mark the account stale.  The broadcast usage_entry
-    must have waiting_for_cli=True, and cache.is_waiting_async(email) must
-    return True so a subsequent GET /api/accounts also sees waiting."""
-    import httpx
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
-
-    email = "active-waiting@example.com"
-    await cache.invalidate(email)
-
-    account = _make_account(email, config_dir="/tmp/waiting-dir")
-    account.stale_reason = None
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
-    mock_db.commit = AsyncMock()
-
-    probe_resp = MagicMock()
-    probe_resp.status_code = 401
-    probe_resp.json = MagicMock(return_value={"error": {"message": "expired"}})
-    probe_401 = httpx.HTTPStatusError("401", request=MagicMock(), response=probe_resp)
-
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_active_config_dir_pointer",
-               return_value="/tmp/waiting-dir"), \
-         patch("backend.background.ac.get_access_token_from_config_dir",
-               return_value="stale-token"), \
-         patch("backend.background.ac.get_token_info",
-               return_value={}), \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, side_effect=probe_401), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=email):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    # Soft waiting: the account must NOT be marked stale.
-    assert account.stale_reason is None, (
-        "active account with 401 probe must stay non-stale — stale_reason "
-        "would prevent re-probe on the next cycle"
-    )
-    # The cache-backed flag must be set so GET /api/accounts returns True.
-    assert await cache.is_waiting_async(email) is True, (
-        "cache waiting flag should be set by the active-401 branch"
-    )
-    # The WS broadcast must carry waiting_for_cli=True for the active account.
-    broadcast_args = mock_ws.broadcast.call_args_list[0][0][0]
-    assert broadcast_args["type"] == "usage_updated"
-    entry = next(
-        e for e in broadcast_args["accounts"] if e["email"] == email
-    )
-    assert entry["waiting_for_cli"] is True
-
-    await cache.invalidate(email)
-
-
-@pytest.mark.asyncio
-async def test_inactive_account_401_still_marks_stale():
-    """Active-ownership only defers refresh for the ACTIVE account.  An
-    inactive account that returns 401 from the probe must still be marked
-    stale (CCSwitch is the sole refresh consumer for inactive accounts —
-    a persistent 401 means the refresh token is dead)."""
-    import httpx
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
-
-    email = "inactive-stale@example.com"
-    await cache.invalidate(email)
-
-    account = _make_account(email, config_dir="/tmp/inactive-dir")
-    account.stale_reason = None
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
-    mock_db.commit = AsyncMock()
-
-    probe_resp = MagicMock()
-    probe_resp.status_code = 401
-    probe_resp.json = MagicMock(return_value={"error": {"message": "expired"}})
-    probe_401 = httpx.HTTPStatusError("401", request=MagicMock(), response=probe_resp)
-
-    # Active pointer resolves to a DIFFERENT config dir, so this account is
-    # NOT active → the waiting branch must not fire.
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_active_config_dir_pointer",
-               return_value="/tmp/some-other-active-dir"), \
-         patch("backend.background.ac.get_access_token_from_config_dir",
-               return_value="stale-token"), \
-         patch("backend.background.ac.get_token_info",
-               return_value={}), \
-         patch("backend.background.ac.get_refresh_token_from_config_dir",
-               return_value="rt"), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock, side_effect=probe_401), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    # The inactive-401 path must set stale_reason.
-    assert account.stale_reason is not None
-    # And must NOT set the waiting flag — waiting is reserved for active.
-    assert await cache.is_waiting_async(email) is False
-
-    await cache.invalidate(email)
-
-
-@pytest.mark.asyncio
-async def test_successful_probe_clears_waiting_flag():
-    """When a previously-waiting account's next probe succeeds, the cache's
-    waiting flag must be cleared (otherwise the card would show both a
-    green usage bar AND a yellow Waiting pill on the same cycle)."""
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
-
-    email = "recovered-from-waiting@example.com"
-    await cache.invalidate(email)
-    # Seed the waiting flag so we can verify it clears.
-    await cache.set_waiting(email)
-    assert await cache.is_waiting_async(email) is True
-
-    account = _make_account(email, config_dir="/tmp/recovered-dir")
-    account.stale_reason = None
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
-    mock_db.commit = AsyncMock()
-
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_active_config_dir_pointer",
-               return_value="/tmp/recovered-dir"), \
-         patch("backend.background.ac.get_access_token_from_config_dir",
-               return_value="fresh-token"), \
-         patch("backend.background.ac.get_token_info",
-               return_value={}), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock,
-               return_value={"five_hour": {"utilization": 10}}), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    # Waiting flag must be cleared on the success path.
-    assert await cache.is_waiting_async(email) is False
-
-    await cache.invalidate(email)
-
-
-@pytest.mark.asyncio
-async def test_top_level_exception_clears_waiting_flag():
-    """Regression: if ``_process_single_account`` raises before its own
-    inner except clause can clean up, the top-level ``isinstance(result,
-    Exception)`` branch in ``poll_usage_and_switch`` must also clear the
-    waiting flag — otherwise a subsequent ``GET /api/accounts`` would see
-    a stale True while the WS broadcast said False, and the two surfaces
-    would disagree."""
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
-
-    email = "waiting-then-crash@example.com"
-    await cache.invalidate(email)
-    # Seed the waiting flag as if a prior cycle had set it.
-    await cache.set_waiting(email)
-    assert await cache.is_waiting_async(email) is True
-
-    account = _make_account(email, config_dir="/tmp/crash-dir")
-    account.stale_reason = None
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
-    mock_db.commit = AsyncMock()
-
-    # Crash inside _process_single_account BEFORE its inner except can fire:
-    # get_access_token_from_config_dir raises a bare-SystemError (escapes
-    # every except-Exception handler because SystemError is not Exception).
-    #
-    # Actually SystemError IS an Exception — pick something even more
-    # exotic: asyncio.CancelledError, which most except-Exception blocks do
-    # NOT catch post-3.8.  That is a realistic crash during lifespan
-    # shutdown and is exactly the scenario the top-level clear guards.
-    async def _raise_cancelled():
-        raise asyncio.CancelledError("lifespan shutdown mid-probe")
-
-    # Wrap the mock in a coroutine so to_thread fires it correctly.
-    import asyncio as _aio
-
-    def _crashy_get_token(_cfg_dir):
-        raise _aio.CancelledError("lifespan shutdown")
-
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_active_config_dir_pointer",
-               return_value="/tmp/crash-dir"), \
-         patch("backend.background.ac.get_access_token_from_config_dir",
-               side_effect=_crashy_get_token), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        # poll_usage_and_switch catches the gather exceptions — no raise.
-        await poll_usage_and_switch(mock_ws)
-
-    # The top-level exception branch must have cleared the waiting flag.
-    assert await cache.is_waiting_async(email) is False, (
-        "top-level exception branch must clear _waiting so WS and REST agree"
+async def test_probe_429_sets_backoff_without_stale_reason(monkeypatch):
+    account = _make_account(email="active@example.com")
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(),
     )
 
-    await cache.invalidate(email)
+    async def fake_refresh(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    async def fake_probe(token):
+        raise _http_error(429)
+
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    _, stale = await bg._process_single_account(account, "active@example.com")
+    assert stale is None  # 429 does not set stale_reason
+    assert "active@example.com" in bg._backoff_until
+    # Cache entry has rate_limited flag.
+    cached = await _cache.get_usage_async("active@example.com")
+    assert cached.get("rate_limited") is True
+
+
+# ── Post-sleep stagger ────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_usage_entry_carries_stale_reason_in_broadcast():
-    """The poll-loop broadcast must include ``stale_reason`` on every
-    usage_entry so other open tabs can flip footer buttons immediately on
-    a waiting→stale transition, instead of waiting for a full reload."""
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
+async def test_sleep_jump_triggers_asyncio_sleep(monkeypatch):
+    """A monotonic-time gap > 300s between polls triggers a random
+    asyncio.sleep(0..30) before the refresh burst."""
+    # Reset the global so we start from "no previous poll".
+    bg._last_poll_monotonic = 0.0  # pretend a previous poll happened at t=0
 
-    email = "broadcast-stale-reason@example.com"
-    await cache.invalidate(email)
+    # Force time.monotonic to return t=10_000 (≫ 300s gap).
+    monkeypatch.setattr(bg.time, "monotonic", lambda: 10_000.0)
 
-    account = _make_account(email, config_dir="/tmp/stale-broadcast-dir")
-    account.stale_reason = "Previously stale — re-login required"  # seed
+    # Make random.uniform deterministic.
+    monkeypatch.setattr(bg.random, "uniform", lambda a, b: 5.5)
 
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
-    mock_db.commit = AsyncMock()
+    # Capture asyncio.sleep calls.
+    sleep_args: list[float] = []
 
-    # A successful probe clears stale_reason on the DB row; the broadcast
-    # must carry the NEW (None) value so other tabs see the transition.
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_active_config_dir_pointer",
-               return_value=None), \
-         patch("backend.background.ac.get_access_token_from_config_dir",
-               return_value="tok"), \
-         patch("backend.background.ac.get_token_info",
-               return_value={}), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock,
-               return_value={"five_hour": {"utilization": 10}}), \
-         patch("backend.services.switcher.ac.get_active_email", return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
+    async def fake_sleep(seconds):
+        sleep_args.append(seconds)
 
-    broadcast_args = mock_ws.broadcast.call_args_list[0][0][0]
-    entry = next(
-        e for e in broadcast_args["accounts"] if e["email"] == email
-    )
-    # stale_reason key must exist on every entry, and the success path must
-    # have cleared it to None in the broadcast AND on the DB row.
-    assert "stale_reason" in entry
-    assert entry["stale_reason"] is None
-    assert account.stale_reason is None
+    monkeypatch.setattr(bg.asyncio, "sleep", fake_sleep)
 
-    await cache.invalidate(email)
+    # Stub DB + active-email + account-list so poll_usage_and_switch runs
+    # the stagger branch and then short-circuits.
+    class _FakeExec:
+        def scalars(self):
+            return SimpleNamespace(all=lambda: [])
+
+    class _FakeSession:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return None
+        async def execute(self, _stmt): return _FakeExec()
+        async def commit(self): pass
+
+    def fake_session_ctor():
+        return _FakeSession()
+
+    monkeypatch.setattr(bg, "AsyncSessionLocal", fake_session_ctor)
+
+    async def fake_get_active_email_async():
+        return None
+
+    monkeypatch.setattr(ac, "get_active_email_async", fake_get_active_email_async)
+
+    async def fake_maybe(db, ws):
+        return None
+
+    monkeypatch.setattr(bg.sw, "maybe_auto_switch", fake_maybe)
+
+    class _WS:
+        async def broadcast(self, payload): return 0
+
+    await bg.poll_usage_and_switch(_WS())
+
+    assert 5.5 in sleep_args
 
 
-@pytest.mark.asyncio
-async def test_mid_cycle_active_flip_skips_refresh():
-    """Regression for a coverage gap surfaced in the second-round audit:
-    the mid-cycle active-flip re-check at ``background.py:95-108`` is the
-    defense against a manual switch that flips ``~/.ccswitch/active`` to
-    THIS account AFTER the poll cycle snapped its ``active_cfg_dir`` but
-    BEFORE this coroutine calls ``refresh_access_token``.  Without the
-    re-check, the poll loop would race Claude Code CLI on the newly active
-    account's refresh_token and brick it.
-
-    We simulate this by returning ``None`` on the cycle-start pointer read
-    (so the account's ``is_active`` snap = False) and then returning the
-    account's config_dir on the re-check (so ownership flipped to us
-    mid-cycle).  ``refresh_access_token`` must NOT be called.
-    """
-    from backend.background import poll_usage_and_switch
-    from backend.cache import cache
-
-    email = "mid-cycle-flip@example.com"
-    await cache.invalidate(email)
-
-    account = _make_account(email, config_dir="/tmp/mid-flip-dir")
-    account.stale_reason = None
-
-    mock_ws = AsyncMock()
-    mock_db = _make_db_for_one_account(account)
-    mock_db.commit = AsyncMock()
-
-    # Token expires in 60 s so the refresh-eligible branch is entered.
-    soon_expires = int(time.time() * 1000) + 60_000
-
-    # Simulate the cycle-start snap returning None (no active account) and
-    # the mid-cycle re-check returning THIS config_dir (ownership flipped
-    # mid-cycle to this account — CLI now owns its refresh).
-    pointer_calls = {"count": 0}
-
-    def _pointer_side_effect():
-        pointer_calls["count"] += 1
-        if pointer_calls["count"] == 1:
-            return None  # cycle-start snap: no active account
-        return "/tmp/mid-flip-dir"  # mid-cycle re-check: now active
-
-    with patch("backend.background.AsyncSessionLocal") as mock_session_cls, \
-         patch("backend.background.ac.get_active_config_dir_pointer",
-               side_effect=_pointer_side_effect), \
-         patch("backend.background.ac.get_access_token_from_config_dir",
-               return_value="existing-token"), \
-         patch("backend.background.ac.get_token_info",
-               return_value={"token_expires_at": soon_expires}), \
-         patch("backend.background.ac.get_refresh_token_from_config_dir",
-               return_value="rt"), \
-         patch("backend.background.ac.save_refreshed_token"), \
-         patch("backend.background.anthropic_api.refresh_access_token",
-               new_callable=AsyncMock) as mock_refresh, \
-         patch("backend.background.anthropic_api.probe_usage",
-               new_callable=AsyncMock,
-               return_value={"five_hour": {"utilization": 10}}), \
-         patch("backend.services.switcher.ac.get_active_email",
-               return_value=None):
-        mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        await poll_usage_and_switch(mock_ws)
-
-    # The mid-cycle re-check must have seen the pointer flip and skipped
-    # the refresh entirely — refresh_access_token must NOT be called for
-    # what is now the active account.
-    mock_refresh.assert_not_called()
-
-    # The re-check was wired to the second pointer read; if we count only
-    # one pointer read, the re-check branch never executed.
-    assert pointer_calls["count"] >= 2, (
-        "_process_single_account did not perform the mid-cycle active re-check "
-        "— the TOCTOU guard against manual switches mid-cycle is not firing"
-    )
-
-    await cache.invalidate(email)
+# ── Return shape includes stale_reason ────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_refresh_skew_constant_matches_20_minutes():
-    """Guard the named refresh-skew constant so a reversion to the pre-E2
-    5-minute window (the pre-active-ownership value) does not slip through.
-    The active-ownership model specifies 20 minutes for inactive accounts
-    since CCSwitch is the sole refresher; reducing this shifts the defense
-    margin back into the race-prone range."""
-    from backend import background as bg
+async def test_process_returns_stale_reason_tuple(monkeypatch):
+    """_process_single_account's return is a (usage_entry, stale_reason)
+    tuple.  stale_reason should be None on the happy path."""
+    account = _make_account(email="a@example.com")
 
-    assert bg._REFRESH_SKEW_MS_INACTIVE == 20 * 60 * 1000, (
-        f"_REFRESH_SKEW_MS_INACTIVE changed from 20 min to "
-        f"{bg._REFRESH_SKEW_MS_INACTIVE / 60_000:.1f} min — revisit the "
-        f"active-ownership design doc before narrowing this"
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(),
     )
+
+    async def fake_probe(token):
+        return {"five_hour": {"utilization": 1.0, "resets_at": 1}}
+
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    result = await bg._process_single_account(account, "a@example.com")
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    entry, stale_reason = result
+    assert stale_reason is None
+    assert entry["email"] == "a@example.com"
