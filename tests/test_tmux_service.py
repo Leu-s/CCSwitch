@@ -140,17 +140,32 @@ def test_looks_stalled_ignores_benign_text(text):
 # ── wake_stalled_sessions ──────────────────────────────────────────────────
 
 
+def _make_panes(*shape):
+    """Build a list of pane dicts from 4-tuples (target, pid, command, opt_in)."""
+    return [
+        {"target": t, "pid": p, "command": c, "opt_in": o}
+        for (t, p, c, o) in shape
+    ]
+
+
 @pytest.mark.asyncio
 async def test_wake_nudges_only_panes_with_rate_limit_text():
-    """Of three panes, only the one whose capture matches a rate-limit
-    pattern should receive the message."""
+    """Three panes, one has a stall pattern and a claude descendant →
+    only that one gets nudged."""
     from backend.services import tmux_service as ts
 
-    panes = [
-        {"target": "a:0.0", "command": "claude"},
-        {"target": "b:0.0", "command": "vim"},
-        {"target": "c:0.0", "command": "claude"},
-    ]
+    panes = _make_panes(
+        ("a:0.0", 100, "zsh", False),   # claude descendant at pid 200
+        ("b:0.0", 300, "vim", False),   # no claude descendant
+        ("c:0.0", 400, "2.1.108", False),  # claude descendant at pid 500
+    )
+    snapshot = {
+        100: (1, "zsh"),
+        200: (100, "claude"),
+        300: (1, "vim"),
+        400: (1, "zsh"),
+        500: (400, "/Users/nazarii/.local/share/claude/versions/2.1.108"),
+    }
     captures = {
         "a:0.0": "Welcome to Claude Code\n> ",
         "b:0.0": "vim: editing file.py",
@@ -166,6 +181,7 @@ async def test_wake_nudges_only_panes_with_rate_limit_text():
         nudged.append((target, text))
 
     with patch.object(ts, "list_panes", new=AsyncMock(return_value=panes)), \
+         patch.object(ts, "_process_snapshot", new=AsyncMock(return_value=snapshot)), \
          patch.object(ts, "capture_pane", new=fake_capture), \
          patch.object(ts, "send_keys", new=fake_send):
         summary = await ts.wake_stalled_sessions("continue")
@@ -180,7 +196,8 @@ async def test_wake_nudges_only_panes_with_rate_limit_text():
 async def test_wake_with_empty_message_is_noop():
     from backend.services import tmux_service as ts
 
-    with patch.object(ts, "list_panes", new=AsyncMock(return_value=[{"target": "x:0.0"}])), \
+    with patch.object(ts, "list_panes", new=AsyncMock(return_value=[{"target": "x:0.0", "pid": 1, "command": "claude", "opt_in": True}])), \
+         patch.object(ts, "_process_snapshot", new=AsyncMock(return_value={})), \
          patch.object(ts, "capture_pane", new=AsyncMock(return_value="usage limit reached")), \
          patch.object(ts, "send_keys", new=AsyncMock()) as mock_send:
         summary = await ts.wake_stalled_sessions("")
@@ -191,17 +208,18 @@ async def test_wake_with_empty_message_is_noop():
 
 @pytest.mark.asyncio
 async def test_wake_records_per_pane_errors_without_aborting():
-    """If one pane's capture / send fails, the others are still processed."""
+    """If one pane's send fails, the others are still processed."""
     from backend.services import tmux_service as ts
 
-    panes = [
-        {"target": "good:0.0", "command": "claude"},
-        {"target": "bad:0.0", "command": "claude"},
-    ]
-    captures = {
-        "good:0.0": "rate limit reached",
-        "bad:0.0": "rate limit reached",
+    panes = _make_panes(
+        ("good:0.0", 10, "zsh", False),
+        ("bad:0.0", 20, "zsh", False),
+    )
+    snapshot = {
+        10: (1, "zsh"), 11: (10, "claude"),
+        20: (1, "zsh"), 21: (20, "claude"),
     }
+    captures = {"good:0.0": "rate limit reached", "bad:0.0": "rate limit reached"}
 
     async def fake_capture(target, lines=None):
         return captures[target]
@@ -211,6 +229,7 @@ async def test_wake_records_per_pane_errors_without_aborting():
             raise RuntimeError("send failed")
 
     with patch.object(ts, "list_panes", new=AsyncMock(return_value=panes)), \
+         patch.object(ts, "_process_snapshot", new=AsyncMock(return_value=snapshot)), \
          patch.object(ts, "capture_pane", new=fake_capture), \
          patch.object(ts, "send_keys", new=fake_send):
         summary = await ts.wake_stalled_sessions("continue")
@@ -224,38 +243,218 @@ async def test_wake_records_per_pane_errors_without_aborting():
 async def test_wake_returns_zero_when_no_panes():
     from backend.services import tmux_service as ts
 
-    with patch.object(ts, "list_panes", new=AsyncMock(return_value=[])):
+    with patch.object(ts, "list_panes", new=AsyncMock(return_value=[])), \
+         patch.object(ts, "_process_snapshot", new=AsyncMock(return_value={})):
         summary = await ts.wake_stalled_sessions("continue")
     assert summary == {"scanned": 0, "nudged": [], "errors": []}
 
 
-# ── _looks_like_claude_pane detection shapes ───────────────────────────────
+# ── _comm_looks_like_claude: substring match semantics ────────────────────
 
 
-def test_looks_like_claude_pane_matches_real_world_shapes():
-    """Covers the three real pane_current_command shapes Claude Code
-    reports across install methods.  Regression guard: native-installer
-    builds (post-2.1.100) report the bare semver as the process name —
-    missing that shape meant ``wake_stalled_sessions`` silently skipped
-    every claude pane on modern installs."""
+def test_comm_looks_like_claude_shapes():
+    """Both macOS shapes return True: bare ``claude`` and full-path
+    ``/Users/.../versions/2.1.108``.  Non-claude processes return False."""
+    from backend.services import tmux_service as ts
+    assert ts._comm_looks_like_claude("claude")
+    assert ts._comm_looks_like_claude("Claude")  # case-insensitive
+    assert ts._comm_looks_like_claude("/opt/homebrew/bin/claude")
+    assert ts._comm_looks_like_claude("/Users/x/.local/share/claude/versions/2.1.109")
+    assert ts._comm_looks_like_claude("/Applications/Claude Code.app/claude")
+    assert not ts._comm_looks_like_claude("2.1.108")
+    assert not ts._comm_looks_like_claude("zsh")
+    assert not ts._comm_looks_like_claude("bash")
+    assert not ts._comm_looks_like_claude("node")
+    assert not ts._comm_looks_like_claude("")
+
+
+# ── _pane_has_claude_descendant: BFS through process snapshot ─────────────
+
+
+def test_ancestry_immediate_child_is_claude():
+    from backend.services import tmux_service as ts
+    snap = {100: (1, "zsh"), 200: (100, "claude")}
+    assert ts._pane_has_claude_descendant(100, snap)
+
+
+def test_ancestry_grandchild_through_bash_tool():
+    """Claude Code runs a Bash tool → pane_current_command transiently
+    shows ``bash``, but claude is still an ancestor of that bash.  The
+    walk descends from the shell (pane_pid) — NOT from the foreground
+    process — so claude appears as a direct child of the shell."""
+    from backend.services import tmux_service as ts
+    snap = {
+        100: (1, "zsh"),
+        200: (100, "claude"),
+        300: (200, "bash"),  # Bash tool invocation
+    }
+    assert ts._pane_has_claude_descendant(100, snap)
+
+
+def test_ancestry_wrapper_script_zsh_dash_c():
+    """User aliased ``cc='zsh -c "claude"'`` — shell forks another shell,
+    which execs claude.  Walk must find claude as a grandchild."""
+    from backend.services import tmux_service as ts
+    snap = {
+        100: (1, "zsh"),
+        200: (100, "zsh"),      # zsh -c wrapper
+        300: (200, "claude"),
+    }
+    assert ts._pane_has_claude_descendant(100, snap)
+
+
+def test_ancestry_native_installer_full_path_comm():
+    """Native installer ships claude with comm set to the absolute path
+    of the versioned binary.  ``comm`` contains the substring ``claude``
+    twice — the walk must match it."""
+    from backend.services import tmux_service as ts
+    snap = {
+        100: (1, "zsh"),
+        200: (100, "/Users/x/.local/share/claude/versions/2.1.109"),
+    }
+    assert ts._pane_has_claude_descendant(100, snap)
+
+
+def test_ancestry_no_claude_descendant_returns_false():
+    from backend.services import tmux_service as ts
+    snap = {
+        100: (1, "zsh"),
+        200: (100, "vim"),
+        300: (200, "git"),
+    }
+    assert not ts._pane_has_claude_descendant(100, snap)
+
+
+def test_ancestry_missing_pid_returns_false():
+    from backend.services import tmux_service as ts
+    assert not ts._pane_has_claude_descendant(None, {1: (0, "claude")})
+
+
+def test_ancestry_empty_snapshot_returns_false():
+    from backend.services import tmux_service as ts
+    assert not ts._pane_has_claude_descendant(100, {})
+
+
+def test_ancestry_cycle_guard_terminates():
+    """A malformed snapshot with ppid cycles (ps racing an exec) must
+    not infinite-loop.  visited-set + depth cap both limit traversal."""
+    from backend.services import tmux_service as ts
+    snap = {
+        100: (200, "zsh"),    # 100's parent is 200...
+        200: (100, "bash"),   # ... and 200's parent is 100 — cycle
+    }
+    # Must terminate without claude being found.
+    assert not ts._pane_has_claude_descendant(100, snap)
+
+
+# ── wake integration: opt-in + ancestry gating ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_wake_opt_in_bypasses_ancestry_when_stall_present():
+    """Opt-in pane with no claude descendant but a stall pattern in the
+    capture gets nudged — the user explicitly asked us to treat this
+    pane as claude-owned."""
+    from backend.services import tmux_service as ts
+    panes = _make_panes(("a:0.0", 100, "bash", True))
+    snapshot = {100: (1, "bash")}  # no claude anywhere
+
+    nudged: list[str] = []
+
+    async def fake_send(target, text, press_enter=True):
+        nudged.append(target)
+
+    with patch.object(ts, "list_panes", new=AsyncMock(return_value=panes)), \
+         patch.object(ts, "_process_snapshot", new=AsyncMock(return_value=snapshot)), \
+         patch.object(ts, "capture_pane",
+                     new=AsyncMock(return_value="usage limit reached")), \
+         patch.object(ts, "send_keys", new=fake_send):
+        summary = await ts.wake_stalled_sessions("continue")
+
+    assert nudged == ["a:0.0"]
+    assert summary["nudged"] == ["a:0.0"]
+
+
+@pytest.mark.asyncio
+async def test_wake_opt_in_without_stall_does_not_nudge():
+    """Opt-in bypasses the ancestry gate but NOT the stall gate.  A pane
+    that opted in but has no rate-limit text stays quiet."""
+    from backend.services import tmux_service as ts
+    panes = _make_panes(("a:0.0", 100, "bash", True))
+
+    with patch.object(ts, "list_panes", new=AsyncMock(return_value=panes)), \
+         patch.object(ts, "_process_snapshot", new=AsyncMock(return_value={})), \
+         patch.object(ts, "capture_pane", new=AsyncMock(return_value="$ echo hi")), \
+         patch.object(ts, "send_keys", new=AsyncMock()) as mock_send:
+        summary = await ts.wake_stalled_sessions("continue")
+
+    mock_send.assert_not_called()
+    assert summary["nudged"] == []
+
+
+@pytest.mark.asyncio
+async def test_wake_skips_non_claude_pane_without_capturing():
+    """Invariant 4: a pane with no claude descendant and no opt-in is
+    skipped WITHOUT calling capture_pane — saves the subprocess and
+    avoids reading scrollback of panes we never had permission for."""
+    from backend.services import tmux_service as ts
+    panes = _make_panes(("a:0.0", 100, "zsh", False))
+    snapshot = {100: (1, "zsh"), 200: (100, "vim")}
+
+    mock_capture = AsyncMock()
+    mock_send = AsyncMock()
+
+    with patch.object(ts, "list_panes", new=AsyncMock(return_value=panes)), \
+         patch.object(ts, "_process_snapshot", new=AsyncMock(return_value=snapshot)), \
+         patch.object(ts, "capture_pane", new=mock_capture), \
+         patch.object(ts, "send_keys", new=mock_send):
+        await ts.wake_stalled_sessions("continue")
+
+    mock_capture.assert_not_called()
+    mock_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_snapshot_non_zero_exit_returns_empty():
+    """Explicit coverage for the non-zero-exit branch in _process_snapshot
+    (ps runs but fails).  Without this the graceful-fallback path is only
+    exercised via the higher-level monkeypatch in the opt-in fallback test."""
     from backend.services import tmux_service as ts
 
-    # Legacy npm-global install + absolute paths + case variants.
-    assert ts._looks_like_claude_pane("claude")
-    assert ts._looks_like_claude_pane("/usr/local/bin/claude")
-    assert ts._looks_like_claude_pane("Claude")
-    # Wrapper invocations.
-    assert ts._looks_like_claude_pane("python -m claude")
-    assert ts._looks_like_claude_pane("python3.12 -m claude.cli")
-    # Native installer (2.1.100+): argv[0] is the bare version string.
-    assert ts._looks_like_claude_pane("2.1.108")
-    assert ts._looks_like_claude_pane("2.1.109")
-    assert ts._looks_like_claude_pane("1.0.24")
-    assert ts._looks_like_claude_pane("2.1.108-rc1")
-    # Negative: regular shells / non-semver / empty.
-    assert not ts._looks_like_claude_pane("zsh")
-    assert not ts._looks_like_claude_pane("bash")
-    assert not ts._looks_like_claude_pane("node")
-    assert not ts._looks_like_claude_pane("")
-    assert not ts._looks_like_claude_pane("1.2")  # not semver — two parts
-    assert not ts._looks_like_claude_pane("alpha.beta.gamma")  # non-numeric
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(b"", b"ps: Operation not permitted\n"))
+    mock_proc.returncode = 1
+
+    with patch("asyncio.create_subprocess_exec",
+               new_callable=AsyncMock, return_value=mock_proc):
+        snapshot = await ts._process_snapshot()
+
+    assert snapshot == {}
+
+
+@pytest.mark.asyncio
+async def test_wake_ps_missing_falls_back_to_opt_in_only():
+    """If ``ps`` cannot be invoked, ``_process_snapshot`` returns an
+    empty dict.  Every ancestry check then returns False — only
+    explicitly opted-in panes still get considered."""
+    from backend.services import tmux_service as ts
+    panes = _make_panes(
+        ("a:0.0", 100, "claude", False),  # ancestry-only; skipped when ps=∅
+        ("b:0.0", 200, "claude", True),   # opt-in; still nudged
+    )
+
+    async def fake_capture(target, lines=None):
+        return "rate limit reached"
+
+    nudged: list[str] = []
+
+    async def fake_send(target, text, press_enter=True):
+        nudged.append(target)
+
+    with patch.object(ts, "list_panes", new=AsyncMock(return_value=panes)), \
+         patch.object(ts, "_process_snapshot", new=AsyncMock(return_value={})), \
+         patch.object(ts, "capture_pane", new=fake_capture), \
+         patch.object(ts, "send_keys", new=fake_send):
+        await ts.wake_stalled_sessions("continue")
+
+    assert nudged == ["b:0.0"]

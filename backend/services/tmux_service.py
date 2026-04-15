@@ -17,7 +17,6 @@ control the whole feature.
 
 import asyncio
 import logging
-import os
 import re
 
 from ..database import AsyncSessionLocal
@@ -202,70 +201,150 @@ def looks_stalled(capture: str) -> bool:
     return bool(_STALL_PATTERNS.search(capture))
 
 
-# Claude Code's native (post-2.1.100) installer ships the CLI with
-# argv[0] set to the bare version string — tmux then reports
-# ``pane_current_command = "2.1.108"`` instead of ``claude``.  Match that
-# shape so the nudge finds native-install panes, not just the legacy
-# ``npm i -g @anthropic-ai/claude-code`` ones.
-_SEMVER_COMMAND_RE = re.compile(r"^\d+\.\d+\.\d+([.\-+].*)?$")
+async def _process_snapshot() -> dict[int, tuple[int, str]]:
+    """Return ``{pid: (ppid, comm)}`` for every process visible to the
+    current user.
 
+    Single ``ps`` invocation per ``wake_stalled_sessions`` call — cheaper
+    than per-pane ``pgrep -P``.  ``comm`` is POSIX — on macOS it is the
+    basename of argv[0]; on Linux it is the kernel's task name (from
+    ``/proc/<pid>/comm``).  Both platforms return forms that contain
+    the substring ``"claude"`` somewhere for a Claude Code process,
+    whether invoked as bare ``claude`` or as a full path like
+    ``/Users/.../versions/2.1.109`` — verified empirically against the
+    maintainer's 22-pane workstation.
 
-def _looks_like_claude_pane(command: str) -> bool:
-    """True if ``command`` (from ``pane_current_command``) looks like a Claude
-    Code process.
-
-    Matches three real-world shapes:
-
-    * ``claude`` basename — legacy npm-global install
-      (``/usr/local/bin/claude`` or plain ``claude``).
-    * ``python -m claude`` — wrapper invocations.
-    * Bare semver like ``2.1.108`` — the post-2.1.100 native installer
-      ships the binary with argv[0] set to the version string, and
-      that's what tmux's ``pane_current_command`` reports.
-
-    Used by ``wake_stalled_sessions`` so a stray rate-limit substring in
-    a shell pane's scrollback does not cause us to type the nudge message
-    into that shell (which would execute it as a command — self-footgun).
+    Failure modes fall back to an empty dict, which makes every pane
+    look "no descendants" — the orchestrator then depends on the
+    opt-in flag alone.  Safer than crashing a whole poll cycle.
     """
-    if not command:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ps", "-A", "-o", "pid=,ppid=,comm=",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        logger.debug("ps not found — ancestry detection disabled this cycle")
+        return {}
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except asyncio.TimeoutError:
+        logger.warning("ps -A timed out — killing subprocess")
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+        return {}
+    if proc.returncode != 0:
+        logger.debug("ps -A returncode=%s — snapshot empty", proc.returncode)
+        return {}
+    snapshot: dict[int, tuple[int, str]] = {}
+    for line in stdout.decode(errors="replace").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        snapshot[pid] = (ppid, parts[2])
+    return snapshot
+
+
+# Depth cap for ``_pane_has_claude_descendant``'s BFS — defends against a
+# malformed snapshot with ppid cycles (can happen if ps races an exec).
+_ANCESTRY_MAX_DEPTH = 50
+
+
+def _comm_looks_like_claude(comm: str) -> bool:
+    """True when ``comm`` (from ``ps -o comm=``) names a Claude Code process.
+
+    Matches by substring, not prefix, because macOS ps returns two
+    shapes for native-installer panes:
+
+    * ``claude`` — short form when invoked via PATH.
+    * ``/Users/.../local/share/claude/versions/2.1.109`` — full path
+      when argv[0] is the absolute path.
+
+    Both contain ``"claude"``.  A non-claude process would have to be
+    deliberately named to match; the ancestry walk only inspects
+    descendants of tmux pane shells, which narrows the attack surface
+    to processes the user themselves spawned under that shell.
+    """
+    return "claude" in comm.lower()
+
+
+def _pane_has_claude_descendant(
+    pane_pid: int | None,
+    snapshot: dict[int, tuple[int, str]],
+) -> bool:
+    """BFS from ``pane_pid`` through ``snapshot`` to find a Claude Code
+    descendant.  Returns ``False`` on missing pid, empty snapshot, or
+    cycle detection."""
+    if pane_pid is None or not snapshot:
         return False
-    cmd = command.strip().lower()
-    basename = os.path.basename(cmd.split()[0]) if cmd else ""
-    if basename.startswith("claude"):
-        return True
-    # Handle "python -m claude" style wrappers.
-    tokens = cmd.split()
-    if len(tokens) >= 3 and tokens[0].startswith("python") and tokens[1] == "-m":
-        return tokens[2].startswith("claude")
-    # Native installer (2.1.100+): pane_current_command == "2.1.108" etc.
-    if _SEMVER_COMMAND_RE.match(basename):
-        return True
+    children_of: dict[int, list[int]] = {}
+    for pid, (ppid, _comm) in snapshot.items():
+        children_of.setdefault(ppid, []).append(pid)
+    frontier = [pane_pid]
+    visited: set[int] = set()
+    for _ in range(_ANCESTRY_MAX_DEPTH):
+        next_frontier: list[int] = []
+        for pid in frontier:
+            if pid in visited:
+                continue
+            visited.add(pid)
+            for child in children_of.get(pid, ()):
+                if child in visited:
+                    continue
+                comm = snapshot.get(child, (0, ""))[1]
+                if _comm_looks_like_claude(comm):
+                    return True
+                next_frontier.append(child)
+        if not next_frontier:
+            return False
+        frontier = next_frontier
     return False
 
 
 async def wake_stalled_sessions(message: str) -> dict:
-    """Scan every tmux pane on the box and send ``message`` to each one whose
-    recent output matches a rate-limit notice AND is running ``claude``.
+    """Scan every tmux pane and send ``message`` to each one that is a
+    Claude Code session AND shows a rate-limit notice in its recent
+    output.
 
-    Returns a summary dict suitable for logging:
+    Detection is two-tiered:
+
+    1. **Opt-in** — pane has ``@ccswitch-nudge`` user option set to
+       ``on``.  Bypasses the ancestry walk entirely; precision 100%
+       by user declaration.
+    2. **Ancestry** — the pane's shell (``pane_pid``) has a descendant
+       whose ``comm`` contains ``"claude"``.  Replaces the pre-M2
+       ``pane_current_command`` shape-match so the native installer's
+       ``argv[0]=2.1.108`` pattern is caught by real process-tree
+       membership instead of a fragile string regex.
+
+    Panes with neither signal are skipped WITHOUT calling
+    ``capture_pane`` — saves a subprocess and avoids reading the
+    scrollback of panes we never had permission to touch.
+
+    Returns a summary dict::
 
         {
-          "scanned": int,    # total panes inspected
+          "scanned": int,
           "nudged":  [target, ...],
           "errors":  [{"target": ..., "error": ...}],
         }
-
-    Used by the background switch flow as a "kick stalled sessions" step
-    after every successful ``perform_switch``.  Safe to call when no panes
-    match — does nothing in that case.
     """
     summary = {"scanned": 0, "nudged": [], "errors": []}
     if not message:
         return summary
 
-    # Defensive length cap — the router already validates ALLOWED_KEYS, but
-    # defense in depth is cheap and prevents us from blasting an arbitrarily
-    # long string into every matching pane.
+    # Defensive length cap — the router validates ALLOWED_KEYS, but
+    # defence in depth prevents blasting an arbitrarily long string
+    # into every matching pane.
     if len(message) > 256:
         logger.warning(
             "tmux nudge message too long (%d chars) — truncating to 256",
@@ -276,24 +355,36 @@ async def wake_stalled_sessions(message: str) -> dict:
     panes = await list_panes()
     summary["scanned"] = len(panes)
 
+    # Single process snapshot for the whole scan — cheaper than one
+    # ``pgrep -P`` per pane and avoids torn views between panes.
+    snapshot = await _process_snapshot()
+
     for pane in panes:
         target = pane.get("target")
         if not target:
             continue
-        command = pane.get("command") or ""
-        if not _looks_like_claude_pane(command):
+
+        opt_in = pane.get("opt_in", False)
+        has_claude_descendant = _pane_has_claude_descendant(
+            pane.get("pid"), snapshot
+        )
+
+        if not (opt_in or has_claude_descendant):
             logger.debug(
-                "tmux nudge: skipping %s — not a claude pane (command=%r)",
-                target, command,
+                "tmux nudge: skipping %s — no claude descendant, no opt-in "
+                "(cmd=%r pid=%r)",
+                target, pane.get("command"), pane.get("pid"),
             )
             continue
+
         try:
             capture = await capture_pane(target)
             if not looks_stalled(capture):
                 continue
             await send_keys(target, message, press_enter=True)
             summary["nudged"].append(target)
-            logger.info("tmux nudge sent to %s (%s)", target, command)
+            reason = "opt-in" if opt_in else "ancestry"
+            logger.info("tmux nudge sent to %s (%s)", target, reason)
         except Exception as e:
             summary["errors"].append({"target": target, "error": str(e)})
             logger.warning("tmux nudge failed for %s: %s", target, e)
