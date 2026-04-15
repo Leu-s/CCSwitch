@@ -1,6 +1,30 @@
-from pydantic import BaseModel, Field
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Annotated, Optional
+
+from pydantic import AfterValidator, BaseModel, Field, PlainSerializer
+
+
+def _stamp_utc(value: datetime) -> datetime:
+    """Attach ``tzinfo=UTC`` if the datetime is naive.
+
+    SQLAlchemy's naive ``DateTime`` column (SQLite dialect) strips tzinfo
+    on write and returns naive objects on read.  Every datetime we
+    persist is written via ``datetime.now(timezone.utc)``, so the stored
+    wall clock IS UTC — this validator just re-attaches the label the
+    ORM dropped.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+UtcDateTime = Annotated[
+    datetime,
+    AfterValidator(_stamp_utc),
+    PlainSerializer(
+        lambda v: _stamp_utc(v).isoformat().replace("+00:00", "Z"),
+        return_type=str,
+        when_used="json",
+    ),
+]
 
 
 # ── Accounts ──────────────────────────────────────────────────────────────────
@@ -134,7 +158,7 @@ class SwitchLogOut(BaseModel):
     from_email: Optional[str] = None
     to_email: Optional[str] = None
     reason: str
-    triggered_at: datetime
+    triggered_at: UtcDateTime
     model_config = {"from_attributes": True}
 
 
