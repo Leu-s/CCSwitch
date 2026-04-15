@@ -22,3 +22,7 @@ build/
 .vscode/
 *.swp
 *.swo
+
+# Claude Code harness state + session scratch files
+.claude/
+t
