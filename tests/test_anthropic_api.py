@@ -79,3 +79,111 @@ async def test_refresh_token_success():
 
     assert result["access_token"] == "sk-ant-new"
     assert result["refresh_token"] == "rt-new"
+
+
+# ── OAuth error parser ────────────────────────────────────────────────
+
+from backend.services.anthropic_api import parse_oauth_error, OAuthErrorKind
+
+
+def _make_http_status_error(status: int, json_body=None, text_body=""):
+    """Build an httpx.HTTPStatusError with a realistic response object."""
+    import httpx
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = status
+    if json_body is not None:
+        resp.json = MagicMock(return_value=json_body)
+    else:
+        resp.json = MagicMock(side_effect=ValueError("no json"))
+    resp.text = text_body
+    req = httpx.Request("POST", "https://example.test/oauth2/token")
+    return httpx.HTTPStatusError("status", request=req, response=resp)
+
+
+def test_parse_oauth_error_401_with_invalid_grant_is_terminal():
+    err = _make_http_status_error(401, {"error": "invalid_grant"})
+    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REVOKED
+
+
+def test_parse_oauth_error_401_with_invalid_client_is_terminal():
+    err = _make_http_status_error(401, {"error": "invalid_client"})
+    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REVOKED
+
+
+def test_parse_oauth_error_bare_401_without_body_is_transient():
+    """Bare 401 can be an edge-proxy WAF challenge (Cloudflare etc.) — retry."""
+    err = _make_http_status_error(401, None, "Unauthorized")
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_401_with_unknown_body_is_transient():
+    err = _make_http_status_error(401, {"error": "some_edge_proxy_code"})
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_400_invalid_grant_is_terminal_rejected():
+    err = _make_http_status_error(400, {"error": "invalid_grant"})
+    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+
+
+def test_parse_oauth_error_400_invalid_client_is_terminal_rejected():
+    err = _make_http_status_error(400, {"error": "invalid_client"})
+    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+
+
+def test_parse_oauth_error_400_unauthorized_client_is_terminal():
+    """Per RFC 6749 §5.2, client is not authorised for this grant type —
+    not a self-healing condition, so treat as terminal."""
+    err = _make_http_status_error(400, {"error": "unauthorized_client"})
+    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+
+
+def test_parse_oauth_error_400_unsupported_grant_type_is_terminal():
+    err = _make_http_status_error(400, {"error": "unsupported_grant_type"})
+    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+
+
+def test_parse_oauth_error_400_invalid_scope_is_terminal():
+    err = _make_http_status_error(400, {"error": "invalid_scope"})
+    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+
+
+def test_parse_oauth_error_400_invalid_request_is_transient():
+    err = _make_http_status_error(400, {"error": "invalid_request"})
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_400_unknown_code_is_transient():
+    err = _make_http_status_error(400, {"error": "rate_limited_on_refresh"})
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_400_without_body_is_transient():
+    err = _make_http_status_error(400, None, "Bad Request")
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_400_with_non_dict_body_is_transient():
+    err = _make_http_status_error(400, ["not a dict"])
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_400_with_json_decode_error_is_transient():
+    """Newer httpx versions raise json.JSONDecodeError not ValueError — catch both."""
+    import json
+    err = _make_http_status_error(400, None, "not json either")
+    # Replace the side_effect with JSONDecodeError specifically.
+    err.response.json = MagicMock(
+        side_effect=json.JSONDecodeError("bad", "body", 0)
+    )
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_429_is_transient():
+    err = _make_http_status_error(429, {"error": "rate_limited"})
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+
+
+def test_parse_oauth_error_5xx_is_transient():
+    err = _make_http_status_error(503, None, "Service Unavailable")
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT

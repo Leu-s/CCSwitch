@@ -8,9 +8,95 @@ probe_usage()  — POST a minimal Haiku message and read rate-limit
                  periodic polling.
 """
 
+import enum
+from typing import Any
+
 import httpx
 
 from ..config import settings
+
+# OAuth2 terminal error codes per RFC 6749 §5.2.  Each one names a condition
+# that is NOT self-healing within hours — the refresh_token is dead, the
+# client is mis-registered, or the scope is wrong — so the correct response
+# is to demand a re-login.  Everything else (400 `invalid_request`, 400 with
+# no body, 429, 5xx, network) is transient and eligible for exponential
+# retry.
+#
+# `invalid_grant`          — refresh_token expired, revoked, or reused.
+# `invalid_client`         — client authentication failed (we are mis-
+#                            registered with the authz server).
+# `unauthorized_client`    — client not allowed to use this grant type.
+# `unsupported_grant_type` — authz server doesn't understand this grant.
+# `invalid_scope`          — scope requested is invalid / out of range.
+_TERMINAL_OAUTH_ERROR_CODES = frozenset({
+    "invalid_grant",
+    "invalid_client",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
+})
+
+
+class OAuthErrorKind(enum.Enum):
+    """Classification of a failed refresh request.
+
+    ``TERMINAL_REVOKED``   — refresh token explicitly rejected by the authz
+                             server; user must re-login.
+    ``TERMINAL_REJECTED``  — client or request config problem the server
+                             considers unrecoverable; user must re-login.
+    ``TRANSIENT``          — every other failure (edge-proxy WAF challenges,
+                             500-series, 429, network, 400 with non-terminal
+                             error code, no parseable body).  Retry with
+                             exponential backoff.
+    """
+
+    TERMINAL_REVOKED = "terminal_revoked"
+    TERMINAL_REJECTED = "terminal_rejected"
+    TRANSIENT = "transient"
+
+
+def _extract_oauth_error_code(resp: httpx.Response) -> str | None:
+    """Return the OAuth ``error`` field from a response body, or None if it
+    is not a parseable OAuth2 error response."""
+    try:
+        body: Any = resp.json()
+    except Exception:
+        # httpx versions differ: older raise ValueError, newer raise
+        # json.JSONDecodeError (which is a ValueError subclass but also
+        # surfaces as-is).  Either way — no parseable body.
+        return None
+    if not isinstance(body, dict):
+        return None
+    code = body.get("error")
+    return code if isinstance(code, str) else None
+
+
+def parse_oauth_error(err: httpx.HTTPStatusError) -> OAuthErrorKind:
+    """Classify a refresh-endpoint HTTP error into terminal/transient.
+
+    Rule:
+    * 401 or 400 whose body carries an ``error`` code in
+      ``_TERMINAL_OAUTH_ERROR_CODES`` → TERMINAL_REVOKED (401) or
+      TERMINAL_REJECTED (400).  These are RFC 6749 §5.2 terminal conditions.
+    * Everything else → TRANSIENT.  Includes bare 401 without a body
+      (frequently a Cloudflare / edge-proxy challenge that self-heals),
+      bare 400, 400 with non-terminal code, 429, 5xx, malformed body.
+
+    This is deliberately conservative: false-positive transient is a 2-minute
+    backoff and a retry; false-positive terminal is a phantom-stale account
+    the user cannot clear without the full re-login tmux dance.  The
+    motivating production bug was the latter.
+    """
+    status = err.response.status_code
+    code = _extract_oauth_error_code(err.response) if status in (400, 401) else None
+    if code not in _TERMINAL_OAUTH_ERROR_CODES:
+        return OAuthErrorKind.TRANSIENT
+    return (
+        OAuthErrorKind.TERMINAL_REVOKED
+        if status == 401
+        else OAuthErrorKind.TERMINAL_REJECTED
+    )
+
 
 MESSAGES_URL = settings.anthropic_messages_url
 REFRESH_URL = settings.anthropic_refresh_url
