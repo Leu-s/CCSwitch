@@ -11,7 +11,9 @@ assertions can inspect exactly which service/account keys were written
 without touching the real Keychain.  Redirect the module's hardcoded
 ``~/.claude/`` paths at a ``tmp_path`` subdirectory per test.
 """
+import asyncio
 import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -336,3 +338,287 @@ def test_startup_integrity_noop_when_standard_empty(fake_keychain, fake_claude_h
 
     data = json.loads((fake_claude_home / ".claude.json").read_text())
     assert data["oauthAccount"]["emailAddress"] == "alice@example.com"
+
+
+# ── revalidate_account ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_revalidate_account_success_clears_stale(monkeypatch):
+    """Successful refresh clears stale_reason and returns success=True."""
+    from backend.models import Account
+
+    account = Account(
+        id=42,
+        email="vault@example.com",
+        enabled=True,
+        priority=0,
+        threshold_pct=90,
+        stale_reason="Refresh token rejected — re-login required",
+    )
+
+    db = MagicMock()
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+
+    monkeypatch.setattr(
+        ac.aq, "get_account_by_id",
+        AsyncMock(return_value=account),
+    )
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: {
+            "claudeAiOauth": {
+                "accessToken": "old",
+                "refreshToken": "rt-old",
+                "expiresAt": 0,
+            },
+            "oauthAccount": {"emailAddress": "vault@example.com"},
+            "userID": "u",
+        },
+    )
+
+    async def fake_refresh(refresh_token):
+        assert refresh_token == "rt-old"
+        return {"access_token": "new-access", "refresh_token": "rt-new", "expires_in": 3600}
+
+    monkeypatch.setattr(ac.anthropic_api, "refresh_access_token", fake_refresh)
+
+    saved = {}
+    def fake_save(email, new_token, new_expires_at_ms, new_refresh):
+        saved["email"] = email
+        saved["access"] = new_token
+        saved["refresh"] = new_refresh
+    monkeypatch.setattr(ac.cp, "save_refreshed_vault_token", fake_save)
+
+    monkeypatch.setattr(
+        ac, "get_active_email_async",
+        AsyncMock(return_value="other@example.com"),
+    )
+
+    result = await ac.revalidate_account(42, db)
+    assert result["success"] is True
+    assert result["stale_reason"] is None
+    assert result["active_refused"] is False
+    assert account.stale_reason is None
+    assert saved["access"] == "new-access"
+    assert saved["refresh"] == "rt-new"
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_revalidate_account_refuses_active_account(monkeypatch):
+    """Active-account revalidate violates the single-refresher invariant
+    (CLI owns the active refresh lifecycle) — must refuse with a clear
+    error, leaving stale_reason untouched for the user to switch-then-retry."""
+    from backend.models import Account
+
+    account = Account(
+        id=42,
+        email="active@example.com",
+        enabled=True,
+        priority=0,
+        threshold_pct=90,
+        stale_reason="Refresh token rejected — re-login required",
+    )
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+
+    monkeypatch.setattr(
+        ac.aq, "get_account_by_id", AsyncMock(return_value=account),
+    )
+    monkeypatch.setattr(
+        ac, "get_active_email_async",
+        AsyncMock(return_value="active@example.com"),
+    )
+    # The refresh function should NEVER be called.
+    refresh_calls = []
+    async def fake_refresh(refresh_token):
+        refresh_calls.append(refresh_token)
+        return {}
+    monkeypatch.setattr(ac.anthropic_api, "refresh_access_token", fake_refresh)
+
+    result = await ac.revalidate_account(42, db)
+    assert result["success"] is False
+    assert result["active_refused"] is True
+    assert "active" in result["stale_reason"].lower()
+    # Original stale_reason unchanged — we don't overwrite user-facing state
+    # for an operation we refused.
+    assert account.stale_reason == "Refresh token rejected — re-login required"
+    assert refresh_calls == []
+
+
+@pytest.mark.asyncio
+async def test_revalidate_account_concurrent_calls_serialize(monkeypatch):
+    """Two simultaneous revalidate calls for the same email must not both
+    POST the same single-use refresh_token to Anthropic — the per-email
+    asyncio.Lock serialises them."""
+    from backend.models import Account
+
+    account = Account(
+        id=42,
+        email="vault@example.com",
+        enabled=True,
+        priority=0,
+        threshold_pct=90,
+        stale_reason="Refresh token rejected — re-login required",
+    )
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+
+    monkeypatch.setattr(
+        ac.aq, "get_account_by_id", AsyncMock(return_value=account),
+    )
+    monkeypatch.setattr(
+        ac, "get_active_email_async",
+        AsyncMock(return_value="other@example.com"),
+    )
+
+    credentials_by_call = [
+        {
+            "claudeAiOauth": {
+                "accessToken": "a", "refreshToken": "rt-live", "expiresAt": 0,
+            },
+        },
+        {
+            "claudeAiOauth": {
+                "accessToken": "a", "refreshToken": "rt-new", "expiresAt": 0,
+            },
+        },
+    ]
+    call_idx = {"n": 0}
+
+    def fake_read(email, active_email=None):
+        i = call_idx["n"]
+        call_idx["n"] = min(i + 1, len(credentials_by_call) - 1)
+        return credentials_by_call[i]
+
+    monkeypatch.setattr(ac, "read_credentials_for_email", fake_read)
+
+    refresh_calls: list[str] = []
+    async def fake_refresh(refresh_token):
+        refresh_calls.append(refresh_token)
+        # simulate network latency so the concurrent call has time to queue
+        await asyncio.sleep(0.05)
+        return {
+            "access_token": f"at-after-{refresh_token}",
+            "refresh_token": f"rt-after-{refresh_token}",
+            "expires_in": 3600,
+        }
+    monkeypatch.setattr(ac.anthropic_api, "refresh_access_token", fake_refresh)
+
+    def fake_save(email, t, exp, r):
+        pass
+    monkeypatch.setattr(ac.cp, "save_refreshed_vault_token", fake_save)
+
+    # Fire two revalidate calls in parallel.
+    results = await asyncio.gather(
+        ac.revalidate_account(42, db),
+        ac.revalidate_account(42, db),
+    )
+    # Both succeed (first with rt-live, second with rt-new — because the
+    # per-email lock forced them to serialise and the second saw the
+    # rotated credentials from the first call).
+    assert all(r["success"] is True for r in results)
+    assert refresh_calls == ["rt-live", "rt-new"]
+
+
+@pytest.mark.asyncio
+async def test_revalidate_account_genuine_invalid_grant_keeps_stale(monkeypatch):
+    """If refresh returns 400 invalid_grant, stale_reason is updated with precise reason."""
+    from backend.models import Account
+
+    account = Account(
+        id=42,
+        email="vault@example.com",
+        enabled=True,
+        priority=0,
+        threshold_pct=90,
+        stale_reason="Refresh endpoint transient failure — re-login required",
+    )
+
+    db = MagicMock()
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+
+    monkeypatch.setattr(
+        ac.aq, "get_account_by_id", AsyncMock(return_value=account),
+    )
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: {
+            "claudeAiOauth": {
+                "accessToken": "old", "refreshToken": "rt-dead", "expiresAt": 0,
+            },
+            "oauthAccount": {"emailAddress": "vault@example.com"},
+            "userID": "u",
+        },
+    )
+
+    import httpx
+    req = httpx.Request("POST", "https://api.anthropic.com/oauth2/token")
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 400
+    resp.json = MagicMock(return_value={"error": "invalid_grant"})
+
+    async def fake_refresh(refresh_token):
+        raise httpx.HTTPStatusError("bad", request=req, response=resp)
+
+    monkeypatch.setattr(ac.anthropic_api, "refresh_access_token", fake_refresh)
+
+    # Active-check runs first — if account is not active, proceed.
+    monkeypatch.setattr(
+        ac, "get_active_email_async",
+        AsyncMock(return_value="other@example.com"),
+    )
+
+    result = await ac.revalidate_account(42, db)
+    assert result["success"] is False
+    assert result["active_refused"] is False
+    assert "rejected" in result["stale_reason"].lower()
+    assert account.stale_reason == result["stale_reason"]
+
+
+@pytest.mark.asyncio
+async def test_revalidate_account_missing_account_returns_none(monkeypatch):
+    db = MagicMock()
+    monkeypatch.setattr(
+        ac.aq, "get_account_by_id", AsyncMock(return_value=None),
+    )
+    result = await ac.revalidate_account(999, db)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_revalidate_account_missing_refresh_token_returns_error(monkeypatch):
+    from backend.models import Account
+
+    account = Account(
+        id=42,
+        email="vault@example.com",
+        enabled=True,
+        priority=0,
+        threshold_pct=90,
+        stale_reason="something",
+    )
+    db = MagicMock()
+    db.commit = AsyncMock()
+
+    monkeypatch.setattr(
+        ac.aq, "get_account_by_id", AsyncMock(return_value=account),
+    )
+    monkeypatch.setattr(
+        ac, "get_active_email_async",
+        AsyncMock(return_value="other@example.com"),
+    )
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: None,
+    )
+
+    result = await ac.revalidate_account(42, db)
+    assert result["success"] is False
+    assert result["active_refused"] is False
+    assert "vault" in result["stale_reason"].lower()

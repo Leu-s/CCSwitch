@@ -20,6 +20,8 @@ import os
 import threading
 
 from ..schemas import UsageData
+from . import account_queries as aq
+from . import anthropic_api
 from . import credential_provider as cp
 
 
@@ -436,3 +438,178 @@ async def build_ws_snapshot(db) -> list[dict]:
             "stale_reason": stale_by_email.get(email),
         })
     return snapshot
+
+
+# ── revalidate_account (on-demand stale recovery) ─────────────────────────
+#
+# Per-email async locks serialise concurrent revalidate calls on the same
+# account.  Critical: refresh_tokens are single-use; two concurrent calls
+# with the same token would have the losing call get 400 invalid_grant
+# and overwrite the winner's success with a terminal stale_reason.
+_revalidate_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_revalidate_lock(email: str) -> asyncio.Lock:
+    lock = _revalidate_locks.get(email)
+    if lock is None:
+        lock = asyncio.Lock()
+        _revalidate_locks[email] = lock
+    return lock
+
+
+async def revalidate_account(account_id: int, db) -> dict | None:
+    """Run a single on-demand refresh attempt for a stale **vault** account.
+
+    Used by the new ``POST /api/accounts/{id}/revalidate`` endpoint so the
+    user can recover accounts that were marked ``stale_reason`` by the poll
+    loop's transient-failure escalation without going through the full
+    re-login tmux flow.
+
+    **Invariant:** this function refuses to operate on the currently-active
+    account.  The CLI owns the active account's refresh lifecycle (see
+    CLAUDE.md §"Credential storage") and racing it would corrupt the single-
+    use refresh_token.  Users with a phantom-stale active account should
+    switch to another account first, then revalidate the now-vault entry.
+
+    Returns ``None`` if the account does not exist.  Otherwise returns:
+
+        {
+          "success":         bool,
+          "stale_reason":    str | None,   # value after this call
+          "email":           str,
+          "active_refused":  bool,         # True iff we refused because
+                                           # the account is currently active
+        }
+
+    On success: ``stale_reason`` is cleared in the DB, fresh tokens are
+    written to the vault via ``save_refreshed_vault_token``, and the in-
+    memory refresh-backoff counters for the email are cleared.
+
+    On failure: the precise reason is written to ``stale_reason`` so the
+    caller and the UI can show an accurate message (a genuine
+    ``invalid_grant`` stays stuck; a transient 400 reflects "try again
+    later").
+    """
+    # Late import to avoid circular on background module.
+    from .. import background as bg
+
+    account = await aq.get_account_by_id(account_id, db)
+    if account is None:
+        return None
+
+    email = account.email
+
+    # ── Invariant guard: refuse active-account revalidate ────────────────
+    active_email = await get_active_email_async()
+    if email == active_email:
+        # Returned stale_reason describes the refusal for the UI; the
+        # DB-persisted ``account.stale_reason`` is deliberately left alone
+        # so we don't clobber the real diagnostic with a transient guard
+        # message for an operation we refused.
+        return {
+            "success": False,
+            "stale_reason": (
+                "Cannot revalidate the active account — the Claude Code "
+                "CLI owns this account's refresh token lifecycle. Switch "
+                "to another account first, then revalidate."
+            ),
+            "email": email,
+            "active_refused": True,
+        }
+
+    # ── Serialise concurrent calls on the same email ─────────────────────
+    lock = _get_revalidate_lock(email)
+    async with lock:
+        credentials = read_credentials_for_email(email, active_email)
+        if not credentials:
+            account.stale_reason = "No access token in vault — re-login required"
+            await db.commit()
+            return {
+                "success": False,
+                "stale_reason": account.stale_reason,
+                "email": email,
+                "active_refused": False,
+            }
+
+        refresh_token = cp.refresh_token_of(credentials)
+        if not refresh_token:
+            account.stale_reason = "No refresh token in vault — re-login required"
+            await db.commit()
+            return {
+                "success": False,
+                "stale_reason": account.stale_reason,
+                "email": email,
+                "active_refused": False,
+            }
+
+        import httpx
+        import time as _time
+
+        try:
+            resp = await anthropic_api.refresh_access_token(refresh_token)
+        except httpx.HTTPStatusError as refresh_err:
+            kind = anthropic_api.parse_oauth_error(refresh_err)
+            if kind is anthropic_api.OAuthErrorKind.TERMINAL_REVOKED:
+                account.stale_reason = "Refresh token revoked — re-login required"
+            elif kind is anthropic_api.OAuthErrorKind.TERMINAL_REJECTED:
+                account.stale_reason = "Refresh token rejected — re-login required"
+            else:
+                account.stale_reason = (
+                    f"Refresh endpoint transient failure "
+                    f"(HTTP {refresh_err.response.status_code}) — try again later"
+                )
+            await db.commit()
+            return {
+                "success": False,
+                "stale_reason": account.stale_reason,
+                "email": email,
+                "active_refused": False,
+            }
+        except (httpx.RequestError, RuntimeError) as net_err:
+            account.stale_reason = f"Refresh network error: {net_err}"
+            await db.commit()
+            return {
+                "success": False,
+                "stale_reason": account.stale_reason,
+                "email": email,
+                "active_refused": False,
+            }
+
+        new_token = resp.get("access_token")
+        if not new_token:
+            account.stale_reason = "Refresh succeeded but response had no access_token"
+            await db.commit()
+            return {
+                "success": False,
+                "stale_reason": account.stale_reason,
+                "email": email,
+                "active_refused": False,
+            }
+
+        expires_in = resp.get("expires_in")
+        new_expires_at_ms = (
+            int(_time.time() * 1000) + int(expires_in) * 1000
+            if expires_in
+            else None
+        )
+        new_refresh = resp.get("refresh_token")
+
+        await asyncio.to_thread(
+            cp.save_refreshed_vault_token,
+            email, new_token, new_expires_at_ms, new_refresh,
+        )
+
+        # Clear backoff counters — next poll will re-probe normally.
+        bg._refresh_backoff_until.pop(email, None)
+        bg._refresh_backoff_count.pop(email, None)
+        bg._refresh_backoff_first_failure_at.pop(email, None)
+
+        account.stale_reason = None
+        await db.commit()
+
+        return {
+            "success": True,
+            "stale_reason": None,
+            "email": email,
+            "active_refused": False,
+        }
