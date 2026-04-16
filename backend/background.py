@@ -363,6 +363,10 @@ async def _process_single_account(
     """
     new_stale_reason: str | None = None
     is_active = active_email is not None and account.email == active_email
+    # Fresh rate-limit headers parsed from a 429 response — set in the 429
+    # branch below and passed through to set_usage_error in the outer
+    # except handler so the cache write is a single atomic operation.
+    pending_rl_data: dict | None = None
 
     try:
         # Read credentials from the right Keychain namespace.
@@ -550,15 +554,13 @@ async def _process_single_account(
                     "429 for %s (offense #%d) — backing off %ds",
                     account.email, count, backoff_seconds,
                 )
-                # Anthropic ships the unified rate-limit headers on 429s too
-                # (resets_at, utilization, status per window).  Cache them
-                # BEFORE raising so the downstream set_usage_error preserves
-                # them alongside ``rate_limited: True`` — and the UI can
-                # show "Weekly limit — resets in 2d 14h" instead of a
-                # generic "retry later" fallback.
-                rl_data = anthropic_api.parse_rate_limit_headers(probe_err.response.headers)
-                if rl_data:
-                    await cache.set_usage(account.email, rl_data)
+                # Anthropic ships the unified rate-limit headers on 429s too.
+                # Stash them so the outer except handler can pass them to
+                # set_usage_error — single atomic cache write.
+                pending_rl_data = (
+                    anthropic_api.parse_rate_limit_headers(probe_err.response.headers)
+                    or None
+                )
                 raise
             else:
                 raise
@@ -617,7 +619,7 @@ async def _process_single_account(
         else:
             is_rate_limited = "429" in str(e) or "rate_limit" in str(e).lower()
         new_entry, err_str = await cache.set_usage_error(
-            account.email, err_str, is_rate_limited
+            account.email, err_str, is_rate_limited, rl_data=pending_rl_data,
         )
 
         token_info = await cache.get_token_info_async(account.email) or {}

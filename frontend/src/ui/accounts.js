@@ -76,35 +76,23 @@ export function updateAllExhaustedBanner() {
   banner.classList.toggle("hidden", !allExhausted);
 }
 
-// When rate_limited=true, identify which window triggered it so the UI
-// can render a friendly "Weekly limit reached — resets in 2d 14h" notice
-// instead of the raw Anthropic 429 body.  Returns null if we have no
-// signal at all and should fall back to a generic "Rate limited" badge.
-//
-// Heuristic: if the last observed pct for a window was very high, that
-// window is the likely culprit.  Otherwise pick whichever resets_at
-// we still have cached.  Both can be null right after a probe 429ed
-// without leaving headers behind; caller handles that case.
+// Pick which window caused a rate_limited=true state so the UI can show
+// "Weekly limit reached — resets in 2d 14h" instead of a generic badge.
+// Prefer whichever window has higher utilization; fall back to whichever
+// reset_at is cached; last-resort generic "Rate limited" with no ETA.
 function inferRateLimitNotice(usage) {
-  // Only called when rate_limited === true, so at least one window is
-  // over its quota.  Anthropic ships unified rate-limit headers on 429
-  // responses (backend.services.anthropic_api.parse_rate_limit_headers),
-  // so utilization values should be populated for the exhausted window.
   const fiveH = usage.five_hour_pct;
   const sevenD = usage.seven_day_pct;
   const fiveReset = usage.five_hour_resets_at;
   const sevenReset = usage.seven_day_resets_at;
 
-  // Both windows have utilization: pick whichever is closer to 100%.
   if (fiveH != null && sevenD != null) {
     return sevenD >= fiveH
       ? { label: "Weekly limit reached", resetsAt: sevenReset }
       : { label: "5-hour limit reached", resetsAt: fiveReset };
   }
-  // Only one has utilization — it's the culprit.
   if (sevenD != null) return { label: "Weekly limit reached", resetsAt: sevenReset };
   if (fiveH  != null) return { label: "5-hour limit reached", resetsAt: fiveReset };
-  // No utilization at all: fall back to whichever reset is cached.
   if (sevenReset)     return { label: "Weekly limit reached", resetsAt: sevenReset };
   if (fiveReset)      return { label: "5-hour limit reached", resetsAt: fiveReset };
   return { label: "Rate limited", resetsAt: null };
@@ -138,13 +126,9 @@ function usageBlockHtml(acc) {
   const hasBars    = fiveBlock || sevenBlock;
   const divider    = hasBars ? `<div class="usage-divider"></div>` : "";
 
-  // Rate-limited path: suppress the raw Anthropic error body (it's noisy
-  // and confusing — "This request would exceed your account's rate limit"
-  // reads like a dashboard bug, not an account state).  Show a clean
-  // "Weekly limit reached — resets in 2d 14h" notice instead.  Also skip
-  // the footer badge since the notice already communicates the state.
+  // Rate-limited: show a clean "Weekly limit reached — resets in 2d 14h"
+  // notice instead of the raw Anthropic 429 body (kept as hover tooltip).
   let errBlock = "";
-  let rateLimitedBadge = "";
   if (rateLimited) {
     const { label, resetsAt } = inferRateLimitNotice(usage);
     const rel = resetsAt ? fmtRelative(resetsAt) : "";
@@ -165,8 +149,8 @@ function usageBlockHtml(acc) {
   const tokenExpiringSoon = tokenExpMs && (tokenExpMs - Date.now()) < TOKEN_EXPIRY_SOON_MS;
   const sessionLine = tokenExpMs
     ? `<span class="session-expiry${tokenExpiringSoon ? " expiring-soon" : ""}">Token ${fmtReset(usage.token_expires_at)} · ${fmtRelative(usage.token_expires_at)}</span>` : "";
-  const footer = (subBadge || sessionLine || rateLimitedBadge)
-    ? `<div class="usage-footer">${subBadge}${rateLimitedBadge}${sessionLine}</div>` : "";
+  const footer = (subBadge || sessionLine)
+    ? `<div class="usage-footer">${subBadge}${sessionLine}</div>` : "";
 
   return `<div class="usage-block">${fiveBlock}${sevenBlock}${divider}${errBlock}${usageEmpty}${footer}</div>`;
 }

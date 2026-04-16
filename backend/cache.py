@@ -63,7 +63,8 @@ class _UsageCache:
             self._token_info.pop(email, None)
 
     async def set_usage_error(
-        self, email: str, err_str: str, is_rate_limited: bool
+        self, email: str, err_str: str, is_rate_limited: bool,
+        rl_data: dict | None = None,
     ) -> tuple[dict, str]:
         """Atomically update the cache for a failed probe.
 
@@ -74,19 +75,27 @@ class _UsageCache:
         exists.  The auto-switch loop in ``switcher.maybe_auto_switch``
         reads this flag to decide whether to switch — losing it for accounts
         that have never returned usable data would silently break the switch.
+
+        ``rl_data``: fresh rate-limit window data parsed from the 429
+        response headers (see ``anthropic_api.parse_rate_limit_headers``).
+        When provided alongside ``is_rate_limited=True``, the fresh window
+        data is used directly (authoritative over anything cached).  When
+        absent, prior window data is preserved if any — otherwise we fall
+        back to recording just the error + flag.
         """
         async with self._lock:
-            prev = self._usage.get(email, {})
             if is_rate_limited:
-                if prev and "error" not in prev:
-                    # Preserve the last good utilization data and set the flag.
-                    new_entry = {**prev, "rate_limited": True}
+                if rl_data:
+                    new_entry = {**rl_data, "rate_limited": True}
                     final_err = "Rate limited"
                 else:
-                    # Cold cache or previous error — at minimum record the
-                    # flag so the auto-switch loop can act on it.
-                    new_entry = {"error": err_str, "rate_limited": True}
-                    final_err = err_str
+                    prev = self._usage.get(email, {})
+                    if prev and "error" not in prev:
+                        new_entry = {**prev, "rate_limited": True}
+                        final_err = "Rate limited"
+                    else:
+                        new_entry = {"error": err_str, "rate_limited": True}
+                        final_err = err_str
             else:
                 new_entry = {"error": err_str}
                 final_err = err_str
