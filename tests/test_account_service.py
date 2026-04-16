@@ -54,7 +54,15 @@ def fake_keychain(monkeypatch):
 
     Returns the backing dict ``store`` keyed on ``(service, account)`` so
     tests can assert what ended up in each cell after a swap.
+
+    Also stubs ``anthropic_api.refresh_access_token`` to raise a transient
+    network error so swap step 0.5 logs a warning and proceeds with the
+    stored tokens — keeps the classic swap tests (that assert stored
+    token passes through) behaviourally unchanged after M3.  Tests that
+    care about swap-time refresh semantics override this directly.
     """
+    import httpx
+
     store: dict[tuple[str, str], dict] = {}
 
     def read_vault(email):
@@ -83,6 +91,16 @@ def fake_keychain(monkeypatch):
     monkeypatch.setattr(cp, "read_standard", read_standard)
     monkeypatch.setattr(cp, "write_standard", write_standard)
     monkeypatch.setattr(cp, "delete_standard", delete_standard)
+
+    # M3 swap step 0.5 calls anthropic_api.refresh_access_token.  Default
+    # to a transient failure so tests that don't care about refresh
+    # semantics still see their stored tokens promoted to standard.
+    async def default_refresh_transient(rt):
+        raise httpx.ConnectError("default fake_keychain: refresh disabled")
+    monkeypatch.setattr(
+        ac.anthropic_api, "refresh_access_token", default_refresh_transient,
+    )
+
     return store
 
 
@@ -754,3 +772,180 @@ async def test_revalidate_account_network_error_returns_sanitized_reason(monkeyp
     assert "Connection refused" not in reason
     assert "try again later" in reason.lower()
     assert account.stale_reason == reason
+
+
+# ── Swap step 0.5 — refresh incoming tokens on promotion (M3) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_swap_refreshes_incoming_before_promotion(monkeypatch):
+    """Swap step 0.5: if the incoming vault has valid refresh_token, refresh
+    it before promoting to standard.  Standard entry receives FRESH access_token."""
+    import time as _time
+    from backend.services import credential_provider as cp
+
+    stale_vault = {
+        "claudeAiOauth": {
+            "accessToken": "at-OLD",
+            "refreshToken": "rt-live",
+            "expiresAt": int(_time.time() * 1000) - 60_000,  # expired
+        },
+        "oauthAccount": {"emailAddress": "vault@example.com"},
+        "userID": "u",
+    }
+    monkeypatch.setattr(cp, "read_vault",
+                        lambda email: stale_vault if email == "vault@example.com" else None)
+    monkeypatch.setattr(cp, "refresh_token_of",
+                        lambda creds: creds.get("claudeAiOauth", {}).get("refreshToken"))
+    monkeypatch.setattr(cp, "access_token_of",
+                        lambda creds: creds.get("claudeAiOauth", {}).get("accessToken"))
+
+    async def fake_refresh(rt):
+        assert rt == "rt-live"
+        return {"access_token": "at-FRESH", "refresh_token": "rt-FRESH", "expires_in": 3600}
+    from backend.services import anthropic_api
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    monkeypatch.setattr(cp, "read_standard", lambda: {})
+
+    written_standard = {}
+    def fake_write_standard(blob):
+        written_standard.update(blob)
+        return True
+    monkeypatch.setattr(cp, "write_standard", fake_write_standard)
+    monkeypatch.setattr(cp, "write_vault", lambda email, blob: True)
+    monkeypatch.setattr(ac, "_rewrite_claude_json_identity", lambda b: None)
+    monkeypatch.setattr(ac, "_atomic_write_json", lambda p, b: None)
+
+    saved_calls = []
+    def fake_save_refresh(email, at, expires_at=None, refresh_token=None, already_locked=False):
+        saved_calls.append({"email": email, "access_token": at, "already_locked": already_locked})
+        stale_vault["claudeAiOauth"] = {"accessToken": at, "refreshToken": refresh_token, "expiresAt": expires_at}
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", fake_save_refresh)
+
+    result = await asyncio.to_thread(ac.swap_to_account, "vault@example.com")
+    assert result["target_email"] == "vault@example.com"
+    # Standard entry must carry the FRESH access_token.
+    assert written_standard.get("claudeAiOauth", {}).get("accessToken") == "at-FRESH"
+    # save_refreshed_vault_token called with already_locked=True (swap holds _credential_lock).
+    assert len(saved_calls) == 1
+    assert saved_calls[0]["already_locked"] is True
+
+
+@pytest.mark.asyncio
+async def test_swap_proceeds_when_incoming_refresh_transient(monkeypatch):
+    """Swap-time refresh fails transiently (network, 5xx, below-threshold).
+    Swap proceeds with stored tokens; warning logged; no SwapError."""
+    import httpx
+    from backend.services import credential_provider as cp
+    from backend.services import anthropic_api
+
+    stored_vault = {
+        "claudeAiOauth": {
+            "accessToken": "at-STORED", "refreshToken": "rt-STORED", "expiresAt": 0,
+        },
+        "oauthAccount": {"emailAddress": "vault@example.com"},
+        "userID": "u",
+    }
+    monkeypatch.setattr(cp, "read_vault", lambda email: stored_vault)
+    monkeypatch.setattr(cp, "refresh_token_of",
+                        lambda creds: creds.get("claudeAiOauth", {}).get("refreshToken"))
+
+    async def net_err(rt):
+        raise httpx.ConnectError("simulated")
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", net_err)
+
+    monkeypatch.setattr(cp, "read_standard", lambda: {})
+
+    written_standard = {}
+    monkeypatch.setattr(cp, "write_standard",
+                        lambda b: (written_standard.update(b), True)[1])
+    monkeypatch.setattr(cp, "write_vault", lambda email, blob: True)
+    monkeypatch.setattr(ac, "_rewrite_claude_json_identity", lambda b: None)
+    monkeypatch.setattr(ac, "_atomic_write_json", lambda p, b: None)
+
+    # No save expected (refresh failed).
+    monkeypatch.setattr(cp, "save_refreshed_vault_token",
+                        lambda *a, **kw: pytest.fail("should not persist on transient"))
+
+    result = await asyncio.to_thread(ac.swap_to_account, "vault@example.com")
+    assert result["target_email"] == "vault@example.com"
+    # Swap proceeded with STORED (stale) access_token.
+    assert written_standard.get("claudeAiOauth", {}).get("accessToken") == "at-STORED"
+
+
+@pytest.mark.asyncio
+async def test_swap_aborts_when_incoming_refresh_terminal(monkeypatch):
+    """Swap-time refresh returns terminal (invalid_grant or 401).  SwapError
+    raised, standard Keychain entry NOT overwritten."""
+    import httpx
+    from backend.services import credential_provider as cp
+    from backend.services import anthropic_api
+
+    dead_vault = {
+        "claudeAiOauth": {
+            "accessToken": "at-DEAD", "refreshToken": "rt-DEAD", "expiresAt": 0,
+        },
+        "oauthAccount": {"emailAddress": "vault@example.com"},
+        "userID": "u",
+    }
+    monkeypatch.setattr(cp, "read_vault", lambda email: dead_vault)
+    monkeypatch.setattr(cp, "refresh_token_of",
+                        lambda creds: creds.get("claudeAiOauth", {}).get("refreshToken"))
+
+    req = httpx.Request("POST", "https://api.anthropic.com/oauth/token")
+    resp = MagicMock()
+    resp.status_code = 400
+    resp.json = MagicMock(return_value={"error": "invalid_grant"})
+
+    async def terminal_err(rt):
+        raise httpx.HTTPStatusError("bad", request=req, response=resp)
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", terminal_err)
+
+    monkeypatch.setattr(cp, "read_standard", lambda: {})
+    written_standard = {}
+    def write_guard(blob):
+        written_standard.update(blob)
+        return True
+    monkeypatch.setattr(cp, "write_standard", write_guard)
+
+    with pytest.raises(ac.SwapError) as excinfo:
+        await asyncio.to_thread(ac.swap_to_account, "vault@example.com")
+    assert "re-login" in str(excinfo.value).lower()
+    # STRICT: standard entry must NOT be overwritten — user stays on previous active.
+    assert written_standard == {}
+
+
+@pytest.mark.asyncio
+async def test_swap_skips_refresh_when_no_refresh_token(monkeypatch):
+    """Helper contract: if the incoming blob has NO refresh_token,
+    ``_refresh_incoming_on_promotion`` must return it unchanged without
+    calling ``anthropic_api.refresh_access_token``.
+
+    (The step-1 validation in ``_swap_to_account_locked`` rejects vault
+    entries that lack a refresh_token before step 0.5 runs — see
+    ``test_swap_raises_when_vault_has_no_refresh_token`` — so this
+    code-path only matters if step-1 validation is ever relaxed, but
+    the helper still documents and enforces the guard defensively.)"""
+    from backend.services import credential_provider as cp
+    from backend.services import anthropic_api
+
+    no_rt_blob = {
+        "claudeAiOauth": {"accessToken": "at-NO-RT"},
+        "oauthAccount": {"emailAddress": "vault@example.com"},
+        "userID": "u",
+    }
+    monkeypatch.setattr(cp, "refresh_token_of",
+                        lambda creds: creds.get("claudeAiOauth", {}).get("refreshToken"))
+
+    refresh_calls = []
+    async def never_called(rt):
+        refresh_calls.append(rt)
+        return {}
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", never_called)
+
+    result = ac._refresh_incoming_on_promotion("vault@example.com", no_rt_blob)
+    assert refresh_calls == []
+    # Returned blob is the original, unchanged.
+    assert result is no_rt_blob
+    assert result["claudeAiOauth"]["accessToken"] == "at-NO-RT"
