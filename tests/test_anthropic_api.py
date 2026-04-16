@@ -109,6 +109,51 @@ async def test_refresh_token_success():
     assert result["refresh_token"] == "rt-new"
 
 
+@pytest.mark.asyncio
+async def test_refresh_access_token_includes_client_id_in_body(monkeypatch):
+    """April 2026 production regression guard.
+
+    Anthropic's /v1/oauth/token endpoint rejects POSTs that omit
+    ``client_id`` with HTTP 400 ``invalid_request_error`` — even for
+    healthy refresh_tokens.  The outbound body MUST include the canonical
+    Claude Code client_id (``9d1c250a-e61b-44d9-88ed-5944d1962f5e``),
+    which every OSS Claude-multi-account tool sends.
+    """
+    import json
+    from backend.services import anthropic_api
+
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode())
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={
+            "access_token": "at-new",
+            "refresh_token": "rt-new",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+        })
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = anthropic_api.httpx.AsyncClient
+
+    def _client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(anthropic_api.httpx, "AsyncClient", _client_factory)
+
+    result = await anthropic_api.refresh_access_token("rt-test")
+
+    # Body must contain all three fields — missing client_id was the
+    # April 2026 bug that produced 400 invalid_request_error on healthy
+    # refresh_tokens for three user accounts.
+    assert captured["body"]["grant_type"] == "refresh_token"
+    assert captured["body"]["refresh_token"] == "rt-test"
+    assert captured["body"]["client_id"] == "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    assert result["access_token"] == "at-new"
+
+
 # ── OAuth error parser ────────────────────────────────────────────────
 
 from backend.services.anthropic_api import parse_oauth_error, OAuthErrorKind
@@ -248,17 +293,22 @@ def test_parse_oauth_error_400_with_error_description_preserves_terminal():
 # ── Anthropic nested-envelope classification ──────────────────────────
 
 
-def test_parse_oauth_error_400_anthropic_invalid_request_is_terminal():
-    """Anthropic's actual dead-refresh_token response — 400 with nested
-    envelope carrying error.type = 'invalid_request_error'.  Must be
-    classified terminal, not transient; otherwise Revalidate leaves the
-    user in an eternal 'try again later' loop with a genuinely dead token."""
+def test_parse_oauth_error_400_anthropic_invalid_request_is_transient():
+    """Anthropic's nested 'invalid_request_error' means OUR POST was
+    malformed (e.g. missing ``client_id``) — NOT that the refresh_token
+    is dead.  Must classify TRANSIENT so a single malformed outbound call
+    cannot permanently poison a healthy account.
+
+    April 2026 regression guard: the prior (incorrect) classification
+    cascaded a phantom-stale across three healthy user accounts.
+    See docs/superpowers/plans/2026-04-16-oauth-refresh-client-id-fix.md.
+    """
     err = _make_http_status_error(400, {
         "type": "error",
         "error": {"type": "invalid_request_error", "message": "Invalid request format"},
         "request_id": "req_test",
     })
-    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
 
 
 def test_parse_oauth_error_401_anthropic_auth_error_is_terminal():
@@ -312,13 +362,15 @@ def test_parse_oauth_error_400_anthropic_non_string_type_is_transient():
 
 
 def test_parse_oauth_error_rfc_and_anthropic_both_still_work():
-    """Regression guard: adding Anthropic-shape handling must NOT break
-    the RFC flat-shape path.  Feed both forms with the same terminal
-    intent and verify both classify as terminal."""
+    """Regression guard: both RFC flat shape and Anthropic nested envelope
+    must classify a genuinely-terminal code (``invalid_grant``) as terminal.
+    Uses ``invalid_grant`` for both — it's Anthropic's actual dead-token
+    signal under either shape.
+    """
     rfc = _make_http_status_error(400, {"error": "invalid_grant"})
     anthropic = _make_http_status_error(400, {
         "type": "error",
-        "error": {"type": "invalid_request_error", "message": "..."},
+        "error": {"type": "invalid_grant", "message": "Refresh token expired or revoked"},
     })
     assert parse_oauth_error(rfc) == OAuthErrorKind.TERMINAL_REJECTED
     assert parse_oauth_error(anthropic) == OAuthErrorKind.TERMINAL_REJECTED
