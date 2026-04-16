@@ -750,11 +750,13 @@ async def test_refresh_vault_token_success_returns_new_blob(monkeypatch):
     monkeypatch.setattr(cp, "save_refreshed_vault_token", ok_save)
 
     result = await bg._refresh_vault_token("vault@example.com", "rt-old")
-    assert result["access_token"] == "at-new"
-    assert result["refresh_token"] == "rt-new"
+    assert result.success is True
+    assert result.access_token == "at-new"
+    assert result.refresh_token == "rt-new"
     # expires_at_ms should be ~= now + 3600 s (±5s tolerance for async overhead)
     expected = int(time.time() * 1000) + 3600 * 1000
-    assert abs(result["expires_at_ms"] - expected) < 5000
+    assert abs(result.expires_at_ms - expected) < 5000
+    assert result.stale_reason is None
     # All three backoff dicts cleared.
     assert "vault@example.com" not in bg._refresh_backoff_count
     assert "vault@example.com" not in bg._refresh_backoff_until
@@ -762,26 +764,26 @@ async def test_refresh_vault_token_success_returns_new_blob(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_refresh_vault_token_terminal_400_raises(monkeypatch):
-    """Terminal 400 with RFC flat ``invalid_grant`` → helper raises
-    _RefreshTerminal carrying the stale_reason on err.reason."""
+async def test_refresh_vault_token_terminal_400_returns_failure(monkeypatch):
+    """Terminal 400 with RFC flat ``invalid_grant`` → helper returns
+    RefreshResult(success=False) carrying the stale_reason."""
     async def fake_refresh(rt):
         raise _http_error(400, json_body={"error": "invalid_grant"})
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
-    with pytest.raises(bg._RefreshTerminal) as excinfo:
-        await bg._refresh_vault_token("vault@example.com", "rt-dead")
-    assert "rejected" in excinfo.value.reason or "revoked" in excinfo.value.reason
+    result = await bg._refresh_vault_token("vault@example.com", "rt-dead")
+    assert result.success is False
+    assert "rejected" in result.stale_reason or "revoked" in result.stale_reason
 
 
 @pytest.mark.asyncio
-async def test_refresh_vault_token_terminal_401_raises(monkeypatch):
+async def test_refresh_vault_token_terminal_401_returns_failure(monkeypatch):
     async def fake_refresh(rt):
         raise _http_error(401, json_body={"error": "invalid_grant"})
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
-    with pytest.raises(bg._RefreshTerminal) as excinfo:
-        await bg._refresh_vault_token("vault@example.com", "rt-dead")
-    assert "revoked" in excinfo.value.reason
+    result = await bg._refresh_vault_token("vault@example.com", "rt-dead")
+    assert result.success is False
+    assert "revoked" in result.stale_reason
 
 
 @pytest.mark.asyncio
@@ -792,7 +794,7 @@ async def test_refresh_vault_token_transient_escalates_after_n(monkeypatch):
         raise _http_error(400, json_body={"error": "invalid_request"})
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
-    # First transient — records offense, re-raises HTTPStatusError (not _RefreshTerminal).
+    # First transient — records offense, re-raises HTTPStatusError (not terminal RefreshResult).
     with pytest.raises(httpx.HTTPStatusError):
         await bg._refresh_vault_token("vault@example.com", "rt-probably-live")
     assert bg._refresh_backoff_count["vault@example.com"] == 1
@@ -801,10 +803,10 @@ async def test_refresh_vault_token_transient_escalates_after_n(monkeypatch):
     bg._refresh_backoff_count["vault@example.com"] = bg._TRANSIENT_REFRESH_ESCALATE_AFTER - 1
     bg._refresh_backoff_first_failure_at["vault@example.com"] = time.monotonic() - 10
 
-    # Nth transient — escalates, raises _RefreshTerminal with a reason.
-    with pytest.raises(bg._RefreshTerminal) as excinfo:
-        await bg._refresh_vault_token("vault@example.com", "rt-probably-live")
-    assert excinfo.value.reason  # non-empty stale_reason string
+    # Nth transient — escalates, returns RefreshResult(success=False) with a reason.
+    result = await bg._refresh_vault_token("vault@example.com", "rt-probably-live")
+    assert result.success is False
+    assert result.stale_reason  # non-empty stale_reason string
 
 
 @pytest.mark.asyncio
@@ -825,9 +827,9 @@ async def test_refresh_vault_token_network_error_records_transient(monkeypatch):
 @pytest.mark.asyncio
 async def test_refresh_vault_token_keychain_persist_failure_after_rotation_escalates(monkeypatch):
     """Anthropic rotated our tokens; Keychain persist fails 3×.  The helper
-    must escalate to _RefreshTerminal with a clear reason, NOT silently
-    return success with a non-persisted token (which would break chain on
-    next refresh)."""
+    must return RefreshResult(success=False) with a clear reason, NOT
+    silently return success with a non-persisted token (which would break
+    chain on next refresh)."""
     async def fake_refresh(rt):
         return {"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600}
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
@@ -838,9 +840,9 @@ async def test_refresh_vault_token_keychain_persist_failure_after_rotation_escal
         raise OSError("Keychain locked")
     monkeypatch.setattr(cp, "save_refreshed_vault_token", always_fail)
 
-    with pytest.raises(bg._RefreshTerminal) as excinfo:
-        await bg._refresh_vault_token("vault@example.com", "rt-live")
-    assert "Keychain write failed" in excinfo.value.reason
+    result = await bg._refresh_vault_token("vault@example.com", "rt-live")
+    assert result.success is False
+    assert "Keychain write failed" in result.stale_reason
     assert len(attempts) == 3  # retry loop exhausted
 
 
@@ -861,9 +863,9 @@ async def test_refresh_vault_token_persist_timeout_aborts_without_retry(monkeypa
         raise sp.TimeoutExpired("/usr/bin/security", 5)
     monkeypatch.setattr(cp, "save_refreshed_vault_token", timeout_once)
 
-    with pytest.raises(bg._RefreshTerminal) as excinfo:
-        await bg._refresh_vault_token("vault@example.com", "rt-live")
-    assert "TimeoutExpired" in excinfo.value.reason
+    result = await bg._refresh_vault_token("vault@example.com", "rt-live")
+    assert result.success is False
+    assert "TimeoutExpired" in result.stale_reason
     assert len(attempts) == 1  # no retry
 
 

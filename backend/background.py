@@ -84,14 +84,22 @@ _SLEEP_DETECTION_THRESHOLD_SECONDS = 300.0
 _last_poll_monotonic: float | None = None
 
 
-class _RefreshTerminal(Exception):
-    """Raised when a refresh attempt returned a terminal status.  The
-    ``reason`` attribute carries the stale_reason string the caller
-    should write to account.stale_reason."""
+from dataclasses import dataclass
 
-    def __init__(self, reason: str):
-        super().__init__(reason)
-        self.reason = reason
+
+@dataclass
+class RefreshResult:
+    """Return value from ``_refresh_vault_token``.
+
+    On success: ``success=True``, token fields populated, ``stale_reason=None``.
+    On terminal failure: ``success=False``, ``stale_reason`` carries the reason
+    string the caller should write to ``account.stale_reason``.
+    """
+    success: bool
+    access_token: str | None = None
+    refresh_token: str | None = None
+    expires_at_ms: int | None = None
+    stale_reason: str | None = None
 
 
 def _record_transient_refresh_failure(
@@ -106,8 +114,8 @@ def _record_transient_refresh_failure(
 
     Returns a ``stale_reason`` string if this call tripped the escalation
     threshold (consecutive-count OR 24 h wall-clock ceiling), else
-    ``None``.  Caller sets ``new_stale_reason`` from the returned string
-    and raises ``_RefreshTerminal`` when it is non-None.
+    ``None``.  Caller uses the returned string to build a terminal
+    ``RefreshResult``.
 
     ``status`` is the HTTP status for HTTPStatusError; pass ``None`` for
     network-level errors.  The formatter adapts the message accordingly.
@@ -152,42 +160,21 @@ def _record_transient_refresh_failure(
 async def _refresh_vault_token(
     email: str,
     refresh_token: str,
-) -> dict:
+) -> RefreshResult:
     """Perform one refresh attempt for a vault account's refresh_token.
 
-    Success path returns:
+    Returns ``RefreshResult``:
 
-        {
-          "access_token":   str,
-          "refresh_token":  str | None,          # None if server did not rotate
-          "expires_at_ms":  int | None,          # absolute epoch ms from expires_in
-        }
+    * Success: ``RefreshResult(success=True, access_token=...,
+      refresh_token=..., expires_at_ms=...)``.  Clears all three
+      transient-refresh backoff dicts for ``email``.
+    * Terminal failure: ``RefreshResult(success=False,
+      stale_reason="...")``.  Covers terminal OAuth errors,
+      transient escalation thresholds, and Keychain persist failures.
 
-    and clears all three transient-refresh backoff dicts for ``email``.
-
-    Failure paths (all raise with the stale_reason on ``err.reason``):
-    * ``httpx.HTTPStatusError`` terminal (``is_terminal_oauth_error``
-      returns True) — raise ``_RefreshTerminal(reason=<specific>)``.
-    * HTTPStatusError transient below escalation threshold —
-      ``_record_transient_refresh_failure`` logs + records, then
-      re-raise the original ``HTTPStatusError`` so the caller can
-      decide whether to fall through.
-    * HTTPStatusError transient that trips escalation —
-      raise ``_RefreshTerminal(reason=<escalation>)``.
-    * ``httpx.RequestError`` (network) — same ladder as above,
-      re-raise on sub-threshold / ``_RefreshTerminal`` on escalation.
-    * Keychain persist failure after successful rotation (retries 3×
-      with backoff, then escalates) — raise ``_RefreshTerminal(
-      reason="Keychain write failed after refresh ... — re-login
-      required")``.  Anthropic has already rotated, we cannot persist,
-      so the next refresh attempt would present a dead refresh_token.
-
-    ``_RefreshTerminal`` is the signal to the caller: "this refresh
-    attempt closed the book on this account — write the reason and
-    stop."  The exact stale_reason string lives on ``err.reason``;
-    the caller reads it from ``except _RefreshTerminal as e: ...
-    e.reason``.  No module-level sidecar dict — the exception is the
-    contract.
+    Transient failures (``httpx.HTTPStatusError`` that is NOT terminal
+    and below escalation threshold, ``httpx.RequestError``) are still
+    **raised** — callers catch them separately.
 
     Contract guarantees: the function ONLY reads Anthropic and writes
     the vault + backoff dicts.  It does NOT touch the DB, the cache
@@ -207,12 +194,12 @@ async def _refresh_vault_token(
             _refresh_backoff_until.pop(email, None)
             _refresh_backoff_count.pop(email, None)
             _refresh_backoff_first_failure_at.pop(email, None)
-            raise _RefreshTerminal(f"Refresh token {label} — re-login required") from refresh_http_err
+            return RefreshResult(success=False, stale_reason=f"Refresh token {label} — re-login required")
         # TRANSIENT
         status = refresh_http_err.response.status_code
         stale = _record_transient_refresh_failure(email, status)
         if stale is not None:
-            raise _RefreshTerminal(stale) from refresh_http_err
+            return RefreshResult(success=False, stale_reason=stale)
         raise
     except httpx.RequestError as refresh_net_err:
         logger.warning(
@@ -220,7 +207,7 @@ async def _refresh_vault_token(
         )
         stale = _record_transient_refresh_failure(email, None)
         if stale is not None:
-            raise _RefreshTerminal(stale) from refresh_net_err
+            return RefreshResult(success=False, stale_reason=stale)
         raise
 
     new_token = resp.get("access_token")
@@ -281,9 +268,12 @@ async def _refresh_vault_token(
             "Keychain persist exhausted retries for %s — marking stale: %s",
             email, persist_err,
         )
-        raise _RefreshTerminal(
-            f"Keychain write failed after refresh ({type(persist_err).__name__}) — "
-            f"re-login required"
+        return RefreshResult(
+            success=False,
+            stale_reason=(
+                f"Keychain write failed after refresh ({type(persist_err).__name__}) — "
+                f"re-login required"
+            ),
         )
 
     logger.info("Refreshed vault token for %s", email)
@@ -292,11 +282,12 @@ async def _refresh_vault_token(
     _refresh_backoff_count.pop(email, None)
     _refresh_backoff_first_failure_at.pop(email, None)
 
-    return {
-        "access_token": new_token,
-        "refresh_token": new_refresh,
-        "expires_at_ms": new_expires_at_ms,
-    }
+    return RefreshResult(
+        success=True,
+        access_token=new_token,
+        refresh_token=new_refresh,
+        expires_at_ms=new_expires_at_ms,
+    )
 
 
 def _maybe_nudge_active(email: str) -> None:
@@ -482,11 +473,7 @@ async def _process_single_account(
                 # the event loop).
                 async with ac.with_refresh_lock_async(account.email):
                     try:
-                        new_tokens = await _refresh_vault_token(account.email, refresh_token)
-                    except _RefreshTerminal as term_err:
-                        # Helper carries stale_reason on .reason.
-                        new_stale_reason = term_err.reason or "Refresh token invalid — re-login required"
-                        raise
+                        refresh_result = await _refresh_vault_token(account.email, refresh_token)
                     except (httpx.HTTPStatusError, httpx.RequestError):
                         # Transient below threshold — DO NOT stale.  Return cached.
                         cached = await cache.get_usage_async(account.email) or {}
@@ -498,9 +485,27 @@ async def _process_single_account(
                             "error": cached.get("error"),
                         }, None
 
+                if not refresh_result.success:
+                    new_stale_reason = refresh_result.stale_reason or "Refresh token invalid — re-login required"
+                    err_str = new_stale_reason
+                    new_entry, err_str = await cache.set_usage_error(account.email, err_str, False)
+                    token_info = await cache.get_token_info_async(account.email) or {}
+                    try:
+                        flat = build_usage(new_entry, token_info)
+                        flat_dict = flat.model_dump() if flat else {"error": err_str}
+                    except Exception as _bu_err:
+                        logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
+                        flat_dict = {"error": err_str}
+                    return {
+                        "id": account.id,
+                        "email": account.email,
+                        "usage": flat_dict,
+                        "error": err_str,
+                    }, new_stale_reason
+
                 # Retry probe with the fresh access_token.
                 try:
-                    usage = await anthropic_api.probe_usage(new_tokens["access_token"])
+                    usage = await anthropic_api.probe_usage(refresh_result.access_token)
                 except httpx.HTTPStatusError as retry_err:
                     if retry_err.response.status_code == 401:
                         # Fresh token still 401 — genuinely dead upstream.
@@ -562,24 +567,6 @@ async def _process_single_account(
             "email": account.email,
             "usage": flat_dict,
             "error": None,
-        }
-    except _RefreshTerminal as term_err:
-        # new_stale_reason was set at the raise site (from term_err.reason);
-        # fall back to term_err.reason if not set for some edge path.
-        err_str = new_stale_reason or term_err.reason or "Refresh token invalid"
-        new_entry, err_str = await cache.set_usage_error(account.email, err_str, False)
-        token_info = await cache.get_token_info_async(account.email) or {}
-        try:
-            flat = build_usage(new_entry, token_info)
-            flat_dict = flat.model_dump() if flat else {"error": err_str}
-        except Exception as _bu_err:
-            logger.warning("build_usage failed for %s: %s", account.email, _bu_err)
-            flat_dict = {"error": err_str}
-        usage_entry = {
-            "id": account.id,
-            "email": account.email,
-            "usage": flat_dict,
-            "error": err_str,
         }
     except Exception as e:
         err_str = str(e)

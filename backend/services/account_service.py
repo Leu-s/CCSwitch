@@ -587,7 +587,7 @@ async def revalidate_account(account_id: int, db) -> dict | None:
     later").
 
     **Correctness contract (load-bearing).** Persistence of
-    ``stale_reason`` on ``_RefreshTerminal`` relies on
+    ``stale_reason`` on terminal ``RefreshResult`` relies on
     ``anthropic_api.is_terminal_oauth_error`` correctly separating terminal
     from transient.  Only RFC 6749 §5.2 codes (``invalid_grant``,
     ``invalid_client``, ``unauthorized_client``,
@@ -654,16 +654,7 @@ async def revalidate_account(account_id: int, db) -> dict | None:
             }
 
         try:
-            await bg._refresh_vault_token(email, refresh_token)
-        except bg._RefreshTerminal as terminal_err:
-            account.stale_reason = terminal_err.reason
-            await db.commit()
-            return {
-                "success": False,
-                "stale_reason": account.stale_reason,
-                "email": email,
-                "active_refused": False,
-            }
+            refresh_result = await bg._refresh_vault_token(email, refresh_token)
         except httpx.HTTPStatusError as refresh_err:
             account.stale_reason = (
                 f"Refresh endpoint transient failure "
@@ -679,6 +670,16 @@ async def revalidate_account(account_id: int, db) -> dict | None:
         except (httpx.RequestError, RuntimeError) as net_err:
             logger.warning("Refresh network error for %s: %s", email, net_err)
             account.stale_reason = "Refresh network error — try again later"
+            await db.commit()
+            return {
+                "success": False,
+                "stale_reason": account.stale_reason,
+                "email": email,
+                "active_refused": False,
+            }
+
+        if not refresh_result.success:
+            account.stale_reason = refresh_result.stale_reason
             await db.commit()
             return {
                 "success": False,
