@@ -19,6 +19,8 @@ import logging
 import os
 import threading
 
+import httpx
+
 from ..schemas import UsageData
 from . import account_queries as aq
 from . import anthropic_api
@@ -307,7 +309,6 @@ def _refresh_incoming_on_promotion(email: str, incoming: dict) -> dict:
     correctness boundary.
     """
     from .. import background as bg  # late import to avoid circular
-    import httpx
 
     rt = cp.refresh_token_of(incoming)
     if not rt:
@@ -659,22 +660,22 @@ async def revalidate_account(account_id: int, db) -> dict | None:
                 "active_refused": False,
             }
 
-        import httpx
-        import time as _time
-
         try:
-            resp = await anthropic_api.refresh_access_token(refresh_token)
+            await bg._refresh_vault_token(email, refresh_token, already_locked=False)
+        except bg._RefreshTerminal as terminal_err:
+            account.stale_reason = terminal_err.reason
+            await db.commit()
+            return {
+                "success": False,
+                "stale_reason": account.stale_reason,
+                "email": email,
+                "active_refused": False,
+            }
         except httpx.HTTPStatusError as refresh_err:
-            kind = anthropic_api.parse_oauth_error(refresh_err)
-            if kind is anthropic_api.OAuthErrorKind.TERMINAL_REVOKED:
-                account.stale_reason = "Refresh token revoked — re-login required"
-            elif kind is anthropic_api.OAuthErrorKind.TERMINAL_REJECTED:
-                account.stale_reason = "Refresh token rejected — re-login required"
-            else:
-                account.stale_reason = (
-                    f"Refresh endpoint transient failure "
-                    f"(HTTP {refresh_err.response.status_code}) — try again later"
-                )
+            account.stale_reason = (
+                f"Refresh endpoint transient failure "
+                f"(HTTP {refresh_err.response.status_code}) — try again later"
+            )
             await db.commit()
             return {
                 "success": False,
@@ -693,38 +694,9 @@ async def revalidate_account(account_id: int, db) -> dict | None:
                 "active_refused": False,
             }
 
-        new_token = resp.get("access_token")
-        if not new_token:
-            account.stale_reason = "Refresh succeeded but response had no access_token"
-            await db.commit()
-            return {
-                "success": False,
-                "stale_reason": account.stale_reason,
-                "email": email,
-                "active_refused": False,
-            }
-
-        expires_in = resp.get("expires_in")
-        new_expires_at_ms = (
-            int(_time.time() * 1000) + int(expires_in) * 1000
-            if expires_in
-            else None
-        )
-        new_refresh = resp.get("refresh_token")
-
-        await asyncio.to_thread(
-            cp.save_refreshed_vault_token,
-            email, new_token, new_expires_at_ms, new_refresh,
-        )
-
-        # Clear backoff counters — next poll will re-probe normally.
-        bg._refresh_backoff_until.pop(email, None)
-        bg._refresh_backoff_count.pop(email, None)
-        bg._refresh_backoff_first_failure_at.pop(email, None)
-
+        # Success — helper already persisted tokens and cleared backoff dicts.
         account.stale_reason = None
         await db.commit()
-
         return {
             "success": True,
             "stale_reason": None,

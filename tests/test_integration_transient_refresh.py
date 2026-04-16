@@ -121,7 +121,7 @@ async def test_revalidate_recovers_phantom_stale_account(monkeypatch):
     monkeypatch.setattr(ac.anthropic_api, "refresh_access_token", fake_refresh)
 
     saved = {}
-    def fake_save(email, t, exp, r):
+    def fake_save(email, t, *a, **kw):
         saved["email"] = email
     monkeypatch.setattr(ac.cp, "save_refreshed_vault_token", fake_save)
 
