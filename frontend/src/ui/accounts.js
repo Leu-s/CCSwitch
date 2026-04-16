@@ -86,18 +86,28 @@ export function updateAllExhaustedBanner() {
 // we still have cached.  Both can be null right after a probe 429ed
 // without leaving headers behind; caller handles that case.
 function inferRateLimitNotice(usage) {
+  // Only called when rate_limited === true, so at least one window is
+  // over its quota.  Anthropic ships unified rate-limit headers on 429
+  // responses (backend.services.anthropic_api.parse_rate_limit_headers),
+  // so utilization values should be populated for the exhausted window.
   const fiveH = usage.five_hour_pct;
   const sevenD = usage.seven_day_pct;
   const fiveReset = usage.five_hour_resets_at;
   const sevenReset = usage.seven_day_resets_at;
-  let label = null;
-  let resetsAt = null;
-  if (sevenD != null && sevenD >= 90)       { label = "Weekly limit reached";  resetsAt = sevenReset; }
-  else if (fiveH != null && fiveH >= 95)    { label = "5-hour limit reached";  resetsAt = fiveReset; }
-  else if (sevenReset)                      { label = "Weekly limit reached";  resetsAt = sevenReset; }
-  else if (fiveReset)                       { label = "5-hour limit reached";  resetsAt = fiveReset; }
-  else                                      { label = "Rate limited";          resetsAt = null; }
-  return { label, resetsAt };
+
+  // Both windows have utilization: pick whichever is closer to 100%.
+  if (fiveH != null && sevenD != null) {
+    return sevenD >= fiveH
+      ? { label: "Weekly limit reached", resetsAt: sevenReset }
+      : { label: "5-hour limit reached", resetsAt: fiveReset };
+  }
+  // Only one has utilization — it's the culprit.
+  if (sevenD != null) return { label: "Weekly limit reached", resetsAt: sevenReset };
+  if (fiveH  != null) return { label: "5-hour limit reached", resetsAt: fiveReset };
+  // No utilization at all: fall back to whichever reset is cached.
+  if (sevenReset)     return { label: "Weekly limit reached", resetsAt: sevenReset };
+  if (fiveReset)      return { label: "5-hour limit reached", resetsAt: fiveReset };
+  return { label: "Rate limited", resetsAt: null };
 }
 
 function usageBlockHtml(acc) {

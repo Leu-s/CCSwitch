@@ -45,6 +45,34 @@ async def test_probe_usage_missing_headers_returns_empty():
     assert result == {}
 
 
+def test_parse_rate_limit_headers_partial_429_shape_emits_window_with_reset_only():
+    """On a 429, Anthropic may ship reset-time headers without utilization.
+    parse_rate_limit_headers must still emit the window so the UI can show
+    "Weekly limit — resets in 2d 14h" instead of a blank "Rate limited" fallback.
+    """
+    from backend.services.anthropic_api import parse_rate_limit_headers
+
+    # 429 shape: utilization headers absent, only reset + status for 7d.
+    headers = {
+        "anthropic-ratelimit-unified-7d-reset": "1776636000",
+        "anthropic-ratelimit-unified-7d-status": "exhausted",
+    }
+    result = parse_rate_limit_headers(headers)
+
+    assert "seven_day" in result, "window must be emitted when ANY header is present"
+    assert result["seven_day"]["utilization"] is None
+    assert result["seven_day"]["resets_at"] == 1776636000
+    assert result["seven_day"]["status"] == "exhausted"
+    # 5h absent entirely — no key emitted.
+    assert "five_hour" not in result
+
+
+def test_parse_rate_limit_headers_empty_returns_empty_dict():
+    """No rate-limit headers at all → empty result (no spurious window keys)."""
+    from backend.services.anthropic_api import parse_rate_limit_headers
+    assert parse_rate_limit_headers({}) == {}
+
+
 @pytest.mark.asyncio
 async def test_probe_usage_401_raises():
     """probe_usage raises httpx.HTTPStatusError on 401."""
