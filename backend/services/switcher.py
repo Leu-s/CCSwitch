@@ -109,6 +109,18 @@ async def perform_switch(
     Terminal-refresh failures (``SwapRefreshTerminalError``) are caught
     here, persisted to ``target.stale_reason`` in the DB so the UI
     reflects the dead state, then re-raised.
+
+    **Correctness contract (load-bearing).** The ``SwapRefreshTerminalError``
+    branch persists ``stale_reason`` based on the verdict of
+    ``anthropic_api.parse_oauth_error`` inside ``swap_to_account``'s step
+    0.5 refresh.  Only RFC 6749 §5.2 codes (``invalid_grant``,
+    ``invalid_client``, ``unauthorized_client``,
+    ``unsupported_grant_type``, ``invalid_scope``) and Anthropic's
+    ``authentication_error`` are terminal; Anthropic's
+    ``invalid_request_error`` (OUR POST was malformed) MUST stay
+    transient — misclassifying it was the April 2026 phantom-stale
+    cascade that poisoned three healthy accounts.  See
+    ``docs/superpowers/plans/2026-04-16-oauth-refresh-client-id-fix.md``.
     """
     async with _switch_lock:
         current_email = await ac.get_active_email_async()
