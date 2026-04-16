@@ -76,6 +76,30 @@ export function updateAllExhaustedBanner() {
   banner.classList.toggle("hidden", !allExhausted);
 }
 
+// When rate_limited=true, identify which window triggered it so the UI
+// can render a friendly "Weekly limit reached — resets in 2d 14h" notice
+// instead of the raw Anthropic 429 body.  Returns null if we have no
+// signal at all and should fall back to a generic "Rate limited" badge.
+//
+// Heuristic: if the last observed pct for a window was very high, that
+// window is the likely culprit.  Otherwise pick whichever resets_at
+// we still have cached.  Both can be null right after a probe 429ed
+// without leaving headers behind; caller handles that case.
+function inferRateLimitNotice(usage) {
+  const fiveH = usage.five_hour_pct;
+  const sevenD = usage.seven_day_pct;
+  const fiveReset = usage.five_hour_resets_at;
+  const sevenReset = usage.seven_day_resets_at;
+  let label = null;
+  let resetsAt = null;
+  if (sevenD != null && sevenD >= 90)       { label = "Weekly limit reached";  resetsAt = sevenReset; }
+  else if (fiveH != null && fiveH >= 95)    { label = "5-hour limit reached";  resetsAt = fiveReset; }
+  else if (sevenReset)                      { label = "Weekly limit reached";  resetsAt = sevenReset; }
+  else if (fiveReset)                       { label = "5-hour limit reached";  resetsAt = fiveReset; }
+  else                                      { label = "Rate limited";          resetsAt = null; }
+  return { label, resetsAt };
+}
+
 function usageBlockHtml(acc) {
   const usage = acc.usage || {};
   const threshold = acc.threshold_pct ?? 95;
@@ -103,10 +127,26 @@ function usageBlockHtml(acc) {
   const sevenBlock = sevenD != null ? usageWindow("7 d window", sevenD, usage.seven_day_resets_at)  : "";
   const hasBars    = fiveBlock || sevenBlock;
   const divider    = hasBars ? `<div class="usage-divider"></div>` : "";
-  const errBlock   = err ? `<div class="usage-error">⚠ ${escapeHtml(err)}</div>` : "";
-  const rateLimitedBadge = rateLimited
-    ? `<span class="usage-rate-limited">⚡ Rate limited${(fiveH != null || sevenD != null) ? " (stale data)" : ""}</span>`
-    : "";
+
+  // Rate-limited path: suppress the raw Anthropic error body (it's noisy
+  // and confusing — "This request would exceed your account's rate limit"
+  // reads like a dashboard bug, not an account state).  Show a clean
+  // "Weekly limit reached — resets in 2d 14h" notice instead.  Also skip
+  // the footer badge since the notice already communicates the state.
+  let errBlock = "";
+  let rateLimitedBadge = "";
+  if (rateLimited) {
+    const { label, resetsAt } = inferRateLimitNotice(usage);
+    const rel = resetsAt ? fmtRelative(resetsAt) : "";
+    const resetStr = resetsAt ? fmtReset(resetsAt) : "";
+    const when = resetsAt
+      ? ` · resets ${escapeHtml(resetStr)}${rel ? " · " + escapeHtml(rel) : ""}`
+      : " · retry later";
+    const tooltip = err ? ` title="${escapeHtml(err)}"` : "";
+    errBlock = `<div class="usage-rate-notice"${tooltip}>⚡ ${escapeHtml(label)}${when}</div>`;
+  } else if (err) {
+    errBlock = `<div class="usage-error">⚠ ${escapeHtml(err)}</div>`;
+  }
   const usageEmpty = (!hasBars && !err && !rateLimited) ? `<div class="usage-empty">No usage data yet</div>` : "";
 
   const subBadge = usage.subscription_type

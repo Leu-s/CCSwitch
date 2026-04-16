@@ -439,6 +439,7 @@
   .usage-footer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
   .usage-error { color: var(--danger-text); font-size: 11px; padding: 4px 8px; background: var(--danger-soft); border: 1px solid var(--danger-border); border-radius: var(--radius-sm); }
   .usage-rate-limited { color: var(--warning-text); font-size: 11px; padding: 4px 8px; background: var(--warning-soft); border: 1px solid var(--warning-border); border-radius: var(--radius-sm); display: flex; align-items: center; gap: 4px; }
+  .usage-rate-notice { color: var(--warning-text); font-size: 11px; font-weight: 500; padding: 5px 9px; background: var(--warning-soft); border: 1px solid var(--warning-border); border-radius: var(--radius-sm); display: flex; align-items: center; gap: 4px; letter-spacing: 0.01em; cursor: help; }
   .usage-empty { font-size: 11px; color: var(--text-mute); padding: 2px 0; }
   .sub-badge {
     display: inline-flex; align-items: center; padding: 2px 7px;
