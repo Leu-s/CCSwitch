@@ -267,6 +267,45 @@ def test_delete_non_active_calls_delete_everywhere(client_and_factory, monkeypat
     assert delete_calls == ["bob@example.com"]
 
 
+def test_delete_account_invokes_state_cleanup_calls(client_and_factory, monkeypatch):
+    """The DELETE /api/accounts/{id} handler must clear every module-level
+    per-account dict — both the background-module dicts (via
+    ``forget_account_state``) and the per-email refresh lock dict in
+    account_service (via ``forget_refresh_lock``).  A regression that
+    drops either cleanup call would leak dicts forever across churn."""
+    from backend import background as bg
+
+    client, factory = client_and_factory
+    acc_id = _insert_account(factory, email="alice@example.com")
+
+    async def fake_active():
+        return "bob@example.com"  # bob is active, not alice
+
+    monkeypatch.setattr(ac, "get_active_email_async", fake_active)
+    monkeypatch.setattr(ac, "delete_account_everywhere", lambda email: None)
+
+    # Seed dicts in both modules for alice — both cleanup calls must fire.
+    bg._refresh_backoff_count["alice@example.com"] = 1
+    bg._last_reactive_refresh_at["alice@example.com"] = 99.0
+    ac._refresh_locks["alice@example.com"] = asyncio.Lock()
+
+    try:
+        resp = client.delete(f"/api/accounts/{acc_id}")
+        assert resp.status_code == 204
+
+        # forget_account_state was called → all background dicts purged.
+        assert "alice@example.com" not in bg._refresh_backoff_count
+        assert "alice@example.com" not in bg._last_reactive_refresh_at
+        # forget_refresh_lock was called → per-email lock dict purged.
+        assert "alice@example.com" not in ac._refresh_locks
+    finally:
+        # Defensive: clear anything the test may have left behind even if
+        # the DELETE handler regressed.
+        bg._refresh_backoff_count.pop("alice@example.com", None)
+        bg._last_reactive_refresh_at.pop("alice@example.com", None)
+        ac._refresh_locks.pop("alice@example.com", None)
+
+
 # ── DELETE /api/accounts/{id} — active with replacement ──────────────────
 
 
