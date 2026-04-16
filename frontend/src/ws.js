@@ -2,8 +2,9 @@ import { WS_PING_INTERVAL_MS, MAX_RECONNECT_MS } from "./constants.js";
 import { state } from "./state.js";
 import { qs } from "./utils.js";
 import { toast } from "./toast.js";
-import { renderAccounts, updateUsageLive } from "./ui/accounts.js";
+import { renderAccounts, updateUsageLive, loadAccounts } from "./ui/accounts.js";
 import { loadSwitchLog } from "./ui/log.js";
+import { loadServiceStatus, updateServiceUI } from "./ui/service.js";
 
 let ws = null;
 let wsReconnectAttempts = 0;
@@ -71,14 +72,14 @@ export function connectWs() {
           acc.is_active = (acc.email === msg.to);
         }
         renderAccounts();
-        document.dispatchEvent(new CustomEvent("app:reload-accounts"));
-        document.dispatchEvent(new CustomEvent("app:reload-service"));
+        loadAccounts();
+        loadServiceStatus().then(() => updateServiceUI(state.service));
         if (!isReplay) {
           toast("Account switched", `→ ${msg.to} (${msg.reason})`, "success");
         }
         break;
       case "account_updated":
-        document.dispatchEvent(new CustomEvent("app:reload-accounts"));
+        loadAccounts();
         break;
       case "account_added":
         // Tab B picks up a new slot enrolled in Tab A.  The existing
@@ -86,12 +87,12 @@ export function connectWs() {
         // account_added event must trigger a full /api/accounts reload —
         // otherwise tab B never sees the new card until a switch/delete
         // broadcast forces a reload (multi-tab "ghost slot" bug).
-        document.dispatchEvent(new CustomEvent("app:reload-accounts"));
+        loadAccounts();
         break;
       case "account_deleted":
         state.accounts = state.accounts.filter(a => a.id !== Number(msg.id));
         renderAccounts();
-        document.dispatchEvent(new CustomEvent("app:reload-service"));
+        loadServiceStatus().then(() => updateServiceUI(state.service));
         break;
       case "usage_updated": updateUsageLive(msg.accounts||[]); break;
       case "error": toast("Server error", msg.message, "error", 6000); break;

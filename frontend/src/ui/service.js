@@ -2,7 +2,7 @@ import { state } from "../state.js";
 import { qs } from "../utils.js";
 import { api, withLoading } from "../api.js";
 import { toast } from "../toast.js";
-import { updateAllExhaustedBanner } from "./accounts.js";
+import { updateAllExhaustedBanner, loadAccounts } from "./accounts.js";
 
 export async function loadServiceStatus(silent = false) {
   try {
@@ -52,7 +52,7 @@ export function initServiceListeners() {
           toast("Auto-switch on", `Active: ${r.active_email}`, "success");
         }
         await loadServiceStatus();
-        document.dispatchEvent(new CustomEvent("app:reload-accounts"));
+        loadAccounts();
       } catch (e) {
         toast(isOn ? "Disable failed" : "Enable failed", e.message, "error");
       }

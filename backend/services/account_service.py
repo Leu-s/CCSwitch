@@ -238,14 +238,10 @@ def _swap_to_account_locked(target_email: str) -> dict:
                 f"to vault — aborting swap to {target_email}"
             )
     elif current_standard and not outgoing_email:
-        # Orphan: standard entry has tokens but no oauthAccount metadata.
-        # Stash under a well-known key so the user can see and clean up
-        # in the Settings page.  Never silently drop.
         logger.warning(
-            "Standard entry has no oauthAccount — stashing under "
-            "ccswitch-vault/__orphan_unknown__ before overwrite"
+            "Standard entry has no oauthAccount — skipping checkpoint "
+            "(new architecture guarantees oauthAccount presence)"
         )
-        cp.write_vault("__orphan_unknown__", current_standard)
 
     # ── Step 3: promote incoming ──────────────────────────────────────────
     if not cp.write_standard(incoming):
@@ -272,24 +268,17 @@ def _merge_checkpoint(outgoing_email: str, fresh_standard: dict) -> dict:
     metadata that only lives in the vault."""
     previous_vault = cp.read_vault(outgoing_email) or {}
     merged = dict(previous_vault)
-    # The CLI always writes the tokens nested under claudeAiOauth.  If the
-    # standard entry has top-level token fields (legacy format), normalise
-    # to nested so the vault is consistent.
     nested = fresh_standard.get("claudeAiOauth")
     if isinstance(nested, dict):
-        # Strip expiresAt — CLI-authored claim that can be stale relative
-        # to Anthropic's server state.  Next successful _refresh_vault_token
-        # writes a fresh one.  See spec §9.11.
         stripped = {k: v for k, v in nested.items() if k != "expiresAt"}
         merged["claudeAiOauth"] = stripped
     else:
-        token_fields = {
-            k: fresh_standard[k]
-            for k in ("accessToken", "refreshToken", "subscriptionType")
-            if k in fresh_standard
-        }
-        if token_fields:
-            merged["claudeAiOauth"] = token_fields
+        logger.warning(
+            "Standard entry for %s has no claudeAiOauth (flat-token format?) "
+            "— skipping token checkpoint.  If this recurs, the CLI version "
+            "may be writing legacy-format credentials.",
+            outgoing_email,
+        )
     # Also strip any root-level expiresAt that may have been copied from a
     # legacy-shape standard entry via ``dict(previous_vault)`` → merged.
     merged.pop("expiresAt", None)

@@ -67,14 +67,6 @@ _NUDGE_COOLDOWN_SECONDS = 30
 _last_nudge_at: dict[str, float] = {}
 
 
-# ── Reactive-refresh cooldown (thundering-herd guard) ────────────────────────
-# Per-account cooldown between reactive refresh attempts.  Prevents N
-# concurrent poll cycles from firing N refresh POSTs when Anthropic
-# is briefly returning 401 to all requests (degraded state).
-_REACTIVE_REFRESH_COOLDOWN_SECONDS = 60
-_last_reactive_refresh_at: dict[str, float] = {}
-
-
 # ── Post-sleep stagger ───────────────────────────────────────────────────────
 # When the event loop wall-clock jumps by more than this much between
 # iterations, treat it as a sleep/wake event and add a random 0..30s stagger
@@ -319,7 +311,6 @@ def forget_account_state(email: str) -> None:
     _refresh_backoff_until.pop(email, None)
     _refresh_backoff_count.pop(email, None)
     _refresh_backoff_first_failure_at.pop(email, None)
-    _last_reactive_refresh_at.pop(email, None)
 
 
 async def _process_single_account(
@@ -446,26 +437,6 @@ async def _process_single_account(
                         "error": cached.get("error"),
                     }, None
 
-                # Thundering-herd guard: if we recently attempted a reactive
-                # refresh for this email, don't hammer Anthropic (degraded-
-                # state 401s to all callers will otherwise fan out into N
-                # refresh POSTs per poll cycle).
-                last_reactive = _last_reactive_refresh_at.get(account.email, 0.0)
-                if time.monotonic() - last_reactive < _REACTIVE_REFRESH_COOLDOWN_SECONDS:
-                    logger.debug(
-                        "Vault 401 for %s but reactive-refresh cooldown active",
-                        account.email,
-                    )
-                    cached = await cache.get_usage_async(account.email) or {}
-                    return {
-                        "id": account.id,
-                        "email": account.email,
-                        "usage": (build_usage(cached, token_info).model_dump()
-                                  if build_usage(cached, token_info) else {}),
-                        "error": cached.get("error"),
-                    }, None
-                _last_reactive_refresh_at[account.email] = time.monotonic()
-
                 # Vault 401 reactive refresh — under the shared lock so
                 # we don't race a concurrent Revalidate on the same
                 # email (threading.Lock blocks cross-thread callers;
@@ -516,10 +487,6 @@ async def _process_single_account(
                 await cache.set_usage(account.email, usage)
                 _backoff_until.pop(account.email, None)
                 _backoff_count.pop(account.email, None)
-                # Recovery succeeded — clear the cooldown so a GENUINELY
-                # NEW 401 on the next poll cycle is treated as a fresh
-                # event, not falsely 60s-skipped as if we already tried.
-                _last_reactive_refresh_at.pop(account.email, None)
                 flat = build_usage(usage, token_info) if usage else None
                 flat_dict = flat.model_dump() if flat else {}
                 return {

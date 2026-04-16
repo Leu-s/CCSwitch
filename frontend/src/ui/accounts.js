@@ -3,10 +3,7 @@ import { state, _sliderDebounce } from "../state.js";
 import { qs, qsa, escapeHtml, fmtReset, fmtRelative, tsToMs, usageClass } from "../utils.js";
 import { api, withLoading } from "../api.js";
 import { toast } from "../toast.js";
-
-// Signals to main.js that accounts or service data should be reloaded.
-// Custom events break the circular dep between accounts↔service.
-function reloadAccounts() { document.dispatchEvent(new CustomEvent("app:reload-accounts")); }
+import { openReloginModal, triggerRevalidate } from "./login.js";
 
 function updateSliderFill(slider) {
   const min = Number(slider.min) || 0;
@@ -310,30 +307,20 @@ function attachCardEvents() {
             ok = true;
           } catch(e) { toast("Switch failed", e.message, "error"); }
         });
-        // WS account_switched event will trigger reloadAccounts + reloadService
+        // WS account_switched event will trigger loadAccounts + loadServiceStatus
       } finally { isSwitching = false; }
     });
   });
 
   qsa(".relogin-btn").forEach(btn => {
     btn.addEventListener("click", () => {
-      // Custom event keeps accounts.js → login.js decoupled (mirrors the
-      // app:reload-accounts pattern used elsewhere).  login.js owns the
-      // modal state machine and listens for this event in initLoginListeners.
-      document.dispatchEvent(new CustomEvent("app:relogin-account", {
-        detail: { accountId: Number(btn.dataset.id), email: btn.dataset.email },
-      }));
+      openReloginModal(Number(btn.dataset.id), btn.dataset.email);
     });
   });
 
   qsa(".revalidate-btn").forEach(btn => {
     btn.addEventListener("click", () => {
-      // Fast-recovery sibling of Re-login: POSTs to /revalidate and, on
-      // success, the WS account update clears the stale banner without
-      // the full tmux dance.  login.js listens for this event.
-      document.dispatchEvent(new CustomEvent("app:revalidate-account", {
-        detail: { accountId: Number(btn.dataset.id), email: btn.dataset.email },
-      }));
+      triggerRevalidate(Number(btn.dataset.id), btn.dataset.email);
     });
   });
 
@@ -350,7 +337,7 @@ function attachCardEvents() {
           ok = true;
         } catch(e) { toast("Delete failed", e.message, "error"); }
       });
-      if (ok) reloadAccounts();
+      if (ok) loadAccounts();
     });
   });
 }
@@ -404,7 +391,7 @@ function attachDragHandlers(card) {
       toast("Reordered", "Priority saved", "success", 1800);
     } catch(err) {
       toast("Reorder failed", err.message, "error");
-      reloadAccounts();
+      loadAccounts();
     } finally {
       isSavingPriorities = false;
       if (pendingRenderAfterDrag) { pendingRenderAfterDrag = false; renderAccounts(); }

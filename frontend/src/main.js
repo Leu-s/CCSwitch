@@ -6,18 +6,15 @@ import { qs } from "./utils.js";
 import { loadAccounts } from "./ui/accounts.js";
 import { loadServiceStatus, updateServiceUI, initServiceListeners } from "./ui/service.js";
 import { loadSwitchLog, initLogListeners } from "./ui/log.js";
-import { closeAddModal, initLoginListeners, clearAddTermInterval } from "./ui/login.js";
+import { closeAddModal, initLoginListeners, clearAddTermInterval, setLoginReloadCallbacks } from "./ui/login.js";
 import { loadTmuxNudge, initTmuxNudgeListeners } from "./ui/tmux_nudge.js";
 import { connectWs } from "./ws.js";
 
-// ── App-level reload events (break circular dep between accounts↔service) ──
-document.addEventListener("app:reload-accounts", async () => {
-  await loadAccounts();
-});
-document.addEventListener("app:reload-service", async () => {
-  await loadServiceStatus();
-  updateServiceUI(state.service);
-});
+// Wire login.js reload callbacks to break the login↔accounts circular import.
+setLoginReloadCallbacks(
+  loadAccounts,
+  () => loadServiceStatus().then(() => updateServiceUI(state.service)),
+);
 
 // ── Theme ───────────────────────────────────────────────────────────────────
 function applyTheme(theme) {
