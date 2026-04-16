@@ -21,12 +21,12 @@ def _clear_backoff_state():
     bg._refresh_backoff_until.clear()
     bg._refresh_backoff_count.clear()
     bg._refresh_backoff_first_failure_at.clear()
-    ac._revalidate_locks.clear()
+    ac._refresh_locks.clear()
     yield
     bg._refresh_backoff_until.clear()
     bg._refresh_backoff_count.clear()
     bg._refresh_backoff_first_failure_at.clear()
-    ac._revalidate_locks.clear()
+    ac._refresh_locks.clear()
 
 
 def _http_400(error_code):
@@ -37,13 +37,14 @@ def _http_400(error_code):
     return httpx.HTTPStatusError("bad", request=req, response=resp)
 
 
-@pytest.mark.skip(reason="M2 will re-enable via reactive path")
 @pytest.mark.asyncio
 async def test_transient_400_storm_never_sets_stale_until_escalation(monkeypatch):
-    """Four consecutive transient 400s leave stale_reason None; the fifth escalates."""
+    """Reactive path: N−1 consecutive transient 400s leave stale_reason
+    None; the Nth escalates.  Each iteration clears the backoff + reactive
+    cooldown so the reactive path runs on every call."""
     bg._refresh_backoff_until.clear()
     bg._refresh_backoff_count.clear()
-    near_expiry_ms = int(time.time() * 1000) + 5 * 60 * 1000
+    bg._last_reactive_refresh_at.clear()
 
     from backend.models import Account
     account = Account(
@@ -57,7 +58,7 @@ async def test_transient_400_storm_never_sets_stale_until_escalation(monkeypatch
             "claudeAiOauth": {
                 "accessToken": "at",
                 "refreshToken": "rt",
-                "expiresAt": near_expiry_ms,
+                "expiresAt": int(time.time() * 1000) + 10_000_000,
             },
         },
     )
@@ -67,13 +68,22 @@ async def test_transient_400_storm_never_sets_stale_until_escalation(monkeypatch
     monkeypatch.setattr(anthropic_api, "refresh_access_token", always_transient)
 
     async def fake_probe(token):
-        return {}
+        raise httpx.HTTPStatusError(
+            "401",
+            request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+            response=httpx.Response(
+                401,
+                request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+            ),
+        )
     monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
 
     stale_history = []
-    # Force deadline to the past each iteration so skip doesn't fire.
+    # Force deadline + cooldown to the past each iteration so the reactive
+    # refresh fires every cycle.
     for attempt in range(1, bg._TRANSIENT_REFRESH_ESCALATE_AFTER + 1):
         bg._refresh_backoff_until["vault@example.com"] = time.monotonic() - 1.0
+        bg._last_reactive_refresh_at.pop("vault@example.com", None)
         _, stale = await bg._process_single_account(account, "other@example.com")
         stale_history.append(stale)
 
