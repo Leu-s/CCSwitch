@@ -215,11 +215,38 @@ def test_verify_login_session_no_refresh_token(fake_tmux, tmpdir_home, monkeypat
 # ── start_relogin_session ─────────────────────────────────────────────────
 
 
-def test_start_relogin_rejects_duplicate_for_same_email(fake_tmux, tmpdir_home):
-    ls.start_relogin_session("alice@example.com")
-    with pytest.raises(ValueError) as excinfo:
-        ls.start_relogin_session("alice@example.com")
-    assert "already active" in str(excinfo.value).lower()
+def test_start_relogin_retry_cleans_up_orphan_session(fake_tmux, tmpdir_home):
+    """Clicking Re-login a second time for the same email (after the first
+    attempt was orphaned by a closed tab / browser crash) must tear down
+    the stale session — including the tmux window — and start fresh, not
+    reject with "already active"."""
+    first = ls.start_relogin_session("alice@example.com")
+    first_sid = first["session_id"]
+    assert first_sid in ls._active_login_sessions
+
+    # Second call for the same email — previously raised ValueError;
+    # now reclaims the orphan.
+    second = ls.start_relogin_session("alice@example.com")
+    second_sid = second["session_id"]
+
+    assert second_sid != first_sid, "new session id expected"
+    assert first_sid not in ls._active_login_sessions, "orphan not cleaned up"
+    assert second_sid in ls._active_login_sessions
+
+    # The orphan cleanup fired tmux kill-window on the first session's pane.
+    kill_calls = [c for c in fake_tmux if len(c) >= 2 and c[1] == "kill-window"]
+    assert kill_calls, "tmux kill-window was not invoked for orphan session"
+
+
+def test_start_relogin_for_different_email_does_not_reclaim(fake_tmux, tmpdir_home):
+    """An existing re-login session for a DIFFERENT email must stay
+    untouched when a new re-login for another email starts."""
+    first = ls.start_relogin_session("alice@example.com")
+    second = ls.start_relogin_session("bob@example.com")
+
+    assert first["session_id"] in ls._active_login_sessions
+    assert second["session_id"] in ls._active_login_sessions
+    assert first["session_id"] != second["session_id"]
 
 
 # ── cleanup_login_session ────────────────────────────────────────────────
