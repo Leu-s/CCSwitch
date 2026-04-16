@@ -944,36 +944,6 @@ async def test_vault_probe_401_refresh_transient_no_stale_yet(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_active_probe_401_unchanged_no_reactive_refresh(monkeypatch):
-    """Regression: ACTIVE account probe 401 must still nudge tmux and return
-    cached usage.  The reactive-refresh path is vault-only — CLI owns the
-    active account's refresh lifecycle."""
-    account = _make_account(email="active@example.com")
-    monkeypatch.setattr(
-        ac, "read_credentials_for_email",
-        lambda email, active_email=None: _fresh_creds(),
-    )
-
-    async def fake_probe(token):
-        raise _http_error(401)
-    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
-
-    refresh_calls = []
-    async def fake_refresh(rt):
-        refresh_calls.append(rt)
-        return {}
-    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
-
-    nudge_calls = []
-    monkeypatch.setattr(bg, "_maybe_nudge_active", lambda e: nudge_calls.append(e))
-
-    _, stale = await bg._process_single_account(account, "active@example.com")
-    assert stale is None  # active path returns cached, never writes stale
-    assert refresh_calls == []  # refresh was NOT called for active
-    assert nudge_calls == ["active@example.com"]
-
-
-@pytest.mark.asyncio
 async def test_active_probe_401_never_reactive_refreshes(monkeypatch):
     """Reinforce: active-account 401 path bypasses reactive refresh entirely.
     CLI owns the active refresh lifecycle; CCSwitch must never rotate the
@@ -1142,6 +1112,63 @@ async def test_reactive_refresh_cooldown_returns_cached_without_stale(monkeypatc
     assert stored == cached_usage
     # Flattened entry should reflect the cached utilization.
     assert entry.get("usage", {}).get("five_hour_pct") == 33
+
+
+@pytest.mark.asyncio
+async def test_reactive_refresh_success_clears_cooldown_marker(monkeypatch):
+    """On a successful recovery (probe-401 → refresh → retry-probe 200),
+    ``_last_reactive_refresh_at[email]`` must be popped so a genuinely new
+    401 within 60 s is treated as a fresh event, not cooldown-skipped.
+
+    Regression guard for the pop-on-success line in
+    ``backend/background.py`` (~540): without it, a recovered account
+    would silently fall through the cooldown branch on its next 401 and
+    the UI would see cached usage where a fresh refresh + stale-reason
+    write was actually warranted.
+    """
+    bg._refresh_backoff_until.clear()
+    bg._last_reactive_refresh_at.clear()
+
+    email = "recover@example.com"
+    # Pre-seed a stale cooldown marker (simulating a prior reactive refresh
+    # that succeeded long ago but whose marker was never cleared in the
+    # regression path we're guarding against).
+    bg._last_reactive_refresh_at[email] = time.monotonic() - 3600
+
+    account = _make_account(email=email)
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda e, active_email=None: _fresh_creds(),
+    )
+
+    probe_calls: list[str] = []
+    async def fake_probe(token):
+        probe_calls.append(token)
+        if len(probe_calls) == 1:
+            raise _http_error(401)
+        # Retry probe with the refreshed token succeeds.
+        return {"five_hour": {"utilization": 10.0}}
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    async def fake_refresh(rt):
+        return {"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600}
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    def fake_save(email, access_token, expires_at=None, refresh_token=None, **kw):
+        pass
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", fake_save)
+
+    entry, stale = await bg._process_single_account(account, "other@example.com")
+
+    # Recovery succeeded.
+    assert stale is None
+    assert len(probe_calls) == 2  # original + retry after refresh
+    # THE core assertion: cooldown marker was popped on success so a
+    # genuine new 401 inside the 60 s window won't be falsely skipped.
+    assert email not in bg._last_reactive_refresh_at, (
+        f"Cooldown marker leaked after successful recovery for {email}. "
+        "A genuine new 401 within 60 s would be falsely cooldown-skipped."
+    )
 
 
 @pytest.mark.asyncio

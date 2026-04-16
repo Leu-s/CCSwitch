@@ -353,7 +353,8 @@ end up inside the tmp dir instead of polluting the repo root.
   worker thread via asyncio.to_thread + asyncio.run throwaway loop,
   and asyncio.Lock does not serialise across threads/loops.  Async
   callers acquire via `with_refresh_lock_async` (yields the event loop
-  via `asyncio.to_thread(lock.acquire)`); swap acquires sync.
+  via cancellation-safe `loop.run_in_executor(None, lock.acquire)` under
+  `asyncio.shield`); swap acquires sync.
   Lock-order invariant: `refresh_lock(email)` is always acquired
   OUTSIDE `cp._credential_lock` — reversing would deadlock under
   contention.

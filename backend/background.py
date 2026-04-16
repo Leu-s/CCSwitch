@@ -60,13 +60,6 @@ _TRANSIENT_REFRESH_ESCALATE_AFTER = 5
 _TRANSIENT_REFRESH_ESCALATE_AFTER_SECONDS = 24 * 3600
 
 
-# Refresh window for vault accounts.  CCSwitch is the sole consumer of vault
-# entries, so widening the pre-expiry window past the CLI's own 5-minute
-# default is free — no race partner.  The active account is never refreshed
-# by CCSwitch, so this constant does not apply to it.
-_REFRESH_SKEW_MS = 20 * 60 * 1000
-
-
 # ── Active-probe nudge rate limit ────────────────────────────────────────────
 # Maps email → monotonic deadline before the next nudge is allowed.  Prevents
 # a chatty 401 loop from firing tmux-send-keys every 15 seconds.
