@@ -156,7 +156,7 @@ async def test_refresh_access_token_includes_client_id_in_body(monkeypatch):
 
 # ── OAuth error parser ────────────────────────────────────────────────
 
-from backend.services.anthropic_api import parse_oauth_error, OAuthErrorKind
+from backend.services.anthropic_api import is_terminal_oauth_error
 
 
 def _make_http_status_error(status: int, json_body=None, text_body=""):
@@ -175,70 +175,70 @@ def _make_http_status_error(status: int, json_body=None, text_body=""):
 
 def test_parse_oauth_error_401_with_invalid_grant_is_terminal():
     err = _make_http_status_error(401, {"error": "invalid_grant"})
-    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REVOKED
+    assert is_terminal_oauth_error(err) is True
 
 
 def test_parse_oauth_error_401_with_invalid_client_is_terminal():
     err = _make_http_status_error(401, {"error": "invalid_client"})
-    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REVOKED
+    assert is_terminal_oauth_error(err) is True
 
 
 def test_parse_oauth_error_bare_401_without_body_is_transient():
     """Bare 401 can be an edge-proxy WAF challenge (Cloudflare etc.) — retry."""
     err = _make_http_status_error(401, None, "Unauthorized")
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_401_with_unknown_body_is_transient():
     err = _make_http_status_error(401, {"error": "some_edge_proxy_code"})
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_400_invalid_grant_is_terminal_rejected():
     err = _make_http_status_error(400, {"error": "invalid_grant"})
-    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+    assert is_terminal_oauth_error(err) is True
 
 
 def test_parse_oauth_error_400_invalid_client_is_terminal_rejected():
     err = _make_http_status_error(400, {"error": "invalid_client"})
-    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+    assert is_terminal_oauth_error(err) is True
 
 
 def test_parse_oauth_error_400_unauthorized_client_is_terminal():
     """Per RFC 6749 §5.2, client is not authorised for this grant type —
     not a self-healing condition, so treat as terminal."""
     err = _make_http_status_error(400, {"error": "unauthorized_client"})
-    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+    assert is_terminal_oauth_error(err) is True
 
 
 def test_parse_oauth_error_400_unsupported_grant_type_is_terminal():
     err = _make_http_status_error(400, {"error": "unsupported_grant_type"})
-    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+    assert is_terminal_oauth_error(err) is True
 
 
 def test_parse_oauth_error_400_invalid_scope_is_terminal():
     err = _make_http_status_error(400, {"error": "invalid_scope"})
-    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+    assert is_terminal_oauth_error(err) is True
 
 
 def test_parse_oauth_error_400_invalid_request_is_transient():
     err = _make_http_status_error(400, {"error": "invalid_request"})
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_400_unknown_code_is_transient():
     err = _make_http_status_error(400, {"error": "rate_limited_on_refresh"})
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_400_without_body_is_transient():
     err = _make_http_status_error(400, None, "Bad Request")
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_400_with_non_dict_body_is_transient():
     err = _make_http_status_error(400, ["not a dict"])
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_400_with_json_decode_error_is_transient():
@@ -249,35 +249,35 @@ def test_parse_oauth_error_400_with_json_decode_error_is_transient():
     err.response.json = MagicMock(
         side_effect=json.JSONDecodeError("bad", "body", 0)
     )
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_429_is_transient():
     err = _make_http_status_error(429, {"error": "rate_limited"})
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_5xx_is_transient():
     err = _make_http_status_error(503, None, "Service Unavailable")
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_error_field_null_is_transient():
     """Body has explicit `error: null` — still transient (no terminal code)."""
     err = _make_http_status_error(400, {"error": None})
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_error_field_non_string_is_transient():
     """Body has `error` as a non-string type — isinstance guard forces transient."""
     err = _make_http_status_error(400, {"error": 400})
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_403_is_transient():
     """Status 403 must short-circuit to transient before body lookup fires."""
     err = _make_http_status_error(403, {"error": "invalid_grant"})
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_400_with_error_description_preserves_terminal():
@@ -287,7 +287,7 @@ def test_parse_oauth_error_400_with_error_description_preserves_terminal():
         400,
         {"error": "invalid_grant", "error_description": "Token was revoked by user"},
     )
-    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REJECTED
+    assert is_terminal_oauth_error(err) is True
 
 
 # ── Anthropic nested-envelope classification ──────────────────────────
@@ -308,7 +308,7 @@ def test_parse_oauth_error_400_anthropic_invalid_request_is_transient():
         "error": {"type": "invalid_request_error", "message": "Invalid request format"},
         "request_id": "req_test",
     })
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_401_anthropic_auth_error_is_terminal():
@@ -319,7 +319,7 @@ def test_parse_oauth_error_401_anthropic_auth_error_is_terminal():
         "error": {"type": "authentication_error", "message": "Invalid authentication credentials"},
         "request_id": "req_test",
     })
-    assert parse_oauth_error(err) == OAuthErrorKind.TERMINAL_REVOKED
+    assert is_terminal_oauth_error(err) is True
 
 
 def test_parse_oauth_error_429_anthropic_rate_limit_is_transient():
@@ -329,7 +329,7 @@ def test_parse_oauth_error_429_anthropic_rate_limit_is_transient():
         "type": "error",
         "error": {"type": "rate_limit_error", "message": "Too many requests"},
     })
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_500_anthropic_overloaded_is_transient():
@@ -338,7 +338,7 @@ def test_parse_oauth_error_500_anthropic_overloaded_is_transient():
         "type": "error",
         "error": {"type": "overloaded_error", "message": "Server overloaded"},
     })
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_400_anthropic_missing_type_in_error_is_transient():
@@ -348,7 +348,7 @@ def test_parse_oauth_error_400_anthropic_missing_type_in_error_is_transient():
         "type": "error",
         "error": {"message": "Something wrong"},
     })
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_400_anthropic_non_string_type_is_transient():
@@ -358,7 +358,7 @@ def test_parse_oauth_error_400_anthropic_non_string_type_is_transient():
         "type": "error",
         "error": {"type": 42, "message": "boom"},
     })
-    assert parse_oauth_error(err) == OAuthErrorKind.TRANSIENT
+    assert is_terminal_oauth_error(err) is False
 
 
 def test_parse_oauth_error_rfc_and_anthropic_both_still_work():
@@ -372,5 +372,5 @@ def test_parse_oauth_error_rfc_and_anthropic_both_still_work():
         "type": "error",
         "error": {"type": "invalid_grant", "message": "Refresh token expired or revoked"},
     })
-    assert parse_oauth_error(rfc) == OAuthErrorKind.TERMINAL_REJECTED
-    assert parse_oauth_error(anthropic) == OAuthErrorKind.TERMINAL_REJECTED
+    assert is_terminal_oauth_error(rfc) is True
+    assert is_terminal_oauth_error(anthropic) is True

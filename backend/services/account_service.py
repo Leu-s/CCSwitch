@@ -588,7 +588,7 @@ async def revalidate_account(account_id: int, db) -> dict | None:
 
     **Correctness contract (load-bearing).** Persistence of
     ``stale_reason`` on ``_RefreshTerminal`` relies on
-    ``anthropic_api.parse_oauth_error`` correctly separating terminal
+    ``anthropic_api.is_terminal_oauth_error`` correctly separating terminal
     from transient.  Only RFC 6749 §5.2 codes (``invalid_grant``,
     ``invalid_client``, ``unauthorized_client``,
     ``unsupported_grant_type``, ``invalid_scope``) and Anthropic's

@@ -166,8 +166,8 @@ async def _refresh_vault_token(
     and clears all three transient-refresh backoff dicts for ``email``.
 
     Failure paths (all raise with the stale_reason on ``err.reason``):
-    * ``httpx.HTTPStatusError`` terminal (OAuthErrorKind.TERMINAL_*) —
-      raise ``_RefreshTerminal(reason=<specific>)``.
+    * ``httpx.HTTPStatusError`` terminal (``is_terminal_oauth_error``
+      returns True) — raise ``_RefreshTerminal(reason=<specific>)``.
     * HTTPStatusError transient below escalation threshold —
       ``_record_transient_refresh_failure`` logs + records, then
       re-raise the original ``HTTPStatusError`` so the caller can
@@ -197,27 +197,19 @@ async def _refresh_vault_token(
     try:
         resp = await anthropic_api.refresh_access_token(refresh_token)
     except httpx.HTTPStatusError as refresh_http_err:
-        kind = anthropic_api.parse_oauth_error(refresh_http_err)
-        status = refresh_http_err.response.status_code
-        if kind is anthropic_api.OAuthErrorKind.TERMINAL_REVOKED:
+        if anthropic_api.is_terminal_oauth_error(refresh_http_err):
+            status = refresh_http_err.response.status_code
+            label = "revoked" if status == 401 else "rejected"
             logger.error(
-                "Refresh token revoked for %s (HTTP 401 + terminal body) — re-login required.",
-                email,
+                "Refresh token %s for %s (HTTP %d + terminal OAuth code) — re-login required.",
+                label, email, status,
             )
             _refresh_backoff_until.pop(email, None)
             _refresh_backoff_count.pop(email, None)
             _refresh_backoff_first_failure_at.pop(email, None)
-            raise _RefreshTerminal("Refresh token revoked — re-login required") from refresh_http_err
-        if kind is anthropic_api.OAuthErrorKind.TERMINAL_REJECTED:
-            logger.error(
-                "Refresh token rejected for %s (HTTP %d + terminal OAuth code) — re-login required.",
-                email, status,
-            )
-            _refresh_backoff_until.pop(email, None)
-            _refresh_backoff_count.pop(email, None)
-            _refresh_backoff_first_failure_at.pop(email, None)
-            raise _RefreshTerminal("Refresh token rejected — re-login required") from refresh_http_err
+            raise _RefreshTerminal(f"Refresh token {label} — re-login required") from refresh_http_err
         # TRANSIENT
+        status = refresh_http_err.response.status_code
         stale = _record_transient_refresh_failure(email, status)
         if stale is not None:
             raise _RefreshTerminal(stale) from refresh_http_err

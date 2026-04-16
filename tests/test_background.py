@@ -417,8 +417,6 @@ async def test_process_returns_stale_reason_tuple(monkeypatch):
 async def test_refresh_400_invalid_grant_sets_terminal_stale(monkeypatch):
     """Reactive path: probe 401 triggers refresh; 400 invalid_grant →
     terminal stale_reason, no backoff counters."""
-    from backend.services.anthropic_api import OAuthErrorKind  # noqa: F401
-
     bg._refresh_backoff_until.clear()
     bg._refresh_backoff_count.clear()
     account = _make_account(email="vault@example.com")
