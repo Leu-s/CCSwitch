@@ -292,47 +292,6 @@ async def test_perform_switch_swap_error_broadcasts_and_skips_log(db_session, mo
 
 
 @pytest.mark.asyncio
-async def test_perform_switch_refresh_terminal_marks_stale_and_raises(db_session, monkeypatch):
-    """When step 0.5 refresh_token is terminally rejected, perform_switch
-    must persist ``target.stale_reason`` in the DB, broadcast
-    account_updated, and re-raise SwapError so the router returns 409."""
-    db_session.add_all([
-        _make_account(email="a@example.com", priority=0),
-        _make_account(email="b@example.com", priority=1),
-    ])
-    await db_session.commit()
-
-    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
-
-    def raise_terminal(email):
-        raise ac.SwapRefreshTerminalError(
-            target_email=email,
-            reason="Refresh token rejected — re-login required",
-        )
-
-    monkeypatch.setattr(ac, "swap_to_account", raise_terminal)
-
-    ws = _FakeWS()
-    target = (await db_session.execute(
-        select(Account).where(Account.email == "b@example.com")
-    )).scalar_one()
-
-    with pytest.raises(ac.SwapError):
-        await sw.perform_switch(target, "manual", db_session, ws)
-
-    # Stale reason persisted to DB.
-    await db_session.refresh(target)
-    assert target.stale_reason == "Refresh token rejected — re-login required"
-
-    # account_updated broadcast (not a generic error event) so the UI
-    # re-fetches and re-renders the card with the stale banner.
-    assert any(
-        e.get("type") == "account_updated" and e.get("email") == "b@example.com"
-        for e in ws.events
-    )
-
-
-@pytest.mark.asyncio
 async def test_perform_switch_times_out_releases_switch_lock(db_session, monkeypatch):
     """Regression guard: when ``swap_to_account`` hangs inside its worker
     thread (stuck asyncio.run shutdown, stuck security subprocess, etc.),

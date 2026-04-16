@@ -119,12 +119,8 @@ async def _attempt_refresh(email: str) -> tuple[str, Any]:
     try:
         new_tokens = await anthropic_api.refresh_access_token(refresh_token)
     except httpx.HTTPStatusError as http_err:
-        kind = anthropic_api.parse_oauth_error(http_err)
         status_code = http_err.response.status_code
-        if kind in (
-            anthropic_api.OAuthErrorKind.TERMINAL_REVOKED,
-            anthropic_api.OAuthErrorKind.TERMINAL_REJECTED,
-        ):
+        if anthropic_api.is_terminal_oauth_error(http_err):
             return "dead", f"HTTP {status_code} terminal (RFC 6749 §5.2)"
         return "skipped", f"HTTP {status_code} transient"
     except httpx.RequestError as net_err:

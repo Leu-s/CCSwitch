@@ -38,7 +38,6 @@ async def _wipe_cache_between_tests():
     bg._refresh_backoff_count.clear()
     bg._refresh_backoff_first_failure_at.clear()
     bg._last_nudge_at.clear()
-    bg._last_reactive_refresh_at.clear()
     bg._last_poll_monotonic = None
     yield
     _cache._usage.clear()
@@ -49,7 +48,6 @@ async def _wipe_cache_between_tests():
     bg._refresh_backoff_count.clear()
     bg._refresh_backoff_first_failure_at.clear()
     bg._last_nudge_at.clear()
-    bg._last_reactive_refresh_at.clear()
     bg._last_poll_monotonic = None
 
 
@@ -417,8 +415,6 @@ async def test_process_returns_stale_reason_tuple(monkeypatch):
 async def test_refresh_400_invalid_grant_sets_terminal_stale(monkeypatch):
     """Reactive path: probe 401 triggers refresh; 400 invalid_grant →
     terminal stale_reason, no backoff counters."""
-    from backend.services.anthropic_api import OAuthErrorKind  # noqa: F401
-
     bg._refresh_backoff_until.clear()
     bg._refresh_backoff_count.clear()
     account = _make_account(email="vault@example.com")
@@ -752,11 +748,13 @@ async def test_refresh_vault_token_success_returns_new_blob(monkeypatch):
     monkeypatch.setattr(cp, "save_refreshed_vault_token", ok_save)
 
     result = await bg._refresh_vault_token("vault@example.com", "rt-old")
-    assert result["access_token"] == "at-new"
-    assert result["refresh_token"] == "rt-new"
+    assert result.success is True
+    assert result.access_token == "at-new"
+    assert result.refresh_token == "rt-new"
     # expires_at_ms should be ~= now + 3600 s (±5s tolerance for async overhead)
     expected = int(time.time() * 1000) + 3600 * 1000
-    assert abs(result["expires_at_ms"] - expected) < 5000
+    assert abs(result.expires_at_ms - expected) < 5000
+    assert result.stale_reason is None
     # All three backoff dicts cleared.
     assert "vault@example.com" not in bg._refresh_backoff_count
     assert "vault@example.com" not in bg._refresh_backoff_until
@@ -764,26 +762,26 @@ async def test_refresh_vault_token_success_returns_new_blob(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_refresh_vault_token_terminal_400_raises(monkeypatch):
-    """Terminal 400 with RFC flat ``invalid_grant`` → helper raises
-    _RefreshTerminal carrying the stale_reason on err.reason."""
+async def test_refresh_vault_token_terminal_400_returns_failure(monkeypatch):
+    """Terminal 400 with RFC flat ``invalid_grant`` → helper returns
+    RefreshResult(success=False) carrying the stale_reason."""
     async def fake_refresh(rt):
         raise _http_error(400, json_body={"error": "invalid_grant"})
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
-    with pytest.raises(bg._RefreshTerminal) as excinfo:
-        await bg._refresh_vault_token("vault@example.com", "rt-dead")
-    assert "rejected" in excinfo.value.reason or "revoked" in excinfo.value.reason
+    result = await bg._refresh_vault_token("vault@example.com", "rt-dead")
+    assert result.success is False
+    assert "rejected" in result.stale_reason or "revoked" in result.stale_reason
 
 
 @pytest.mark.asyncio
-async def test_refresh_vault_token_terminal_401_raises(monkeypatch):
+async def test_refresh_vault_token_terminal_401_returns_failure(monkeypatch):
     async def fake_refresh(rt):
         raise _http_error(401, json_body={"error": "invalid_grant"})
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
-    with pytest.raises(bg._RefreshTerminal) as excinfo:
-        await bg._refresh_vault_token("vault@example.com", "rt-dead")
-    assert "revoked" in excinfo.value.reason
+    result = await bg._refresh_vault_token("vault@example.com", "rt-dead")
+    assert result.success is False
+    assert "revoked" in result.stale_reason
 
 
 @pytest.mark.asyncio
@@ -794,7 +792,7 @@ async def test_refresh_vault_token_transient_escalates_after_n(monkeypatch):
         raise _http_error(400, json_body={"error": "invalid_request"})
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
 
-    # First transient — records offense, re-raises HTTPStatusError (not _RefreshTerminal).
+    # First transient — records offense, re-raises HTTPStatusError (not terminal RefreshResult).
     with pytest.raises(httpx.HTTPStatusError):
         await bg._refresh_vault_token("vault@example.com", "rt-probably-live")
     assert bg._refresh_backoff_count["vault@example.com"] == 1
@@ -803,10 +801,10 @@ async def test_refresh_vault_token_transient_escalates_after_n(monkeypatch):
     bg._refresh_backoff_count["vault@example.com"] = bg._TRANSIENT_REFRESH_ESCALATE_AFTER - 1
     bg._refresh_backoff_first_failure_at["vault@example.com"] = time.monotonic() - 10
 
-    # Nth transient — escalates, raises _RefreshTerminal with a reason.
-    with pytest.raises(bg._RefreshTerminal) as excinfo:
-        await bg._refresh_vault_token("vault@example.com", "rt-probably-live")
-    assert excinfo.value.reason  # non-empty stale_reason string
+    # Nth transient — escalates, returns RefreshResult(success=False) with a reason.
+    result = await bg._refresh_vault_token("vault@example.com", "rt-probably-live")
+    assert result.success is False
+    assert result.stale_reason  # non-empty stale_reason string
 
 
 @pytest.mark.asyncio
@@ -827,9 +825,9 @@ async def test_refresh_vault_token_network_error_records_transient(monkeypatch):
 @pytest.mark.asyncio
 async def test_refresh_vault_token_keychain_persist_failure_after_rotation_escalates(monkeypatch):
     """Anthropic rotated our tokens; Keychain persist fails 3×.  The helper
-    must escalate to _RefreshTerminal with a clear reason, NOT silently
-    return success with a non-persisted token (which would break chain on
-    next refresh)."""
+    must return RefreshResult(success=False) with a clear reason, NOT
+    silently return success with a non-persisted token (which would break
+    chain on next refresh)."""
     async def fake_refresh(rt):
         return {"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600}
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
@@ -840,9 +838,9 @@ async def test_refresh_vault_token_keychain_persist_failure_after_rotation_escal
         raise OSError("Keychain locked")
     monkeypatch.setattr(cp, "save_refreshed_vault_token", always_fail)
 
-    with pytest.raises(bg._RefreshTerminal) as excinfo:
-        await bg._refresh_vault_token("vault@example.com", "rt-live")
-    assert "Keychain write failed" in excinfo.value.reason
+    result = await bg._refresh_vault_token("vault@example.com", "rt-live")
+    assert result.success is False
+    assert "Keychain write failed" in result.stale_reason
     assert len(attempts) == 3  # retry loop exhausted
 
 
@@ -863,9 +861,9 @@ async def test_refresh_vault_token_persist_timeout_aborts_without_retry(monkeypa
         raise sp.TimeoutExpired("/usr/bin/security", 5)
     monkeypatch.setattr(cp, "save_refreshed_vault_token", timeout_once)
 
-    with pytest.raises(bg._RefreshTerminal) as excinfo:
-        await bg._refresh_vault_token("vault@example.com", "rt-live")
-    assert "TimeoutExpired" in excinfo.value.reason
+    result = await bg._refresh_vault_token("vault@example.com", "rt-live")
+    assert result.success is False
+    assert "TimeoutExpired" in result.stale_reason
     assert len(attempts) == 1  # no retry
 
 
@@ -877,7 +875,6 @@ async def test_vault_probe_401_triggers_refresh_and_retry_success(monkeypatch):
     + retry-probe succeeds, stale_reason is NOT written.  This is the
     common case: access_token died early but refresh_token is still live."""
     bg._refresh_backoff_until.clear()
-    bg._last_reactive_refresh_at.clear()
 
     account = _make_account(email="vault@example.com")
     monkeypatch.setattr(
@@ -914,7 +911,6 @@ async def test_vault_probe_401_refresh_success_but_retry_still_401(monkeypatch):
     """Refresh succeeds but retry-probe still 401s.  Genuinely dead token
     server-side in a way refresh cannot recover.  Write stale_reason."""
     bg._refresh_backoff_until.clear()
-    bg._last_reactive_refresh_at.clear()
 
     account = _make_account(email="vault@example.com")
     monkeypatch.setattr(
@@ -943,7 +939,6 @@ async def test_vault_probe_401_refresh_terminal_sets_exact_stale(monkeypatch):
     """Probe 401 → refresh returns 400 invalid_grant → stale_reason
     reflects the refresh-path terminal reason, not the probe-path one."""
     bg._refresh_backoff_until.clear()
-    bg._last_reactive_refresh_at.clear()
 
     account = _make_account(email="vault@example.com")
     monkeypatch.setattr(
@@ -969,7 +964,6 @@ async def test_vault_probe_401_refresh_transient_no_stale_yet(monkeypatch):
     written this cycle; next cycle will retry per the backoff ladder."""
     bg._refresh_backoff_until.clear()
     bg._refresh_backoff_count.clear()
-    bg._last_reactive_refresh_at.clear()
 
     account = _make_account(email="vault@example.com")
     monkeypatch.setattr(
@@ -995,7 +989,6 @@ async def test_active_probe_401_never_reactive_refreshes(monkeypatch):
     """Reinforce: active-account 401 path bypasses reactive refresh entirely.
     CLI owns the active refresh lifecycle; CCSwitch must never rotate the
     standard Keychain entry behind the CLI's back."""
-    bg._last_reactive_refresh_at.clear()
     account = _make_account(email="activeonly@example.com")
     monkeypatch.setattr(
         ac, "read_credentials_for_email",
@@ -1017,7 +1010,6 @@ async def test_active_probe_401_never_reactive_refreshes(monkeypatch):
     _, stale = await bg._process_single_account(account, "activeonly@example.com")
     assert stale is None
     assert refresh_calls == []  # STRICT: zero refresh calls on active path
-    assert "activeonly@example.com" not in bg._last_reactive_refresh_at
 
 
 @pytest.mark.asyncio
@@ -1025,7 +1017,6 @@ async def test_vault_probe_401_retry_probe_returns_500_no_stale(monkeypatch):
     """Reactive refresh succeeds, retry-probe returns 500 (not 401).  Should
     NOT stale — bubble up the 500 via existing error path, returning cached."""
     bg._refresh_backoff_until.clear()
-    bg._last_reactive_refresh_at.clear()
 
     account = _make_account(email="vault@example.com")
     monkeypatch.setattr(
@@ -1054,7 +1045,6 @@ async def test_vault_probe_401_retry_probe_returns_500_no_stale(monkeypatch):
 async def test_vault_probe_401_no_refresh_token_marks_stale(monkeypatch):
     """Vault entry has access_token but NO refresh_token.  Cannot refresh.
     Write stale immediately — nothing to recover with."""
-    bg._last_reactive_refresh_at.clear()
     account = _make_account(email="vault@example.com")
 
     creds_no_rt = {"claudeAiOauth": {"accessToken": "at-only", "refreshToken": None}}
@@ -1076,146 +1066,6 @@ async def test_vault_probe_401_no_refresh_token_marks_stale(monkeypatch):
     _, stale = await bg._process_single_account(account, "other@example.com")
     assert stale == "Anthropic API returned 401 — re-login required"
     assert refresh_calls == []  # no refresh attempt (no token to use)
-
-
-@pytest.mark.asyncio
-async def test_reactive_refresh_cooldown_prevents_herd(monkeypatch):
-    """Two probe-401 cycles within 60s: first triggers refresh, second is
-    cooldown-skipped.  Prevents thundering-herd on degraded Anthropic."""
-    bg._last_reactive_refresh_at.clear()
-    bg._refresh_backoff_until.clear()
-
-    account = _make_account(email="vault@example.com")
-    monkeypatch.setattr(
-        ac, "read_credentials_for_email",
-        lambda email, active_email=None: _fresh_creds(),
-    )
-
-    # probe always 401 (both original + retry).  If cooldown works, only the
-    # first cycle should fire a refresh; the second cycle skips refresh and
-    # returns cached usage with no new stale_reason.
-    async def fake_probe(token):
-        raise _http_error(401)
-    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
-
-    refresh_calls = []
-    async def counting_refresh(rt):
-        refresh_calls.append(1)
-        return {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
-    monkeypatch.setattr(anthropic_api, "refresh_access_token", counting_refresh)
-    monkeypatch.setattr(cp, "save_refreshed_vault_token", lambda *a, **kw: None)
-
-    # Run _process_single_account twice in rapid succession.
-    await bg._process_single_account(account, "other@example.com")
-    await bg._process_single_account(account, "other@example.com")
-
-    assert len(refresh_calls) == 1  # only first cycle refreshed
-
-
-@pytest.mark.asyncio
-async def test_reactive_refresh_cooldown_returns_cached_without_stale(monkeypatch):
-    """Vault probe 401 within the 60 s reactive-refresh cooldown window
-    skips the refresh, returns the cached usage, and DOES NOT set
-    stale_reason.  The previous refresh attempt might still be propagating
-    on Anthropic's side — marking stale now would cause UI flicker on a
-    recoverable degraded state."""
-    bg._last_reactive_refresh_at.clear()
-    bg._refresh_backoff_until.clear()
-
-    email = "vault@example.com"
-    account = _make_account(email=email)
-    monkeypatch.setattr(
-        ac, "read_credentials_for_email",
-        lambda e, active_email=None: _fresh_creds(),
-    )
-
-    # Pre-set a reactive-refresh timestamp inside the cooldown window so
-    # the next probe 401 hits the cooldown branch.
-    bg._last_reactive_refresh_at[email] = time.monotonic()
-
-    # Seed a non-empty cached usage entry to assert shape preservation.
-    cached_usage = {"five_hour": {"utilization": 33.0, "resets_at": 1}}
-    await _cache.set_usage(email, cached_usage)
-
-    async def fake_probe(token):
-        raise _http_error(401)
-    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
-
-    refresh_calls = []
-    async def fake_refresh(rt):
-        refresh_calls.append(rt)
-        return {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
-    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
-
-    entry, stale = await bg._process_single_account(account, "other@example.com")
-
-    # Refresh was NOT attempted — cooldown branch short-circuited.
-    assert len(refresh_calls) == 0
-    # stale_reason stays None — cooldown skip is not a staleness signal.
-    assert stale is None
-    # Returned usage has the cached shape (build_usage flattens five_hour →
-    # five_hour_pct); the cache entry itself is untouched.
-    stored = await _cache.get_usage_async(email)
-    assert stored == cached_usage
-    # Flattened entry should reflect the cached utilization.
-    assert entry.get("usage", {}).get("five_hour_pct") == 33
-
-
-@pytest.mark.asyncio
-async def test_reactive_refresh_success_clears_cooldown_marker(monkeypatch):
-    """On a successful recovery (probe-401 → refresh → retry-probe 200),
-    ``_last_reactive_refresh_at[email]`` must be popped so a genuinely new
-    401 within 60 s is treated as a fresh event, not cooldown-skipped.
-
-    Regression guard for the pop-on-success line in
-    ``backend/background.py`` (~540): without it, a recovered account
-    would silently fall through the cooldown branch on its next 401 and
-    the UI would see cached usage where a fresh refresh + stale-reason
-    write was actually warranted.
-    """
-    bg._refresh_backoff_until.clear()
-    bg._last_reactive_refresh_at.clear()
-
-    email = "recover@example.com"
-    # Pre-seed a stale cooldown marker (simulating a prior reactive refresh
-    # that succeeded long ago but whose marker was never cleared in the
-    # regression path we're guarding against).
-    bg._last_reactive_refresh_at[email] = time.monotonic() - 3600
-
-    account = _make_account(email=email)
-    monkeypatch.setattr(
-        ac, "read_credentials_for_email",
-        lambda e, active_email=None: _fresh_creds(),
-    )
-
-    probe_calls: list[str] = []
-    async def fake_probe(token):
-        probe_calls.append(token)
-        if len(probe_calls) == 1:
-            raise _http_error(401)
-        # Retry probe with the refreshed token succeeds.
-        return {"five_hour": {"utilization": 10.0}}
-    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
-
-    async def fake_refresh(rt):
-        return {"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600}
-    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
-
-    def fake_save(email, access_token, expires_at=None, refresh_token=None, **kw):
-        pass
-    monkeypatch.setattr(cp, "save_refreshed_vault_token", fake_save)
-
-    entry, stale = await bg._process_single_account(account, "other@example.com")
-
-    # Recovery succeeded.
-    assert stale is None
-    assert len(probe_calls) == 2  # original + retry after refresh
-    # THE core assertion: cooldown marker was popped on success so a
-    # genuine new 401 inside the 60 s window won't be falsely skipped.
-    assert email not in bg._last_reactive_refresh_at, (
-        f"Cooldown marker leaked after successful recovery for {email}. "
-        "A genuine new 401 within 60 s would be falsely cooldown-skipped."
-    )
 
 
 @pytest.mark.asyncio
@@ -1270,7 +1120,6 @@ def test_forget_account_state_clears_all_tracking_dicts():
     bg._refresh_backoff_until[email] = 4.0
     bg._refresh_backoff_count[email] = 5
     bg._refresh_backoff_first_failure_at[email] = 6.0
-    bg._last_reactive_refresh_at[email] = 7.0
 
     bg.forget_account_state(email)
 
@@ -1280,7 +1129,6 @@ def test_forget_account_state_clears_all_tracking_dicts():
     assert email not in bg._refresh_backoff_until
     assert email not in bg._refresh_backoff_count
     assert email not in bg._refresh_backoff_first_failure_at
-    assert email not in bg._last_reactive_refresh_at
 
 
 @pytest.mark.asyncio

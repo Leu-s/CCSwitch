@@ -44,7 +44,6 @@ async def test_transient_400_storm_never_sets_stale_until_escalation(monkeypatch
     cooldown so the reactive path runs on every call."""
     bg._refresh_backoff_until.clear()
     bg._refresh_backoff_count.clear()
-    bg._last_reactive_refresh_at.clear()
 
     from backend.models import Account
     account = Account(
@@ -83,7 +82,6 @@ async def test_transient_400_storm_never_sets_stale_until_escalation(monkeypatch
     # refresh fires every cycle.
     for attempt in range(1, bg._TRANSIENT_REFRESH_ESCALATE_AFTER + 1):
         bg._refresh_backoff_until["vault@example.com"] = time.monotonic() - 1.0
-        bg._last_reactive_refresh_at.pop("vault@example.com", None)
         _, stale = await bg._process_single_account(account, "other@example.com")
         stale_history.append(stale)
 

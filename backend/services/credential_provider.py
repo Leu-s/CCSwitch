@@ -275,32 +275,17 @@ def save_refreshed_vault_token(
     access_token: str,
     expires_at: int | None = None,
     refresh_token: str | None = None,
-    *,
-    already_locked: bool = False,
 ) -> None:
     """Persist a refreshed access token (and optionally a rotated refresh
     token) back into the vault entry for ``email``.
 
-    Only called from the background poll loop for inactive accounts, from
-    ``revalidate_account``, and from the M3 swap-on-promotion helper.
-    CCSwitch is the sole consumer of vault entries, so there is no race
-    partner — the narrow write window inside ``_credential_lock`` is
-    sufficient.
-
-    ``already_locked``: when True, skip the internal ``_credential_lock``
-    acquire.  Caller must be holding it (e.g. ``_swap_to_account_locked``
-    runs the full 5-step swap under the lock, and swap step 0.5 calls
-    this helper via ``asyncio.to_thread``).  Prevents RLock-reentrance
-    deadlock when the calling thread already holds the lock and spawns
-    a worker via ``asyncio.to_thread`` that would otherwise re-acquire
-    on a different thread (RLock re-entry is per-thread, so the worker
-    would block indefinitely waiting on the lock-holder's release).
+    Only called from the background poll loop for inactive accounts and
+    from ``revalidate_account``.  CCSwitch is the sole consumer of vault
+    entries, so there is no race partner — the narrow write window
+    inside ``_credential_lock`` is sufficient.
     """
-    if already_locked:
+    with _credential_lock:
         _save_refreshed_vault_token_locked(email, access_token, expires_at, refresh_token)
-    else:
-        with _credential_lock:
-            _save_refreshed_vault_token_locked(email, access_token, expires_at, refresh_token)
 
 
 # ── Login-flow scratch entry helpers ───────────────────────────────────────

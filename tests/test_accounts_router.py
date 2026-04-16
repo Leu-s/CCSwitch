@@ -286,7 +286,6 @@ def test_delete_account_invokes_state_cleanup_calls(client_and_factory, monkeypa
 
     # Seed dicts in both modules for alice — both cleanup calls must fire.
     bg._refresh_backoff_count["alice@example.com"] = 1
-    bg._last_reactive_refresh_at["alice@example.com"] = 99.0
     import threading as _threading
     ac._refresh_locks["alice@example.com"] = _threading.Lock()
 
@@ -296,14 +295,12 @@ def test_delete_account_invokes_state_cleanup_calls(client_and_factory, monkeypa
 
         # forget_account_state was called → all background dicts purged.
         assert "alice@example.com" not in bg._refresh_backoff_count
-        assert "alice@example.com" not in bg._last_reactive_refresh_at
         # forget_refresh_lock was called → per-email lock dict purged.
         assert "alice@example.com" not in ac._refresh_locks
     finally:
         # Defensive: clear anything the test may have left behind even if
         # the DELETE handler regressed.
         bg._refresh_backoff_count.pop("alice@example.com", None)
-        bg._last_reactive_refresh_at.pop("alice@example.com", None)
         ac._refresh_locks.pop("alice@example.com", None)
 
 

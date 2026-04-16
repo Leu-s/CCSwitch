@@ -24,22 +24,15 @@ logger = logging.getLogger(__name__)
 # so clients see a clean "A → B" event instead of a partial overlap.
 _switch_lock = asyncio.Lock()
 
-# Hard deadline on the blocking portion of a swap (swap_to_account runs on a
-# worker thread via ``asyncio.to_thread``).  A healthy swap completes in
-# <1.5 s; anything taking >25 s is a hang — stuck security subprocess, stuck
-# asyncio.run() executor shutdown inside the nested event loop, or Anthropic
-# refresh hang exceeding its own 10 s httpx timeout.  Without this ceiling,
-# the ``async with _switch_lock`` block never exits and every subsequent
-# switch request (manual or auto) queues forever on the asyncio lock.
-#
-# The worker thread is NOT terminated on timeout (Python has no thread-kill),
-# but ``asyncio.wait_for`` cancels the Future so control returns to us, the
-# lock releases, and the user sees a 409 instead of a 30 s hang.  Any
-# per-email ``refresh_lock`` the stuck thread still holds remains held
-# (best-effort — see ``swap_to_account``'s lock discussion); subsequent
-# swaps to the SAME email may block on that per-email lock until the thread
-# eventually unsticks, but swaps to OTHER emails are unaffected.
-_SWAP_DEADLINE = 25.0
+# Hard deadline on the blocking portion of a swap.  Without step 0.5's HTTP
+# refresh, a swap is pure subprocess calls (each timeboxed at 5 s).  Worst
+# case: ~6 calls × 5 s = 30 s, but a healthy swap completes in <1 s.  The
+# 10 s ceiling catches Keychain hangs (locked keychain, FileVault prompt,
+# system sleep mid-swap) without being so tight that a slow-but-healthy swap
+# trips it.  The worker thread is NOT terminated on timeout (Python has no
+# thread-kill), but ``asyncio.wait_for`` cancels the Future so control
+# returns, the lock releases, and the user sees a 409 instead of a hang.
+_SWAP_DEADLINE = 10.0
 
 
 async def get_next_account(current_email: str, db: AsyncSession) -> Account | None:
@@ -123,21 +116,6 @@ async def perform_switch(
 
     Raises ``ac.SwapError`` on any failure so callers can decide how to
     surface it (manual_switch → 409 to user; auto-switch → log + skip).
-    Terminal-refresh failures (``SwapRefreshTerminalError``) are caught
-    here, persisted to ``target.stale_reason`` in the DB so the UI
-    reflects the dead state, then re-raised.
-
-    **Correctness contract (load-bearing).** The ``SwapRefreshTerminalError``
-    branch persists ``stale_reason`` based on the verdict of
-    ``anthropic_api.parse_oauth_error`` inside ``swap_to_account``'s step
-    0.5 refresh.  Only RFC 6749 §5.2 codes (``invalid_grant``,
-    ``invalid_client``, ``unauthorized_client``,
-    ``unsupported_grant_type``, ``invalid_scope``) and Anthropic's
-    ``authentication_error`` are terminal; Anthropic's
-    ``invalid_request_error`` (OUR POST was malformed) MUST stay
-    transient — misclassifying it was the April 2026 phantom-stale
-    cascade that poisoned three healthy accounts.  See
-    ``docs/superpowers/plans/2026-04-16-oauth-refresh-client-id-fix.md``.
     """
     async with _switch_lock:
         current_email = await ac.get_active_email_async()
@@ -154,6 +132,10 @@ async def perform_switch(
                 "releasing _switch_lock so other accounts remain swappable.",
                 target.email, _SWAP_DEADLINE,
             )
+            # The zombie worker thread still holds refresh_lock(target.email).
+            # Discard the poisoned lock so the next swap to the same email
+            # creates a fresh one instead of blocking forever on the old one.
+            ac.forget_refresh_lock(target.email)
             try:
                 await ws.broadcast({
                     "type": "error",
@@ -168,22 +150,6 @@ async def perform_switch(
             raise ac.SwapError(
                 f"Swap to {target.email} timed out after {_SWAP_DEADLINE:.0f}s"
             ) from None
-        except ac.SwapRefreshTerminalError as e:
-            logger.error(
-                "Swap to %s aborted — refresh_token terminal: %s",
-                target.email, e.reason,
-            )
-            target.stale_reason = e.reason
-            await db.commit()
-            try:
-                await ws.broadcast({
-                    "type": "account_updated",
-                    "id": target.id,
-                    "email": target.email,
-                })
-            except Exception as _bc_err:
-                logger.warning("WS broadcast failed: %s", _bc_err)
-            raise
         except ac.SwapError as e:
             logger.error("Swap to %s failed: %s", target.email, e)
             try:

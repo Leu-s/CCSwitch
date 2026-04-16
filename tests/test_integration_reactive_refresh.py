@@ -21,13 +21,11 @@ def _clear_state():
     bg._refresh_backoff_until.clear()
     bg._refresh_backoff_count.clear()
     bg._refresh_backoff_first_failure_at.clear()
-    bg._last_reactive_refresh_at.clear()
     ac._refresh_locks.clear()
     yield
     bg._refresh_backoff_until.clear()
     bg._refresh_backoff_count.clear()
     bg._refresh_backoff_first_failure_at.clear()
-    bg._last_reactive_refresh_at.clear()
     ac._refresh_locks.clear()
 
 

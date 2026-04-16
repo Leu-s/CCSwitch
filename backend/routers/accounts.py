@@ -303,10 +303,8 @@ async def manual_switch(account_id: int, db: AsyncSession = Depends(get_db)):
     try:
         await sw.perform_switch(account, "manual", db, ws_manager)
     except ac.SwapError as e:
-        # Includes SwapRefreshTerminalError (step 0.5 refresh_token dead).
-        # perform_switch has already persisted stale_reason + broadcast
-        # account_updated, so the UI will update independently — but the
-        # HTTP response must also surface the failure so the switch-btn
+        # perform_switch broadcasts the error over WS, but the HTTP
+        # response must also surface the failure so the switch-btn
         # toast shows an error instead of "Switched successfully".
         raise HTTPException(409, str(e))
     return {"ok": True, "already_active": False}
