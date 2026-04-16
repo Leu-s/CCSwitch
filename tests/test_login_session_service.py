@@ -283,6 +283,84 @@ def test_cleanup_login_session_deletes_scratch_and_keychain(
     assert any("ccswitch:99.0" in c for c in kill_window_calls)
 
 
+# ── cleanup_orphan_login_artifacts ────────────────────────────────────────
+
+
+def test_cleanup_orphan_login_artifacts_kills_windows_and_wipes_scratch(
+    tmpdir_home, monkeypatch
+):
+    """On startup, orphan tmux windows named 'add-acct' inside the ccswitch
+    session must be killed and orphan scratch dirs under
+    $TMPDIR/ccswitch-login/session-* must be deleted — even though the
+    in-memory session registry is empty (prior-process artifacts)."""
+    # Pre-seed two orphan scratch dirs on disk.
+    base = os.path.join(str(tmpdir_home), "ccswitch-login")
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    orphan_a = os.path.join(base, "session-abc123")
+    orphan_b = os.path.join(base, "session-def456")
+    os.makedirs(orphan_a, mode=0o700)
+    os.makedirs(orphan_b, mode=0o700)
+    # A non-matching sibling must NOT be touched.
+    untouched = os.path.join(base, "keep-me")
+    os.makedirs(untouched, mode=0o700)
+
+    # Mock tmux: list-windows returns two login windows + one unrelated.
+    tmux_calls: list[list[str]] = []
+
+    class _Fake:
+        def __init__(self, rc=0, stdout=""):
+            self.returncode = rc
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(cmd, *args, **kwargs):
+        tmux_calls.append(list(cmd))
+        if len(cmd) >= 2 and cmd[1] == "list-windows":
+            return _Fake(rc=0, stdout=(
+                "@42|add-acct\n"
+                "@43|status-bar\n"
+                "@44|add-acct\n"
+            ))
+        return _Fake()
+
+    monkeypatch.setattr(ls.subprocess, "run", fake_run)
+
+    delete_scratch_calls: list[str] = []
+    monkeypatch.setattr(
+        cp, "delete_login_scratch",
+        lambda p: delete_scratch_calls.append(p),
+    )
+
+    ls.cleanup_orphan_login_artifacts()
+
+    # Killed both login windows — not the status-bar one.
+    kill_calls = [c for c in tmux_calls if len(c) >= 2 and c[1] == "kill-window"]
+    killed_ids = [c[3] for c in kill_calls if len(c) >= 4]
+    assert "@42" in killed_ids
+    assert "@44" in killed_ids
+    assert "@43" not in killed_ids
+
+    # Both scratch dirs wiped, sibling preserved.
+    assert not os.path.isdir(orphan_a)
+    assert not os.path.isdir(orphan_b)
+    assert os.path.isdir(untouched)
+
+    # Keychain hashed-entry delete attempted for each scratch dir.
+    assert orphan_a in delete_scratch_calls
+    assert orphan_b in delete_scratch_calls
+
+
+def test_cleanup_orphan_login_artifacts_no_base_dir_is_noop(tmpdir_home, monkeypatch):
+    """Fresh install with no scratch dir yet → function is a harmless no-op
+    after the tmux sweep."""
+    monkeypatch.setattr(ls.subprocess, "run", lambda *a, **kw: type("R", (), {
+        "returncode": 1, "stdout": "", "stderr": ""
+    })())
+    # No base dir yet under tmpdir_home.
+    assert not os.path.isdir(os.path.join(str(tmpdir_home), "ccswitch-login"))
+    ls.cleanup_orphan_login_artifacts()  # must not raise
+
+
 def test_open_claude_tmux_window_targets_ccswitch_session(fake_tmux, tmpdir_home):
     """The login window must be created inside the ccswitch session, not
     whatever session the user is currently attached to."""

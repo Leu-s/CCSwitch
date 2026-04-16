@@ -24,8 +24,16 @@ class Settings(BaseSettings):
     api_token: str = ""
     # WebSocket replay buffer — how many recent events to keep for reconnecting clients.
     ws_replay_buffer_size: int = 100
-    # Login session timeout (seconds) — how long an unused login terminal stays alive.
-    login_session_timeout: int = 1800
+    # Login session timeout (seconds) — how long an abandoned login
+    # terminal (user walked away, closed the tab, browser crashed) stays
+    # alive before the cleanup loop reaps it.  5 minutes is enough for a
+    # patient typist to complete the OAuth redirect dance while keeping
+    # orphan tmux windows from piling up in the user's workspace.
+    login_session_timeout: int = 300
+    # Cadence of the background cleanup loop that reaps expired login
+    # sessions.  Kept tight (60 s) so stale sessions never live more
+    # than ~timeout + cadence seconds in the wild.
+    login_session_cleanup_cadence: int = 60
     # Rate-limit backoff — initial delay and cap (seconds) after Anthropic 429.
     rate_limit_backoff_initial: int = 120
     rate_limit_backoff_max: int = 3600

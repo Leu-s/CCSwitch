@@ -151,6 +151,77 @@ def _cleanup_expired_sessions() -> None:
         logger.debug("Expired login session cleaned up: %s", sid)
 
 
+_LOGIN_WINDOW_NAME = "add-acct"
+
+
+def cleanup_orphan_login_artifacts() -> None:
+    """Kill orphan login-terminal tmux windows + scratch dirs left over
+    from prior process lifecycles.
+
+    Called on server startup.  After a crash or restart the in-memory
+    ``_active_login_sessions`` registry is empty, but the tmux windows
+    and scratch directories opened by abandoned sessions persist in
+    the user's workspace.  This function wipes both so the user
+    doesn't accumulate dead panes/files over time.
+
+    Conservative by design: only touches the dedicated ccswitch tmux
+    session's ``add-acct`` windows and only scratch dirs under
+    ``$TMPDIR/ccswitch-login/session-*``.  Other tmux windows and
+    filesystem paths are untouched.
+    """
+    session_name = settings.tmux_session_name
+
+    # ── Kill orphan tmux windows ──────────────────────────────────────
+    try:
+        result = subprocess.run(
+            [
+                "tmux", "list-windows", "-t", session_name,
+                "-F", "#{window_id}|#{window_name}",
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout:
+            for line in result.stdout.strip().split("\n"):
+                win_id, _, win_name = line.partition("|")
+                if win_name != _LOGIN_WINDOW_NAME:
+                    continue
+                try:
+                    subprocess.run(
+                        ["tmux", "kill-window", "-t", win_id],
+                        capture_output=True, timeout=5,
+                    )
+                    logger.info("Killed orphan login tmux window %s", win_id)
+                except Exception as e:
+                    logger.debug("Failed to kill orphan window %s: %s", win_id, e)
+    except Exception as e:
+        logger.debug("Failed to list tmux windows for orphan sweep: %s", e)
+
+    # ── Remove orphan scratch dirs + their hashed Keychain entries ────
+    base = os.path.join(tempfile.gettempdir(), "ccswitch-login")
+    if not os.path.isdir(base):
+        return
+    try:
+        entries = os.listdir(base)
+    except Exception as e:
+        logger.warning("Failed to list %s for orphan sweep: %s", base, e)
+        return
+    for entry in entries:
+        if not entry.startswith("session-"):
+            continue
+        path = os.path.join(base, entry)
+        if not os.path.isdir(path):
+            continue
+        try:
+            cp.delete_login_scratch(path)
+        except Exception as e:
+            logger.debug("delete_login_scratch failed for orphan %s: %s", path, e)
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+            logger.info("Cleaned orphan login scratch dir %s", path)
+        except Exception as e:
+            logger.debug("rmtree failed for orphan %s: %s", path, e)
+
+
 def get_pane_target(session_id: str) -> str | None:
     with _sessions_lock:
         data = _active_login_sessions.get(session_id)

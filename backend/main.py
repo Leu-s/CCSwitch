@@ -105,6 +105,12 @@ async def lifespan(app: FastAPI):
     # free when no mismatch exists.
     await asyncio.to_thread(ac.startup_integrity_check)
 
+    # Reap orphan login-terminal tmux windows + scratch dirs left over
+    # from a prior process (crash / restart mid-login).  In-memory
+    # session registry is gone so anything on disk is by definition
+    # abandoned.
+    await asyncio.to_thread(ls.cleanup_orphan_login_artifacts)
+
     idle_interval = await _get_idle_interval()
     logger.info(
         "Poll intervals — active: %ds, idle: %ds",
@@ -113,7 +119,7 @@ async def lifespan(app: FastAPI):
 
     async def _cleanup_sessions_loop() -> None:
         while True:
-            await asyncio.sleep(300)
+            await asyncio.sleep(cfg.login_session_cleanup_cadence)
             await asyncio.to_thread(ls._cleanup_expired_sessions)
 
     tasks = [

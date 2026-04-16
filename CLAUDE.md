@@ -173,8 +173,13 @@ tests/
    upgrading from the legacy architecture), seeds default settings,
    waits for the login keychain to unlock (exponential backoff up
    to 5 minutes), runs `startup_integrity_check` to reconcile any
-   crashed-mid-swap state, then starts **two** background tasks:
-   `_poll_loop(idle_interval)` and `_cleanup_sessions_loop()`.
+   crashed-mid-swap state, runs `cleanup_orphan_login_artifacts` to
+   reap any login-terminal tmux windows + scratch dirs left over
+   from a prior process (crash or restart mid-login), then starts
+   **two** background tasks: `_poll_loop(idle_interval)` and
+   `_cleanup_sessions_loop()` (reaps expired sessions every
+   `cfg.login_session_cleanup_cadence` seconds, default 60 s;
+   session timeout is `cfg.login_session_timeout`, default 300 s).
 2. `_poll_loop` calls `bg.poll_usage_and_switch(ws_manager)` once at
    startup to warm the caches, then alternates between a tight active
    cadence (`cfg.poll_interval_active`, default 15 s, while any WS
