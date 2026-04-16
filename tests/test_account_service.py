@@ -1202,3 +1202,52 @@ async def test_swap_step_0_5_serialises_against_poll_reactive_refresh(
     # Both refreshes ran — but strictly sequentially.
     assert refresh_call_count["n"] == 2
     assert swap_result["target_email"] == email
+
+
+@pytest.mark.asyncio
+async def test_with_refresh_lock_async_releases_on_cancellation():
+    """If an awaiter of with_refresh_lock_async is cancelled while the
+    lock is held by someone else, the executor-thread acquire must not
+    leak the lock when it eventually completes.  Before the cancellation-
+    safe fix, this test hangs indefinitely on the final acquire."""
+    import threading as _th
+    email = "cancel-test@example.com"
+    # Start with a clean lock.
+    ac.forget_refresh_lock(email)
+
+    # Hold the lock on a different thread.
+    holder_lock = ac.get_refresh_lock(email)
+    holder_lock.acquire()
+
+    # Task that wants the lock — will block on it.
+    async def waiter():
+        async with ac.with_refresh_lock_async(email):
+            pass  # never reached if we cancel during acquire
+
+    task = asyncio.create_task(waiter())
+    # Let the task get into the to_thread acquire call.
+    await asyncio.sleep(0.05)
+
+    # Cancel while blocked.
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    # Release the holder.  The waiter's executor thread should acquire,
+    # then the done-callback should immediately release.  After a brief
+    # delay, the lock should be free.
+    holder_lock.release()
+
+    # Spin briefly to give the done-callback time to fire.
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        if ac.get_refresh_lock(email).acquire(blocking=False):
+            ac.get_refresh_lock(email).release()
+            return  # PASS — lock was freed
+    ac.forget_refresh_lock(email)
+    pytest.fail(
+        "Lock leaked after awaiter cancellation — ghost holds the lock. "
+        "This is the family-revoke-adjacent bug the fix closes."
+    )

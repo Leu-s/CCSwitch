@@ -76,9 +76,10 @@ backend/
   main.py              FastAPI app + lifespan + /ws endpoint + two background
                        tasks (_poll_loop + _cleanup_sessions_loop) + static serving.
                        On startup: waits for Keychain unlock, runs integrity check.
-  background.py        poll_usage_and_switch() — per-account probe + vault refresh;
-                       active-probe 401 triggers a tmux nudge; post-sleep stagger
-                       (monotonic gap > 300 s → random 0-30 s delay before refreshes).
+  background.py        poll_usage_and_switch() — per-account probe + reactive vault refresh
+                       (probe-401 only, 60s per-email cooldown); active-probe 401 triggers
+                       a tmux nudge; post-sleep stagger (monotonic gap > 300 s → random
+                       0-30 s delay before refreshes).
   cache.py             _UsageCache — usage and token_info dicts under an asyncio.Lock.
   config.py            Pydantic settings (env prefix: CCSWITCH_). No directory knobs —
                        ~/.claude/ is hardcoded.
@@ -101,10 +102,19 @@ backend/
                             persistence, login-scratch hashed-entry helpers, keychain
                             availability probe.  _credential_lock (RLock) shared by swap
                             + vault refresh.
-    account_service.py      swap_to_account(email) — the 5-step atomic swap.
-                            Also save_new_vault_account, delete_account_everywhere,
-                            get_active_email (reads ~/.claude.json),
-                            startup_integrity_check, build_ws_snapshot.
+    account_service.py      swap_to_account(email) — the 5-step atomic swap (step 0.5
+                            refreshes the incoming vault token via
+                            _refresh_incoming_on_promotion; outer acquires
+                            refresh_lock(target) then cp._credential_lock — see
+                            lock-order invariant).  Also save_new_vault_account,
+                            delete_account_everywhere, get_active_email
+                            (reads ~/.claude.json), startup_integrity_check,
+                            build_ws_snapshot, revalidate_account (on-demand recovery
+                            via _refresh_vault_token), and the shared per-email
+                            refresh lock (_refresh_locks dict[str, threading.Lock]
+                            + get_refresh_lock/with_refresh_lock_async/forget_refresh_lock
+                            — serialises swap step 0.5, poll-loop reactive refresh,
+                            and Revalidate against the single-use refresh_token).
     account_queries.py      DB query helpers (get_by_id, get_by_email, email→id map,
                             save_verified_account).
     login_session_service.py  Scratch-dir login lifecycle (add + relogin).  Both kinds
@@ -179,9 +189,10 @@ tests/
      standard Keychain entry, probe `/v1/messages`, store the result.
      **Never refresh.**
    - Vault account: read the access token from `ccswitch-vault /
-     email`.  If it's within 20 minutes of expiry, call
-     `anthropic_api.refresh_access_token` and persist via
-     `cp.save_refreshed_vault_token`.  Probe and store.
+     email`, probe `/v1/messages`, store the result.  **Never refresh
+     proactively.**  Refresh only fires reactively — on probe-401
+     (see below), on swap-step-0.5 (incoming account on promotion),
+     or on an explicit user Revalidate click.
    - Active-probe 401: call `tmux_service.fire_nudge()` (rate-limited
      to at most once per 30 s per account) to wake any sleeping CLI,
      return last-known cached usage, do NOT mark stale.
@@ -231,7 +242,12 @@ tests/
 ## Account switching = one swap_to_account call
 
 `account_service.swap_to_account(target_email)` runs the 5-step
-sequence under `credential_provider._credential_lock`:
+atomic sequence under two nested locks — the per-email
+``refresh_lock(target_email)`` (threading.Lock, serialises against
+concurrent refresh paths on the same email) acquired first, then
+``cp._credential_lock`` (threading.RLock, serialises all Keychain
+mutations) acquired inside.  Lock-order invariant: refresh_lock is
+always OUTSIDE ``cp._credential_lock``.
 
 1. **Load incoming.** Read `ccswitch-vault / target_email`.  Raises
    `SwapError` if missing or has no `refresh_token`.
@@ -329,6 +345,18 @@ end up inside the tmp dir instead of polluting the repo root.
   serializes every mutation to the standard Keychain entry, vault
   entries, and the vault refresh path.  Both `swap_to_account` and
   `save_refreshed_vault_token` acquire it.
+- `_refresh_locks` (dict[email → threading.Lock], in account_service.py):
+  per-email lock serialising the three refresh-token code paths
+  (swap step 0.5, poll-loop reactive refresh, user Revalidate) so a
+  single-use refresh_token is never presented to Anthropic twice in
+  parallel.  Threading (not asyncio) because swap step 0.5 runs on a
+  worker thread via asyncio.to_thread + asyncio.run throwaway loop,
+  and asyncio.Lock does not serialise across threads/loops.  Async
+  callers acquire via `with_refresh_lock_async` (yields the event loop
+  via `asyncio.to_thread(lock.acquire)`); swap acquires sync.
+  Lock-order invariant: `refresh_lock(email)` is always acquired
+  OUTSIDE `cp._credential_lock` — reversing would deadlock under
+  contention.
 - `_switch_lock` (asyncio.Lock, in switcher.py): serializes concurrent
   `perform_switch` calls so two auto-switches cannot overlap.
 - `_sessions_lock` (threading.RLock, in login_session_service.py):
