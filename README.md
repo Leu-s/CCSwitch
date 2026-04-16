@@ -6,12 +6,15 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Tests](https://img.shields.io/badge/tests-128%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-240%20passing-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#requirements)
-[![Status](https://img.shields.io/badge/status-stable-success.svg)](#project-status)
+[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](#project-status)
 [![Build](https://img.shields.io/badge/frontend-no%20build%20step-orange.svg)](#architecture)
 
 </div>
+
+> [!WARNING]
+> **Alpha software — active development.** CCSwitch is functional and used daily by the author, but the API surface, config format, and database schema may change without notice between versions. Expect rough edges, undiscovered bugs, and breaking updates. Back up your `~/.claude.json` and Keychain entries before running. Bug reports and feedback are welcome via [GitHub Issues](https://github.com/Leu-s/CCSwitch/issues).
 
 If you've ever been deep in a Claude Code session and hit the 5-hour rate limit, you know the pain. **CCSwitch** is a local dashboard that watches usage across every Claude.ai subscription you own and silently swaps credentials *before* you run out — so `claude` keeps working without you noticing the switch.
 
