@@ -581,13 +581,12 @@ _refresh_locks_guard = threading.Lock()  # guards setdefault atomicity
 
 def get_refresh_lock(email: str) -> threading.Lock:
     """Return the single ``threading.Lock`` for ``email``, creating it
-    atomically via ``setdefault`` inside a dict-level guard.
+    atomically.
 
-    The extra guard is belt-and-braces: CPython's ``dict.setdefault`` is
-    atomic under the GIL, but we construct a fresh ``threading.Lock``
-    eagerly before the setdefault call, so two racing threads that both
-    instantiate before either inserts would both get their own lock
-    instance.  The guard ensures only one lock is ever keyed per email.
+    The ``_refresh_locks_guard`` wrap is defensive (``setdefault`` is
+    already atomic under the CPython GIL, so same-email racers receive
+    the same lock object); the explicit guard documents intent for
+    readers.
     """
     with _refresh_locks_guard:
         return _refresh_locks.setdefault(email, threading.Lock())
@@ -598,14 +597,35 @@ async def with_refresh_lock_async(email: str):
     """Async context manager that acquires the per-email refresh lock
     without blocking the event loop.
 
-    ``threading.Lock.acquire`` blocks the calling thread — unacceptable
-    on the main event loop.  Wrapping it in ``asyncio.to_thread`` moves
-    the blocking acquire onto a worker thread, so other coroutines keep
-    running while we wait.  The release is cheap and non-blocking, so
-    we call it directly.
+    Cancellation-safe.  ``asyncio.to_thread(lock.acquire)`` is NOT
+    cancellable (Python runs the underlying ``threading.Lock.acquire()``
+    to completion on the executor thread regardless).  If the calling
+    task is cancelled mid-wait, we must ensure the executor thread's
+    eventual acquire is matched by a release — otherwise the lock is
+    held by a ghost and the email deadlocks forever.
+
+    Implementation: use ``loop.run_in_executor`` (returns an asyncio
+    Future) wrapped in ``asyncio.shield`` so the underlying acquire is
+    protected from cancellation.  On outer cancellation, install a
+    done-callback that calls ``lock.release()`` as soon as the acquire
+    future completes.  The lock is briefly held between executor-thread
+    completion and callback-fire, but no caller can observe it — the
+    shielded future finishes before any awaiter can re-enter.
     """
     lock = get_refresh_lock(email)
-    await asyncio.to_thread(lock.acquire)
+    loop = asyncio.get_running_loop()
+    acquire_future = loop.run_in_executor(None, lock.acquire)
+    try:
+        await asyncio.shield(acquire_future)
+    except asyncio.CancelledError:
+        def _release_on_acquire(fut: asyncio.Future) -> None:
+            try:
+                if fut.result():
+                    lock.release()
+            except BaseException:
+                pass
+        acquire_future.add_done_callback(_release_on_acquire)
+        raise
     try:
         yield
     finally:
