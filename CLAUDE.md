@@ -185,22 +185,34 @@ tests/
    - Active-probe 401: call `tmux_service.fire_nudge()` (rate-limited
      to at most once per 30 s per account) to wake any sleeping CLI,
      return last-known cached usage, do NOT mark stale.
-   - Vault-refresh 401 or 400 with a body `error` code in the terminal
-     set (RFC 6749 §5.2: `invalid_grant`, `invalid_client`,
-     `unauthorized_client`, `unsupported_grant_type`, `invalid_scope`;
-     Anthropic envelope: `invalid_request_error`, `authentication_error`):
-     mark `stale_reason` with the precise terminal reason; skip the
-     probe.  The UI renders a Re-login button.
-   - Vault-refresh bare 401, 400 with non-terminal body, 429, 5xx,
-     network: classified TRANSIENT by `anthropic_api.parse_oauth_error`.
-     Increment three in-memory per-account dicts (count, next-retry
-     deadline, first-failure timestamp); do NOT set `stale_reason`.
-     Return the last-known cached usage.  Next poll cycle skips the
-     refresh until the backoff deadline elapses.  Escalates to a
-     distinct terminal `stale_reason` when either (a) 5 consecutive
-     transients observed OR (b) ≥ 24 h since the first transient in
-     the current streak — whichever trips first.  A successful refresh
-     clears all three counters.
+   - Vault-account probes receive a 401 (access_token invalidated
+     server-side) → reactive refresh path in `_process_single_account`:
+     acquire `get_refresh_lock(email)`, call `_refresh_vault_token`,
+     retry the probe ONCE with the fresh access_token.  Retry success
+     → report usage normally, no stale_reason.  Retry still 401 →
+     mark `stale_reason = "Anthropic API returned 401 — re-login required"`.
+     Refresh terminal (401, or 400 with body `error` in the terminal
+     set — RFC 6749 §5.2 + Anthropic `invalid_request_error` /
+     `authentication_error`) → stale with the exact refresh-path
+     reason.  Refresh transient (network, 5xx, non-terminal 400) →
+     no stale_reason this cycle, existing transient-ladder escalation
+     after 5 consecutive OR 24 h.  A 60 s cooldown
+     (`_last_reactive_refresh_at`) prevents thundering herd across
+     concurrent poll cycles; cleared on successful recovery.
+   - Vault-account probes are NEVER preceded by a proactive refresh.
+     Pre-April-16 CCSwitch refreshed when `expires_at - 20min` window
+     opened; this generated ~1 rotation event per idle vault per
+     hour, each a broken-chain trigger for Anthropic's server-side
+     reuse detection.  Reactive-only refresh aligns with OAuth 2.1
+     RTR best practices (Auth0 guidance).  On-demand triggers are:
+     probe 401 (above) + swap step 0.5 (below).
+   - Swap step 0.5 (between load-incoming and checkpoint-outgoing
+     in `_swap_to_account_locked`): attempt one refresh on the
+     incoming vault's refresh_token under the shared refresh lock.
+     Ensures the newly-active account's access_token is fresh
+     BEFORE the CLI sees it (no 401 on first keypress).  Terminal
+     → `SwapError`, standard entry not overwritten.  Transient →
+     proceed with stored tokens (CLI self-refreshes on first call).
    Per-account 429 backoff (exponential 120 s → 3600 s cap) is
    preserved.  On sleep-wake detection (monotonic gap > 5 min), a
    random 0-30 s stagger runs before the refresh burst to avoid

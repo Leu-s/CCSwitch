@@ -843,6 +843,76 @@ middleware catches it uniformly and displays a differentiating toast:
 
 ---
 
+### 9.11 Reactive-only refresh policy
+
+Pre-April-16 CCSwitch proactively refreshed vault tokens when
+`now > expires_at - 20min`.  Empirically (see incident trail in
+the plan `docs/superpowers/plans/2026-04-16-reactive-vault-refresh.md`),
+this pattern generated ~1 rotation event per idle vault account per
+hour.  Each rotation is a potential broken-chain trigger for Anthropic's
+server-side single-use-refresh-token reuse detection — any client/
+server state divergence (network blip mid-persist, partial response,
+async Keychain write vs server-commit race) invalidates the entire
+token family for that user session.  Observed symptom on April 16:
+multiple idle vault accounts going phantom-stale simultaneously
+within 1-2 hours of server restart (all-family revocation from one
+broken rotation), with refresh responses returning HTTP 400
+`{"error": {"type": "invalid_request_error"}}` — Anthropic's
+non-standard dead-token signal (covered by the classifier fix of
+April 15, see §9.10).
+
+Post-fix policy (per OAuth 2.1 RTR / Auth0 guidance): **refresh
+only on demand, never proactively.**  The three demand triggers
+after this change are:
+
+1. **Probe 401 (reactive).**  `_process_single_account` vault path:
+   on a 401 from `/v1/messages` probe, call `_refresh_vault_token`
+   once under `get_refresh_lock(email)`.  On success, retry the
+   probe with the fresh access_token.  On retry-success: no
+   stale_reason.  On retry-401: mark `"Anthropic API returned 401
+   — re-login required"`.  On refresh terminal: exact refresh-path
+   reason from `_RefreshTerminal.reason`.  On refresh transient:
+   no stale, existing ladder handles retries.  A 60 s per-email
+   cooldown (`_last_reactive_refresh_at`) prevents thundering
+   herd when Anthropic briefly 401s all requests; cleared on
+   successful recovery so genuinely new events aren't skipped.
+
+2. **Swap step 0.5 (promotion).**  Before `_swap_to_account_locked`
+   writes to the standard Keychain entry, attempt one refresh on
+   the incoming vault's refresh_token via
+   `_refresh_incoming_on_promotion(email, incoming)`.  Passes
+   `already_locked=True` through to `cp.save_refreshed_vault_token`
+   because the swap already holds `cp._credential_lock` on the main
+   thread — the worker thread spawned by `asyncio.to_thread` would
+   otherwise deadlock on RLock re-entrance (per-thread ownership).
+   Success → merge fresh tokens into the incoming blob before
+   promotion.  Terminal → `SwapError`, standard entry not overwritten,
+   user stays on previous active account with a clear error.
+   Transient → log warning, proceed with stored tokens (CLI self-
+   refreshes on its first call as it always did).
+
+3. **User-triggered Revalidate.**  Unchanged from the April 15
+   feature.  Shares the same per-email refresh lock
+   (`get_refresh_lock`, renamed from `_get_revalidate_lock`) with
+   the reactive + swap-refresh paths.
+
+All three paths acquire `account_service.get_refresh_lock(email)`
+before calling `anthropic_api.refresh_access_token`.  This forbids
+two concurrent refresh attempts on the same email.  Anthropic's
+single-use refresh_tokens would have the loser return 400 and
+overwrite the winner's success — the empirical "cleared then
+stale again within 15s" symptom from the April 15 incident trail.
+
+Checkpoint (§2.4 step 2) no longer copies the CLI's `expiresAt`
+into the vault (see `_merge_checkpoint`).  That field is a client-
+side claim that can be stale relative to Anthropic; propagating
+it meant the (now-removed) proactive-refresh gate might trust an
+invalid expiry for up to an hour.  The next successful refresh
+writes a fresh `expiresAt`; until then, the vault entry has no
+claim about the token's lifetime (truthfully).
+
+---
+
 ## 10. Prior art
 
 Multi-account Claude tooling in OSS clusters into two branches, and
