@@ -472,6 +472,53 @@ async def test_refresh_400_invalid_request_is_transient_no_stale(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_refresh_400_anthropic_invalid_request_error_is_transient_no_stale(monkeypatch):
+    """April 2026 regression guard: Anthropic's NESTED ``invalid_request_error``
+    body (what the production server actually returns when our POST is
+    malformed, e.g. missing ``client_id``) must be classified transient, not
+    terminal.  A false-positive terminal classification here poisoned three
+    healthy user accounts.
+
+    This test exercises the full reactive-refresh chain — probe 401 →
+    ``_refresh_vault_token`` → ``parse_oauth_error`` — to guard against a
+    regression at any point in the stack.  RFC-flat ``invalid_request`` is
+    covered by the sibling test above.
+    """
+    bg._refresh_backoff_until.clear()
+    bg._refresh_backoff_count.clear()
+    account = _make_account(email="vault@example.com")
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(),
+    )
+
+    async def fake_probe(token):
+        raise _http_error(401)
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    async def fake_refresh(refresh_token):
+        raise _http_error(400, json_body={
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Invalid request format",
+            },
+            "request_id": "req_regression",
+        })
+
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    _, stale = await bg._process_single_account(account, "other@example.com")
+    assert stale is None, (
+        "Anthropic nested invalid_request_error must NOT mark stale — "
+        "it's our POST that was malformed, not the refresh_token"
+    )
+    assert bg._refresh_backoff_count["vault@example.com"] == 1
+    assert "vault@example.com" in bg._refresh_backoff_until
+
+
+@pytest.mark.asyncio
 async def test_refresh_transient_escalates_after_n_failures(monkeypatch):
     """Reactive path: after `_TRANSIENT_REFRESH_ESCALATE_AFTER` consecutive
     transient refresh failures, mark stale."""
