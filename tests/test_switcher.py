@@ -332,6 +332,63 @@ async def test_perform_switch_refresh_terminal_marks_stale_and_raises(db_session
     )
 
 
+@pytest.mark.asyncio
+async def test_perform_switch_times_out_releases_switch_lock(db_session, monkeypatch):
+    """Regression guard: when ``swap_to_account`` hangs inside its worker
+    thread (stuck asyncio.run shutdown, stuck security subprocess, etc.),
+    ``perform_switch`` MUST raise ``SwapError`` after the deadline so the
+    ``async with _switch_lock`` block exits and the lock releases.
+
+    Before the fix, a hung swap held ``_switch_lock`` indefinitely and
+    every subsequent switch request (manual or auto) queued forever.
+    """
+    import time
+    db_session.add_all([
+        _make_account(email="a@example.com", priority=0),
+        _make_account(email="b@example.com", priority=1),
+    ])
+    await db_session.commit()
+
+    monkeypatch.setattr(ac, "get_active_email", lambda: "a@example.com")
+
+    def hang_forever(email):
+        time.sleep(10)  # simulate stuck worker thread
+        return {"target_email": email}
+
+    monkeypatch.setattr(ac, "swap_to_account", hang_forever)
+    monkeypatch.setattr(sw, "_SWAP_DEADLINE", 0.1)
+
+    ws = _FakeWS()
+    target = (await db_session.execute(
+        select(Account).where(Account.email == "b@example.com")
+    )).scalar_one()
+
+    t0 = time.monotonic()
+    with pytest.raises(ac.SwapError) as excinfo:
+        await sw.perform_switch(target, "manual", db_session, ws)
+    elapsed = time.monotonic() - t0
+
+    assert "timed out" in str(excinfo.value).lower()
+    assert elapsed < 2.0, (
+        f"perform_switch waited {elapsed:.2f}s past the 0.1s deadline — "
+        "asyncio.wait_for is not enforcing the ceiling"
+    )
+
+    # Error broadcast so the UI can show a toast.
+    assert any(e.get("type") == "error" for e in ws.events)
+
+    # Lock must have been released — a second call returns through the
+    # same wait_for ceiling instead of queueing indefinitely.
+    t0 = time.monotonic()
+    with pytest.raises(ac.SwapError):
+        await sw.perform_switch(target, "manual", db_session, ws)
+    elapsed2 = time.monotonic() - t0
+    assert elapsed2 < 2.0, (
+        f"second perform_switch waited {elapsed2:.2f}s — "
+        "_switch_lock was not released on the first timeout"
+    )
+
+
 # ── maybe_auto_switch ─────────────────────────────────────────────────────
 
 
