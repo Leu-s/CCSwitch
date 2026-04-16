@@ -18,18 +18,16 @@ from ..config import settings
 # Codes that indicate the refresh_token / access_token is dead in a way
 # that will NOT self-heal — only a re-login can fix it.  Two flavours:
 #
-#   RFC 6749 §5.2 (standard OAuth2 flat shape)
+#   RFC 6749 §5.2 (standard OAuth2 flat shape) — Anthropic's actual
+#   signal for genuinely dead refresh_tokens on /v1/oauth/token is
+#   ``invalid_grant`` under this flat shape:
 #     invalid_grant           — token expired, revoked, or reused
 #     invalid_client          — client authentication failed
 #     unauthorized_client     — client not allowed to use this grant
 #     unsupported_grant_type  — server doesn't understand the grant
 #     invalid_scope           — scope invalid / out of range
 #
-#   Anthropic-specific envelope (empirically verified on their
-#   /v1/oauth/token and /v1/messages endpoints):
-#     invalid_request_error   — Anthropic's actual signal for dead
-#                               refresh_token on /oauth/token (despite
-#                               the misleading "request format" message)
+#   Anthropic-specific nested envelope:
 #     authentication_error    — access-token invalid on /v1/messages.
 #                               The poll loop's probe-path handles 401
 #                               with a dedicated branch in background.py
@@ -39,13 +37,22 @@ from ..config import settings
 #                               future caller that DOES route probe
 #                               errors through parse_oauth_error (e.g.
 #                               a revalidate-probe-verify path).
+#
+# NOTE ABSENCES (April 2026 regression lesson):
+#   ``invalid_request_error`` is NOT terminal.  Anthropic emits it when
+#   OUR POST body is malformed (e.g. missing ``client_id`` on
+#   /v1/oauth/token).  Classifying it terminal caused a phantom-stale
+#   cascade across three healthy user accounts — every swap-time refresh
+#   persisted stale_reason from a classifier verdict that was actually
+#   telling us to fix our request, not that the token was dead.
+#   Genuinely dead refresh_tokens return RFC-flat ``invalid_grant``.
+#   See docs/superpowers/plans/2026-04-16-oauth-refresh-client-id-fix.md.
 _TERMINAL_OAUTH_ERROR_CODES = frozenset({
     "invalid_grant",
     "invalid_client",
     "unauthorized_client",
     "unsupported_grant_type",
     "invalid_scope",
-    "invalid_request_error",
     "authentication_error",
 })
 
@@ -124,6 +131,17 @@ def parse_oauth_error(err: httpx.HTTPStatusError) -> OAuthErrorKind:
 
 MESSAGES_URL = settings.anthropic_messages_url
 REFRESH_URL = settings.anthropic_refresh_url
+
+# Canonical Claude Code OAuth client_id.  Public identifier (not a secret),
+# used by every open-source Claude-multi-account tool (ccflare, ccNexus,
+# Kaku, Hermes, wanikua, CLIProxyAPI, oh-my-claudecode, stencila, …).
+#
+# Anthropic's /v1/oauth/token endpoint rejects POSTs that omit this
+# field with HTTP 400 ``invalid_request_error`` — even for healthy
+# refresh_tokens.  The April 2026 production bug (phantom-stale
+# cascade on three healthy accounts) was caused by its omission.
+# See docs/superpowers/plans/2026-04-16-oauth-refresh-client-id-fix.md.
+_CLAUDE_CODE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 # Headers that activate the unified rate-limit response headers
 _HEADERS = {
@@ -226,7 +244,11 @@ async def refresh_access_token(refresh_token: str) -> dict:
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.post(
             REFRESH_URL,
-            json={"grant_type": "refresh_token", "refresh_token": refresh_token},
+            json={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": _CLAUDE_CODE_CLIENT_ID,
+            },
         )
         resp.raise_for_status()
         try:

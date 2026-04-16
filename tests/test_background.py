@@ -718,8 +718,8 @@ async def test_refresh_vault_token_success_returns_new_blob(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_refresh_vault_token_terminal_400_raises(monkeypatch):
-    """Terminal 400 (e.g. invalid_grant / invalid_request_error) → helper
-    raises _RefreshTerminal carrying the stale_reason on err.reason."""
+    """Terminal 400 with RFC flat ``invalid_grant`` → helper raises
+    _RefreshTerminal carrying the stale_reason on err.reason."""
     async def fake_refresh(rt):
         raise _http_error(400, json_body={"error": "invalid_grant"})
     monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
