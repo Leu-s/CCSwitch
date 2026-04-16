@@ -688,6 +688,19 @@ async def revalidate_account(account_id: int, db) -> dict | None:
     caller and the UI can show an accurate message (a genuine
     ``invalid_grant`` stays stuck; a transient 400 reflects "try again
     later").
+
+    **Correctness contract (load-bearing).** Persistence of
+    ``stale_reason`` on ``_RefreshTerminal`` relies on
+    ``anthropic_api.parse_oauth_error`` correctly separating terminal
+    from transient.  Only RFC 6749 §5.2 codes (``invalid_grant``,
+    ``invalid_client``, ``unauthorized_client``,
+    ``unsupported_grant_type``, ``invalid_scope``) and Anthropic's
+    ``authentication_error`` are terminal; everything else — including
+    Anthropic's ``invalid_request_error``, which signals OUR POST was
+    malformed, not that the token is dead — MUST be transient.  A
+    misclassification here poisons healthy accounts (April 2026
+    phantom-stale cascade).  See
+    ``docs/superpowers/plans/2026-04-16-oauth-refresh-client-id-fix.md``.
     """
     # Late import to avoid circular on background module.
     from .. import background as bg
