@@ -1163,13 +1163,11 @@ async def test_different_emails_do_not_serialize_refresh(monkeypatch):
     monkeypatch.setattr(cp, "save_refreshed_vault_token", lambda *a, **kw: None)
 
     async def task_a():
-        lock = ac.get_refresh_lock("a@example.com")
-        async with lock:
+        async with ac.with_refresh_lock_async("a@example.com"):
             await bg._refresh_vault_token("a@example.com", "rt-a")
 
     async def task_b():
-        lock = ac.get_refresh_lock("b@example.com")
-        async with lock:
+        async with ac.with_refresh_lock_async("b@example.com"):
             await bg._refresh_vault_token("b@example.com", "rt-b")
 
     await asyncio.gather(task_a(), task_b())
@@ -1242,13 +1240,11 @@ async def test_poll_reactive_refresh_and_revalidate_serialize(monkeypatch):
     monkeypatch.setattr(cp, "save_refreshed_vault_token", lambda *a, **kw: None)
 
     async def task_a():
-        lock = ac.get_refresh_lock("vault@example.com")
-        async with lock:
+        async with ac.with_refresh_lock_async("vault@example.com"):
             await bg._refresh_vault_token("vault@example.com", "rt-live-a")
 
     async def task_b():
-        lock = ac.get_refresh_lock("vault@example.com")
-        async with lock:
+        async with ac.with_refresh_lock_async("vault@example.com"):
             await bg._refresh_vault_token("vault@example.com", "rt-live-b")
 
     t1 = asyncio.create_task(task_a())

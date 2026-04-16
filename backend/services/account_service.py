@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import threading
+from contextlib import asynccontextmanager
 
 import httpx
 
@@ -173,8 +174,23 @@ def swap_to_account(target_email: str) -> dict:
     — the standard Keychain entry already reflects the new account at
     that point, so the user is told the swap half-committed.
     """
-    with cp._credential_lock:
-        return _swap_to_account_locked(target_email)
+    # INVARIANT: refresh_lock(email) is always acquired OUTSIDE
+    # cp._credential_lock.  Poll-loop and Revalidate also follow this
+    # order (refresh_lock first via ``with_refresh_lock_async``, then
+    # cp._credential_lock via ``save_refreshed_vault_token``).  Reversing
+    # the order would deadlock under contention: thread A holding
+    # refresh_lock waiting for cp._credential_lock while thread B holds
+    # cp._credential_lock waiting for refresh_lock.
+    #
+    # Holding the refresh_lock across the whole swap also covers step
+    # 0.5's internal refresh — a concurrent async refresher on the same
+    # email (poll-loop reactive refresh or Revalidate) cannot race the
+    # swap-time refresh for the same single-use refresh_token because
+    # both paths wait on the same threading.Lock.
+    refresh_lock = get_refresh_lock(target_email)
+    with refresh_lock:
+        with cp._credential_lock:
+            return _swap_to_account_locked(target_email)
 
 
 def _swap_to_account_locked(target_email: str) -> dict:
@@ -204,12 +220,14 @@ def _swap_to_account_locked(target_email: str) -> dict:
     # Ensures the CLI starts the newly-activated account with fresh
     # tokens (avoids a 401 on the user's first post-swap keypress).
     # Serialisation against a concurrent Revalidate or poll-reactive-
-    # refresh on the same email is provided by ``cp._credential_lock``
-    # (held across this whole function) — see the lock-ordering note
-    # in ``_refresh_incoming_on_promotion`` for why we do NOT wrap the
-    # inner refresh in ``get_refresh_lock`` here.  On terminal failure
-    # this raises SwapError BEFORE the standard-entry overwrite — user
-    # stays on the previous active account and is told to Re-login.
+    # refresh on the same email is provided by the outer
+    # ``refresh_lock(target_email)`` acquired in ``swap_to_account``
+    # (held across this whole function) — so the inner HTTP refresh
+    # here is already covered and MUST NOT re-acquire (threading.Lock
+    # is non-reentrant, re-entrance would deadlock).  On terminal
+    # failure this raises SwapError BEFORE the standard-entry
+    # overwrite — user stays on the previous active account and is
+    # told to Re-login.
     incoming = _refresh_incoming_on_promotion(target_email, incoming)
 
     # ── Step 2: checkpoint outgoing ───────────────────────────────────────
@@ -281,32 +299,17 @@ def _refresh_incoming_on_promotion(email: str, incoming: dict) -> dict:
     never run, so the user stays on the previous active account with a
     clear "re-login first" error.
 
-    **Lock-ordering note.**  This helper runs from SYNC context inside
-    ``_swap_to_account_locked`` which HOLDS ``cp._credential_lock``
-    (``threading.RLock``) on the current thread.  ``asyncio.run`` below
-    creates a fresh event loop on the SAME thread; inside it,
-    ``_refresh_vault_token`` calls ``asyncio.to_thread(
-    cp.save_refreshed_vault_token, ..., already_locked=True)``.  The
-    worker thread skips the internal ``with _credential_lock`` acquire
-    because ``already_locked=True`` — if we didn't pass it, the worker
-    would block forever waiting for the swap thread to release
-    ``_credential_lock`` (RLock re-entrance is per-thread, so a
-    different thread's acquire is blocked like any non-reentrant lock).
+    **Lock-ordering note.**  Step 0.5's HTTP refresh is protected by the
+    outer ``refresh_lock(target_email)`` acquired in ``swap_to_account``.
+    No inner acquisition is needed — in fact it would deadlock because
+    ``threading.Lock`` is non-reentrant.
 
-    Concurrency: serialisation against a concurrent ``revalidate_account``
-    or poll-loop reactive refresh on the same email is provided by
-    ``cp._credential_lock`` (held across this entire step), NOT by the
-    per-email ``asyncio.Lock`` from ``get_refresh_lock``.  Any concurrent
-    refresher runs on a different thread with its own event loop and
-    therefore would see a *different* ``asyncio.Lock`` instance anyway —
-    so wrapping ``_refresh_vault_token`` in ``get_refresh_lock(email)``
-    here would be both redundant and a latent cross-loop hazard (the
-    cached ``asyncio.Lock`` was bound to whichever loop first acquired
-    it, and re-using it from the per-swap throwaway loop spun up by
-    ``asyncio.run`` is only safe while the lock is uncontended — which
-    we cannot statically guarantee).  We therefore call
-    ``_refresh_vault_token`` directly; the credential lock is the
-    correctness boundary.
+    The outer ``cp._credential_lock`` (``threading.RLock``) is also held
+    across this whole step; to avoid re-acquiring it on the worker
+    thread inside ``asyncio.to_thread(cp.save_refreshed_vault_token)``
+    (which would block forever — RLock re-entrance is per-thread),
+    ``_refresh_vault_token`` is called with ``already_locked=True`` so
+    the worker skips the internal ``with _credential_lock`` guard.
     """
     from .. import background as bg  # late import to avoid circular
 
@@ -315,8 +318,6 @@ def _refresh_incoming_on_promotion(email: str, incoming: dict) -> dict:
         return incoming
 
     async def _do_refresh():
-        # NOTE: deliberately NOT wrapped in ``async with get_refresh_lock(email)``.
-        # See the lock-ordering note in this function's docstring.
         return await bg._refresh_vault_token(email, rt, already_locked=True)
 
     try:
@@ -554,25 +555,68 @@ async def build_ws_snapshot(db) -> list[dict]:
 # one lock per email is the right granularity (different emails don't
 # contend; same email serialises).
 #
+# Uses ``threading.Lock`` (NOT ``asyncio.Lock``) because swap step 0.5
+# runs on a worker thread (``asyncio.to_thread``) inside a throwaway
+# event loop spun up by ``asyncio.run``.  ``asyncio.Lock`` instances are
+# bound to a specific event loop and do NOT serialise across threads or
+# across different event loops — a primitive sufficient for the two
+# async paths (reactive-refresh and Revalidate) but unable to block the
+# swap thread when the two paths race.  Threading locks block uniformly
+# across threads and loops.
+#
 # Critical: refresh_tokens are single-use; two concurrent calls with the
 # same token would have the losing call get 400 invalid_grant and
-# overwrite the winner's success with a terminal stale_reason.
-_refresh_locks: dict[str, asyncio.Lock] = {}
+# overwrite the winner's success with a terminal stale_reason.  Worse,
+# Anthropic's reuse-detection then family-revokes every token minted
+# from that chain — so a race here does not fail a single request, it
+# permanently invalidates the account until the user re-logs in.
+#
+# Async callers MUST use ``with_refresh_lock_async(email)`` to acquire
+# the lock without blocking the event loop (the acquire happens inside
+# ``asyncio.to_thread``).  Sync callers (only ``swap_to_account`` today)
+# use ``get_refresh_lock(email)`` with a plain ``with`` statement.
+_refresh_locks: dict[str, threading.Lock] = {}
+_refresh_locks_guard = threading.Lock()  # guards setdefault atomicity
 
 
-def get_refresh_lock(email: str) -> asyncio.Lock:
-    """Return the single asyncio.Lock instance for ``email``, creating
-    it atomically via dict.setdefault if absent."""
-    # dict.setdefault is a single atomic insert-or-return in CPython so
-    # two callers racing on the same email cannot end up with two
-    # distinct Lock objects (which would defeat the serialisation goal).
-    return _refresh_locks.setdefault(email, asyncio.Lock())
+def get_refresh_lock(email: str) -> threading.Lock:
+    """Return the single ``threading.Lock`` for ``email``, creating it
+    atomically via ``setdefault`` inside a dict-level guard.
+
+    The extra guard is belt-and-braces: CPython's ``dict.setdefault`` is
+    atomic under the GIL, but we construct a fresh ``threading.Lock``
+    eagerly before the setdefault call, so two racing threads that both
+    instantiate before either inserts would both get their own lock
+    instance.  The guard ensures only one lock is ever keyed per email.
+    """
+    with _refresh_locks_guard:
+        return _refresh_locks.setdefault(email, threading.Lock())
+
+
+@asynccontextmanager
+async def with_refresh_lock_async(email: str):
+    """Async context manager that acquires the per-email refresh lock
+    without blocking the event loop.
+
+    ``threading.Lock.acquire`` blocks the calling thread — unacceptable
+    on the main event loop.  Wrapping it in ``asyncio.to_thread`` moves
+    the blocking acquire onto a worker thread, so other coroutines keep
+    running while we wait.  The release is cheap and non-blocking, so
+    we call it directly.
+    """
+    lock = get_refresh_lock(email)
+    await asyncio.to_thread(lock.acquire)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def forget_refresh_lock(email: str) -> None:
     """Drop the per-email refresh lock.  Called on account delete so the
     dict doesn't grow unbounded across the app lifetime."""
-    _refresh_locks.pop(email, None)
+    with _refresh_locks_guard:
+        _refresh_locks.pop(email, None)
 
 
 async def revalidate_account(account_id: int, db) -> dict | None:
@@ -636,8 +680,10 @@ async def revalidate_account(account_id: int, db) -> dict | None:
         }
 
     # ── Serialise concurrent calls on the same email ─────────────────────
-    lock = get_refresh_lock(email)
-    async with lock:
+    # NOTE: uses the threading-lock-backed async context manager so the
+    # lock also blocks the swap path (worker thread) and not just other
+    # async callers on the main event loop.
+    async with with_refresh_lock_async(email):
         credentials = read_credentials_for_email(email, active_email)
         if not credentials:
             account.stale_reason = "No access token in vault — re-login required"

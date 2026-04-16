@@ -495,7 +495,8 @@ async def test_revalidate_account_refuses_active_account(monkeypatch):
 async def test_revalidate_account_concurrent_calls_serialize(monkeypatch):
     """Two simultaneous revalidate calls for the same email must not both
     POST the same single-use refresh_token to Anthropic — the per-email
-    asyncio.Lock serialises them."""
+    threading.Lock (acquired via ``with_refresh_lock_async``) serialises
+    them."""
     from backend.models import Account
 
     account = Account(
@@ -954,23 +955,19 @@ async def test_swap_skips_refresh_when_no_refresh_token(monkeypatch):
 async def test_swap_refresh_on_promotion_works_across_multiple_swaps(
     monkeypatch, fake_keychain, fake_claude_home,
 ):
-    """Regression: swap step 0.5 must not trip a cross-event-loop crash on
-    repeated swaps within the same process.
+    """Regression: swap step 0.5 must work correctly across repeated
+    swaps within the same process.
 
     Each ``swap_to_account`` call invokes ``asyncio.run(_do_refresh())``,
-    which creates and tears down a fresh event loop.  An earlier
-    implementation wrapped the inner ``_refresh_vault_token`` call in
-    ``async with get_refresh_lock(email):``; ``get_refresh_lock`` returns
-    a module-cached ``asyncio.Lock`` shared across all callers.  In
-    Python 3.10+ that lock is technically re-usable across loops while
-    uncontended, but reusing a lock that was acquired on a now-closed
-    loop is a latent ``got Future attached to a different loop`` hazard.
+    which creates and tears down a fresh event loop.  The outer
+    ``refresh_lock(target_email)`` is a ``threading.Lock`` (cross-loop
+    and cross-thread safe), and step 0.5 does NOT re-acquire it (would
+    deadlock — threading.Lock is non-reentrant); the inner HTTP refresh
+    is covered by the outer hold.
 
-    Removing the redundant wrap (``cp._credential_lock`` already
-    serialises step 0.5 against any concurrent refresher) eliminates
-    the hazard.  This test exercises three sequential swaps — A, B, A
-    — to ensure both first-time and second-time visits to a per-email
-    cached lock survive across throwaway event loops.
+    This test exercises three sequential swaps — A, B, A — to ensure
+    per-email caching works correctly across throwaway event loops and
+    that the lock is cleanly released between swaps.
     """
     import time as _time
     from backend.services import credential_provider as cp
@@ -1030,8 +1027,8 @@ async def test_swap_refresh_on_promotion_works_across_multiple_swaps(
 
     r2 = await asyncio.to_thread(ac.swap_to_account, "b@example.com")
     assert r2["target_email"] == "b@example.com"
-    # Cross-loop crash would surface on this second swap if the cached
-    # asyncio.Lock retained loop-A waiter state.
+    # threading.Lock is loop-agnostic, so the second swap's throwaway
+    # event loop sees a clean, released lock.
     assert r2["previous_email"] == "a@example.com"
 
     r3 = await asyncio.to_thread(ac.swap_to_account, "a@example.com")
@@ -1091,3 +1088,117 @@ def test_merge_checkpoint_strips_expires_at_from_legacy_shape(monkeypatch):
     # No expiresAt at any level.
     assert "expiresAt" not in merged
     assert "expiresAt" not in merged.get("claudeAiOauth", {})
+
+
+# ── Regression: swap step 0.5 vs. poll-loop reactive refresh race ──────────
+
+
+@pytest.mark.asyncio
+async def test_swap_step_0_5_serialises_against_poll_reactive_refresh(
+    monkeypatch, fake_keychain, fake_claude_home,
+):
+    """Swap step 0.5 and a poll-loop reactive refresh on the SAME email
+    cannot fire concurrent POSTs with the same single-use refresh_token.
+
+    Before the threading.Lock fix this was a family-revoke race: the
+    poll-loop refresh ran on the main event loop (asyncio.Lock acquire)
+    and swap step 0.5 ran on a worker thread inside ``asyncio.run``'s
+    throwaway event loop, so the two refreshes saw DIFFERENT
+    ``asyncio.Lock`` instances (Locks are loop-bound) and proceeded in
+    parallel.  Anthropic rotated once on the winner, rejected the
+    loser, and family-revoked the whole token chain.
+
+    With ``_refresh_locks`` converted to ``threading.Lock`` + swap_to_account
+    acquiring the refresh_lock OUTSIDE ``cp._credential_lock``, the
+    swap path now waits for the poll path to release before firing its
+    own refresh.  The two refreshes serialise.
+    """
+    from backend import background as bg
+    from backend.services import anthropic_api
+
+    store = fake_keychain
+    email = "b@example.com"
+    store[("vault", email)] = {
+        "claudeAiOauth": {
+            "accessToken": "at-old",
+            "refreshToken": "rt-B",
+            "expiresAt": 1_700_000_000_000,
+        },
+        "oauthAccount": {"emailAddress": email},
+        "userID": "uid-b",
+    }
+
+    refresh_call_count = {"n": 0}
+    refresh_in_flight = asyncio.Event()
+    refresh_barrier = asyncio.Event()
+
+    async def fake_refresh(rt):
+        call_num = refresh_call_count["n"]
+        refresh_call_count["n"] += 1
+        if call_num == 0:
+            # First caller signals it has begun, then blocks on the
+            # barrier so we can prove the second caller cannot start
+            # while the first is holding the lock.
+            refresh_in_flight.set()
+            await refresh_barrier.wait()
+        return {
+            "access_token": f"at-after-{call_num}",
+            "refresh_token": f"rt-after-{call_num}",
+            "expires_in": 3600,
+        }
+
+    # Both code paths read ``refresh_access_token`` via the same module
+    # — patch once on the module itself so both see the fake.
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    # Swap step 0.5's save_refreshed_vault_token call needs to update the
+    # in-memory vault so the subsequent step 2 sees the fresh blob.
+    def fake_save(email_, at, expires_at=None, refresh_token=None, already_locked=False):
+        existing = store.get(("vault", email_)) or {}
+        inner = dict(existing.get("claudeAiOauth") or {})
+        inner["accessToken"] = at
+        if refresh_token:
+            inner["refreshToken"] = refresh_token
+        if expires_at:
+            inner["expiresAt"] = expires_at
+        new_blob = dict(existing)
+        new_blob["claudeAiOauth"] = inner
+        store[("vault", email_)] = new_blob
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", fake_save)
+
+    # ── Poll-loop-style reactive refresh on the main event loop ────────
+    async def do_poll_refresh():
+        async with ac.with_refresh_lock_async(email):
+            return await bg._refresh_vault_token(email, "rt-B")
+
+    poll_task = asyncio.create_task(do_poll_refresh())
+    # Wait until the first refresh is actually in flight (held on the
+    # barrier).  This proves the poll path has acquired the lock.
+    await refresh_in_flight.wait()
+
+    # ── Swap on a worker thread — tries to acquire the SAME lock ──────
+    swap_task = asyncio.create_task(asyncio.to_thread(ac.swap_to_account, email))
+
+    # Give the swap a generous chance to attempt its refresh if the lock
+    # were broken.  With the fix, it stays blocked on lock.acquire.
+    await asyncio.sleep(0.1)
+
+    # CRITICAL ASSERTION: only the poll-loop refresh is in flight.  If
+    # the swap had beaten the lock, refresh_call_count would be 2 by
+    # now (swap would have proceeded past its own threading.Lock
+    # acquire and entered its ``_refresh_vault_token`` call).
+    assert refresh_call_count["n"] == 1, (
+        f"Race: swap step 0.5 started a second refresh while poll was "
+        f"still holding the lock (refresh_call_count={refresh_call_count['n']})"
+    )
+
+    # Release the poll refresh; it completes, releases the lock, and
+    # the swap can finally proceed to its own step 0.5 refresh.
+    refresh_barrier.set()
+
+    await poll_task
+    swap_result = await swap_task
+
+    # Both refreshes ran — but strictly sequentially.
+    assert refresh_call_count["n"] == 2
+    assert swap_result["target_email"] == email

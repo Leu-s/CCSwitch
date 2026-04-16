@@ -17,9 +17,6 @@ from .services import credential_provider as cp
 from .services import switcher as sw
 from .services import tmux_service
 from .services.account_service import build_usage
-# Shared per-email refresh lock — serialises the reactive-refresh path
-# with revalidate_account + swap-refresh.
-from .services.account_service import get_refresh_lock
 from .ws import WebSocketManager
 
 
@@ -502,9 +499,11 @@ async def _process_single_account(
                 _last_reactive_refresh_at[account.email] = time.monotonic()
 
                 # Vault 401 reactive refresh — under the shared lock so
-                # we don't race a concurrent Revalidate on the same email.
-                lock = get_refresh_lock(account.email)
-                async with lock:
+                # we don't race a concurrent Revalidate or swap step 0.5
+                # on the same email (threading.Lock blocks cross-thread
+                # callers; ``with_refresh_lock_async`` acquires without
+                # blocking the event loop).
+                async with ac.with_refresh_lock_async(account.email):
                     try:
                         new_tokens = await _refresh_vault_token(account.email, refresh_token)
                     except _RefreshTerminal as term_err:
