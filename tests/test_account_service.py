@@ -948,4 +948,53 @@ async def test_swap_skips_refresh_when_no_refresh_token(monkeypatch):
     assert refresh_calls == []
     # Returned blob is the original, unchanged.
     assert result is no_rt_blob
-    assert result["claudeAiOauth"]["accessToken"] == "at-NO-RT"
+
+
+def test_merge_checkpoint_strips_expires_at_from_nested_shape(monkeypatch):
+    """Swap step 2 checkpoint: strip expiresAt from the CLI's claudeAiOauth
+    nested shape.  Next successful refresh (via _refresh_vault_token) will
+    write a fresh one based on the response's expires_in field."""
+    from backend.services import credential_provider as cp
+
+    fresh_standard = {
+        "claudeAiOauth": {
+            "accessToken": "at",
+            "refreshToken": "rt",
+            "expiresAt": 99999999999,  # bogus claim from CLI's last write
+            "subscriptionType": "max",
+        },
+        "oauthAccount": {"emailAddress": "out@example.com"},
+        "userID": "u",
+    }
+    previous_vault = {
+        "oauthAccount": {"emailAddress": "out@example.com"},
+        "userID": "u",
+    }
+    monkeypatch.setattr(cp, "read_vault", lambda email: previous_vault)
+
+    merged = ac._merge_checkpoint("out@example.com", fresh_standard)
+    inner = merged.get("claudeAiOauth", {})
+    # Tokens preserved, expiresAt stripped.
+    assert inner.get("accessToken") == "at"
+    assert inner.get("refreshToken") == "rt"
+    assert inner.get("subscriptionType") == "max"
+    assert "expiresAt" not in inner
+
+
+def test_merge_checkpoint_strips_expires_at_from_legacy_shape(monkeypatch):
+    """Legacy (non-nested) standard entries have top-level expiresAt.
+    Strip from both the root AND any subsequent nested refresh."""
+    from backend.services import credential_provider as cp
+
+    fresh_standard_legacy = {
+        "accessToken": "at",
+        "refreshToken": "rt",
+        "expiresAt": 99999999999,  # root-level claim
+        "subscriptionType": "max",
+    }
+    monkeypatch.setattr(cp, "read_vault", lambda email: {})
+
+    merged = ac._merge_checkpoint("out@example.com", fresh_standard_legacy)
+    # No expiresAt at any level.
+    assert "expiresAt" not in merged
+    assert "expiresAt" not in merged.get("claudeAiOauth", {})

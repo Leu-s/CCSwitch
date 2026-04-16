@@ -351,15 +351,22 @@ def _merge_checkpoint(outgoing_email: str, fresh_standard: dict) -> dict:
     # to nested so the vault is consistent.
     nested = fresh_standard.get("claudeAiOauth")
     if isinstance(nested, dict):
-        merged["claudeAiOauth"] = nested
+        # Strip expiresAt — CLI-authored claim that can be stale relative
+        # to Anthropic's server state.  Next successful _refresh_vault_token
+        # writes a fresh one.  See spec §9.11.
+        stripped = {k: v for k, v in nested.items() if k != "expiresAt"}
+        merged["claudeAiOauth"] = stripped
     else:
         token_fields = {
             k: fresh_standard[k]
-            for k in ("accessToken", "refreshToken", "expiresAt", "subscriptionType")
+            for k in ("accessToken", "refreshToken", "subscriptionType")
             if k in fresh_standard
         }
         if token_fields:
             merged["claudeAiOauth"] = token_fields
+    # Also strip any root-level expiresAt that may have been copied from a
+    # legacy-shape standard entry via ``dict(previous_vault)`` → merged.
+    merged.pop("expiresAt", None)
     # If fresh_standard carries a fresh oauthAccount / userID (the CLI
     # sometimes writes both), prefer them so the vault learns about
     # upstream identity changes.  Both are gated on a truthy value so a
