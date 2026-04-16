@@ -158,8 +158,11 @@ For **every** enabled account on every poll cycle:
   "access token stale — type in any claude terminal to refresh" note
   on the active card; no red banner, no re-login prompt.
 - If the account is in the vault: read the access token from
-  `ccswitch-vault / email`. If it's within 20 minutes of expiry,
-  refresh (CCSwitch is sole consumer, no skew concerns). Probe. Store.
+  `ccswitch-vault / email`, probe, store. **Never refresh
+  proactively.** Refresh fires reactively only — on probe-401, on
+  swap-step-0.5 (incoming promotion), or on an explicit user
+  Revalidate click. See §9.11 for the rationale and the
+  broken-chain failure mode that drove the change.
 
 Per-account 429 backoff (exponential, 120 s → 3600 s cap) is preserved.
 
@@ -513,7 +516,7 @@ absorbed into a small, documented window:
 | CLI↔CLI refresh race | handled upstream | unchanged (2.1.101+ file lock) |
 | Swap races with CLI's ongoing refresh | small window | recoverable — CCSwitch checkpoints active entry just before overwriting, preserving any rotation the CLI landed mid-swap |
 | Switch during CLI token expiry | transient 401 blip | CLI re-reads Keychain, sees the new token on retry, recovers |
-| Dormant vault account expires | stale cascade | CCSwitch refreshes ahead of expiry (20 min window, sole consumer) |
+| Dormant vault account expires | stale cascade | CCSwitch refreshes reactively on probe 401 (sole consumer, no race partner) — see §9.11 |
 
 The only remaining narrow window is step 1→3 of the swap (between
 checkpointing the outgoing entry and writing the incoming one). If the
@@ -821,12 +824,15 @@ a single on-demand refresh attempt.  Two hard invariants:
    switches to another account first, then revalidates the now-vault
    entry.
 
-2. **Per-email serialisation.**  `account_service._revalidate_locks`
-   holds one `asyncio.Lock` per email.  Two simultaneous POSTs on
-   the same account serialise; the second one sees the rotated
-   refresh_token the first one wrote, so both succeed instead of
-   the naive implementation's one-succeeds-one-fails-and-overwrites
-   failure mode.
+2. **Per-email serialisation.**  `account_service._refresh_locks`
+   holds one `threading.Lock` per email (async callers acquire via
+   `with_refresh_lock_async`, which wraps `asyncio.to_thread` around
+   the blocking acquire).  Two simultaneous POSTs on the same account
+   serialise; the second one sees the rotated refresh_token the
+   first one wrote, so both succeed instead of the naive implementation's
+   one-succeeds-one-fails-and-overwrites failure mode.  See §9.11
+   Serialisation for full rationale on threading- vs asyncio-locks
+   and the lock-order invariant.
 
 On success the account's `stale_reason` is cleared, all three in-memory
 backoff counters are dropped, and a `ws account_updated` broadcast
@@ -896,12 +902,27 @@ after this change are:
    (`get_refresh_lock`, renamed from `_get_revalidate_lock`) with
    the reactive + swap-refresh paths.
 
-All three paths acquire `account_service.get_refresh_lock(email)`
-before calling `anthropic_api.refresh_access_token`.  This forbids
-two concurrent refresh attempts on the same email.  Anthropic's
-single-use refresh_tokens would have the loser return 400 and
-overwrite the winner's success — the empirical "cleared then
-stale again within 15s" symptom from the April 15 incident trail.
+**Serialisation.**  All three refresh paths (poll-loop reactive on
+probe-401, Revalidate endpoint, swap step 0.5) serialise via a
+per-email `threading.Lock` stored in `account_service._refresh_locks`,
+acquired via `get_refresh_lock(email)` (sync callers) or
+`with_refresh_lock_async(email)` (async callers, which wrap
+acquire/release in `asyncio.to_thread` to avoid blocking the event
+loop).  Threading — not asyncio — locks are required because swap
+step 0.5 runs on a worker thread (via `asyncio.to_thread`) inside a
+throwaway event loop (via `asyncio.run`); `asyncio.Lock` would not
+block across threads or loops and therefore would leave the
+family-revoke race open.  **Lock-order invariant:** `refresh_lock(email)`
+is always acquired OUTSIDE `cp._credential_lock`.  `swap_to_account`
+acquires refresh_lock first, then cp._credential_lock, then runs the
+5-step sequence.  Async paths follow the same order because their
+Keychain persist (via `save_refreshed_vault_token`) acquires
+`cp._credential_lock` internally only after `refresh_lock` is held.
+This forbids two concurrent refresh attempts on the same email —
+without it, Anthropic's single-use refresh_tokens would have the
+loser return 400 and overwrite the winner's success (the empirical
+"cleared then stale again within 15s" symptom from the April 15
+incident trail).
 
 Checkpoint (§2.4 step 2) no longer copies the CLI's `expiresAt`
 into the vault (see `_merge_checkpoint`).  That field is a client-
