@@ -16,11 +16,21 @@ Sequence numbers are integers starting at 1.  `seq=0` is the sentinel for
 "I have no events yet; send me the full state".
 """
 
+import asyncio
 import json
 from collections import deque
 from fastapi import WebSocket
 
 from .config import settings as cfg
+
+
+# Per-client send deadline.  A stuck browser tab (throttled, paused, or
+# with a wedged TCP write buffer) must NOT hold up server operations
+# that broadcast — e.g. ``perform_switch`` awaits a broadcast on every
+# terminal swap and would otherwise block the HTTP 409 response for as
+# long as the client takes to ack.  Any client whose send exceeds this
+# deadline is considered dead and disconnected.
+_WS_SEND_TIMEOUT = 3.0
 
 
 class WebSocketManager:
@@ -40,9 +50,14 @@ class WebSocketManager:
 
     async def broadcast(self, data: dict) -> int:
         """
-        Broadcast an event to all connected clients.  Stamps the event with the
-        next sequence number, stores it in the replay buffer, and returns the
-        sequence number assigned.
+        Broadcast an event to all connected clients.  Stamps the event with
+        the next sequence number, stores it in the replay buffer, and
+        returns the sequence number assigned.
+
+        Each client receives the message in parallel with a per-send
+        timeout of ``_WS_SEND_TIMEOUT`` seconds.  A stuck client cannot
+        block the caller or the other clients; on timeout or any send
+        exception it is disconnected so subsequent broadcasts skip it.
         """
         self._seq += 1
         seq = self._seq
@@ -50,14 +65,19 @@ class WebSocketManager:
         text = json.dumps(payload)
         self._buffer.append((seq, text))
 
-        dead = []
-        for connection in list(self.active_connections):
-            try:
-                await connection.send_text(text)
-            except Exception:
-                dead.append(connection)
-        for d in dead:
-            self.disconnect(d)
+        snapshot = list(self.active_connections)
+        if not snapshot:
+            return seq
+
+        async def _send(conn: WebSocket) -> None:
+            await asyncio.wait_for(conn.send_text(text), timeout=_WS_SEND_TIMEOUT)
+
+        results = await asyncio.gather(
+            *(_send(c) for c in snapshot), return_exceptions=True,
+        )
+        for conn, result in zip(snapshot, results):
+            if isinstance(result, BaseException):
+                self.disconnect(conn)
 
         return seq
 
