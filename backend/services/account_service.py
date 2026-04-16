@@ -198,6 +198,16 @@ def _swap_to_account_locked(target_email: str) -> dict:
             "(re-login required)"
         )
 
+    # ── Step 0.5: refresh incoming tokens on promotion ────────────────────
+    # Ensures the CLI starts the newly-activated account with fresh
+    # tokens (avoids a 401 on the user's first post-swap keypress).
+    # Shares get_refresh_lock via _refresh_vault_token so a concurrent
+    # Revalidate or poll-reactive-refresh on the same email cannot race
+    # on the single-use refresh_token.  On terminal failure this raises
+    # SwapError BEFORE the standard-entry overwrite — user stays on
+    # the previous active account and is told to Re-login.
+    incoming = _refresh_incoming_on_promotion(target_email, incoming)
+
     # ── Step 2: checkpoint outgoing ───────────────────────────────────────
     current_standard = cp.read_standard()
     outgoing_email = email_of_credentials(current_standard)
@@ -245,6 +255,89 @@ def _swap_to_account_locked(target_email: str) -> dict:
         "previous_email": outgoing_email,
         "checkpoint_written": checkpoint_written,
     }
+
+
+def _refresh_incoming_on_promotion(email: str, incoming: dict) -> dict:
+    """Swap step 0.5: refresh the incoming vault entry's access_token before
+    promoting it to the standard Keychain slot.  Minimises the window where
+    a newly-promoted account's access_token is already near expiry and
+    forces the CLI to 401 + self-refresh on the user's first keypress.
+
+    Returns the ``incoming`` blob with fresh tokens folded into
+    ``claudeAiOauth`` on success, or the original blob unchanged if:
+      * the vault has no refresh_token (nothing to refresh), or
+      * the refresh failed transiently (network, 5xx, below-threshold
+        400 transient) — warning logged, swap continues with stored
+        tokens and the CLI refreshes on its first call as it always
+        does.
+
+    Raises ``SwapError`` on terminal failure (invalid_grant, 401 with
+    terminal OAuth body).  ``_swap_to_account_locked`` propagates that
+    error — step 2 (checkpoint) and step 3 (standard-entry overwrite)
+    never run, so the user stays on the previous active account with a
+    clear "re-login first" error.
+
+    **Lock-ordering note.**  This helper runs from SYNC context inside
+    ``_swap_to_account_locked`` which HOLDS ``cp._credential_lock``
+    (``threading.RLock``) on the current thread.  ``asyncio.run`` below
+    creates a fresh event loop on the SAME thread; inside it,
+    ``_refresh_vault_token`` calls ``asyncio.to_thread(
+    cp.save_refreshed_vault_token, ..., already_locked=True)``.  The
+    worker thread skips the internal ``with _credential_lock`` acquire
+    because ``already_locked=True`` — if we didn't pass it, the worker
+    would block forever waiting for the swap thread to release
+    ``_credential_lock`` (RLock re-entrance is per-thread, so a
+    different thread's acquire is blocked like any non-reentrant lock).
+
+    Concurrency: also acquires ``get_refresh_lock(email)`` (the shared
+    per-email ``asyncio.Lock``) so a concurrent
+    ``revalidate_account`` or poll-loop reactive refresh cannot race on
+    the single-use ``refresh_token``.  That lock lives on the event
+    loop spun up inside ``asyncio.run`` here; since the swap thread
+    holds ``cp._credential_lock`` across the whole step 0.5, the only
+    concurrent refresher would run on a different thread with its own
+    loop and thus a different ``asyncio.Lock`` instance — the real
+    protection is ``cp._credential_lock`` around the vault write.  The
+    ``get_refresh_lock`` wrap is belt-and-braces.
+    """
+    from .. import background as bg  # late import to avoid circular
+    import httpx
+
+    rt = cp.refresh_token_of(incoming)
+    if not rt:
+        return incoming
+
+    async def _do_refresh():
+        lock = get_refresh_lock(email)
+        async with lock:
+            return await bg._refresh_vault_token(email, rt, already_locked=True)
+
+    try:
+        new = asyncio.run(_do_refresh())
+    except bg._RefreshTerminal as term_err:
+        reason = term_err.reason or "refresh_token invalid"
+        raise SwapError(
+            f"Cannot activate {email}: {reason}.  "
+            f"Click Re-login first to restore this account."
+        )
+    except (httpx.HTTPStatusError, httpx.RequestError, RuntimeError) as e:
+        logger.warning(
+            "Swap-time refresh for %s failed transiently (%s: %s); "
+            "proceeding with stored tokens",
+            email, type(e).__name__, e,
+        )
+        return incoming
+
+    # Refresh succeeded — fold fresh tokens into the incoming blob.
+    inner = dict(incoming.get("claudeAiOauth") or {})
+    inner["accessToken"] = new["access_token"]
+    if new.get("refresh_token"):
+        inner["refreshToken"] = new["refresh_token"]
+    if new.get("expires_at_ms"):
+        inner["expiresAt"] = new["expires_at_ms"]
+    fresh_incoming = dict(incoming)
+    fresh_incoming["claudeAiOauth"] = inner
+    return fresh_incoming
 
 
 def _merge_checkpoint(outgoing_email: str, fresh_standard: dict) -> dict:

@@ -159,7 +159,12 @@ def _record_transient_refresh_failure(
     return None
 
 
-async def _refresh_vault_token(email: str, refresh_token: str) -> dict:
+async def _refresh_vault_token(
+    email: str,
+    refresh_token: str,
+    *,
+    already_locked: bool = False,
+) -> dict:
     """Perform one refresh attempt for a vault account's refresh_token.
 
     Success path returns:
@@ -200,6 +205,15 @@ async def _refresh_vault_token(email: str, refresh_token: str) -> dict:
     the vault + backoff dicts.  It does NOT touch the DB, the cache
     (other than via save_refreshed_vault_token's Keychain write), or
     any lock (that is the caller's responsibility — see M2).
+
+    ``already_locked``: passed through to
+    ``cp.save_refreshed_vault_token``.  Set True only when the caller
+    is holding ``cp._credential_lock`` on the current thread (e.g.,
+    swap step 0.5 — see M3 docs in ``account_service._refresh_incoming
+    _on_promotion``).  Defaults False — both existing callers
+    (``revalidate_account`` + reactive-refresh path in
+    ``_process_single_account``) do NOT hold the lock, so they get
+    the conventional acquire.
     """
     try:
         resp = await anthropic_api.refresh_access_token(refresh_token)
@@ -267,6 +281,7 @@ async def _refresh_vault_token(email: str, refresh_token: str) -> dict:
                 cp.save_refreshed_vault_token,
                 email, new_token, expires_at=new_expires_at_ms,
                 refresh_token=new_refresh,
+                already_locked=already_locked,
             )
             persist_err = None
             break
