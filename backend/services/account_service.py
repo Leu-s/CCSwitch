@@ -155,33 +155,11 @@ class SwapError(RuntimeError):
     """Raised when swap_to_account cannot complete atomically."""
 
 
-class SwapRefreshTerminalError(SwapError):
-    """Raised by step 0.5 when the incoming account's refresh_token is
-    terminally rejected by Anthropic's OAuth endpoint.
-
-    Distinct from ``SwapError`` so the switch orchestrator can mark the
-    account's ``stale_reason`` in the DB and broadcast an ``account_updated``
-    event — the stale state is stable and the user must Re-login before any
-    future swap to this account can succeed.
-
-    Carries ``target_email`` + ``reason`` (the exact stale_reason string).
-    """
-
-    def __init__(self, target_email: str, reason: str):
-        super().__init__(
-            f"Cannot activate {target_email}: {reason}.  "
-            f"Click Re-login first to restore this account."
-        )
-        self.target_email = target_email
-        self.reason = reason
-
-
 def swap_to_account(target_email: str) -> dict:
     """Activate ``target_email`` by moving credentials into the standard
     Keychain entry and rewriting the identity file.
 
-    Runs the 5-step sequence from §2.4 of the design spec inside the
-    credential lock.  Returns a summary dict::
+    Returns a summary dict::
 
         {
             "target_email": "...",
@@ -194,6 +172,9 @@ def swap_to_account(target_email: str) -> dict:
     file) and step 5 (file fallback) failures are logged and re-raised
     — the standard Keychain entry already reflects the new account at
     that point, so the user is told the swap half-committed.
+
+    The CLI will self-refresh on its first 401 after a swap, so no
+    pre-promotion refresh is needed.
     """
     # INVARIANT: refresh_lock(email) is always acquired OUTSIDE
     # cp._credential_lock.  Poll-loop and Revalidate also follow this
@@ -203,10 +184,9 @@ def swap_to_account(target_email: str) -> dict:
     # refresh_lock waiting for cp._credential_lock while thread B holds
     # cp._credential_lock waiting for refresh_lock.
     #
-    # Holding the refresh_lock across the whole swap also covers step
-    # 0.5's internal refresh — a concurrent async refresher on the same
-    # email (poll-loop reactive refresh or Revalidate) cannot race the
-    # swap-time refresh for the same single-use refresh_token because
+    # Holding the refresh_lock across the whole swap prevents a
+    # concurrent async refresher on the same email (poll-loop reactive
+    # refresh or Revalidate) from racing the swap's credential move —
     # both paths wait on the same threading.Lock.
     refresh_lock = get_refresh_lock(target_email)
     with refresh_lock:
@@ -236,20 +216,6 @@ def _swap_to_account_locked(target_email: str) -> dict:
             f"Cannot activate {target_email}: vault entry has no oauthAccount "
             "(re-login required)"
         )
-
-    # ── Step 0.5: refresh incoming tokens on promotion ────────────────────
-    # Ensures the CLI starts the newly-activated account with fresh
-    # tokens (avoids a 401 on the user's first post-swap keypress).
-    # Serialisation against a concurrent Revalidate or poll-reactive-
-    # refresh on the same email is provided by the outer
-    # ``refresh_lock(target_email)`` acquired in ``swap_to_account``
-    # (held across this whole function) — so the inner HTTP refresh
-    # here is already covered and MUST NOT re-acquire (threading.Lock
-    # is non-reentrant, re-entrance would deadlock).  On terminal
-    # failure this raises SwapError BEFORE the standard-entry
-    # overwrite — user stays on the previous active account and is
-    # told to Re-login.
-    incoming = _refresh_incoming_on_promotion(target_email, incoming)
 
     # ── Step 2: checkpoint outgoing ───────────────────────────────────────
     current_standard = cp.read_standard()
@@ -298,72 +264,6 @@ def _swap_to_account_locked(target_email: str) -> dict:
         "previous_email": outgoing_email,
         "checkpoint_written": checkpoint_written,
     }
-
-
-def _refresh_incoming_on_promotion(email: str, incoming: dict) -> dict:
-    """Swap step 0.5: refresh the incoming vault entry's access_token before
-    promoting it to the standard Keychain slot.  Minimises the window where
-    a newly-promoted account's access_token is already near expiry and
-    forces the CLI to 401 + self-refresh on the user's first keypress.
-
-    Returns the ``incoming`` blob with fresh tokens folded into
-    ``claudeAiOauth`` on success, or the original blob unchanged if:
-      * the vault has no refresh_token (nothing to refresh), or
-      * the refresh failed transiently (network, 5xx, below-threshold
-        400 transient) — warning logged, swap continues with stored
-        tokens and the CLI refreshes on its first call as it always
-        does.
-
-    Raises ``SwapError`` on terminal failure (invalid_grant, 401 with
-    terminal OAuth body).  ``_swap_to_account_locked`` propagates that
-    error — step 2 (checkpoint) and step 3 (standard-entry overwrite)
-    never run, so the user stays on the previous active account with a
-    clear "re-login first" error.
-
-    **Lock-ordering note.**  Step 0.5's HTTP refresh is protected by the
-    outer ``refresh_lock(target_email)`` acquired in ``swap_to_account``.
-    No inner acquisition is needed — in fact it would deadlock because
-    ``threading.Lock`` is non-reentrant.
-
-    The outer ``cp._credential_lock`` (``threading.RLock``) is also held
-    across this whole step; to avoid re-acquiring it on the worker
-    thread inside ``asyncio.to_thread(cp.save_refreshed_vault_token)``
-    (which would block forever — RLock re-entrance is per-thread),
-    ``_refresh_vault_token`` is called with ``already_locked=True`` so
-    the worker skips the internal ``with _credential_lock`` guard.
-    """
-    from .. import background as bg  # late import to avoid circular
-
-    rt = cp.refresh_token_of(incoming)
-    if not rt:
-        return incoming
-
-    async def _do_refresh():
-        return await bg._refresh_vault_token(email, rt, already_locked=True)
-
-    try:
-        new = asyncio.run(_do_refresh())
-    except bg._RefreshTerminal as term_err:
-        reason = term_err.reason or "refresh_token invalid"
-        raise SwapRefreshTerminalError(target_email=email, reason=reason)
-    except (httpx.HTTPStatusError, httpx.RequestError, RuntimeError) as e:
-        logger.warning(
-            "Swap-time refresh for %s failed transiently (%s: %s); "
-            "proceeding with stored tokens",
-            email, type(e).__name__, e,
-        )
-        return incoming
-
-    # Refresh succeeded — fold fresh tokens into the incoming blob.
-    inner = dict(incoming.get("claudeAiOauth") or {})
-    inner["accessToken"] = new["access_token"]
-    if new.get("refresh_token"):
-        inner["refreshToken"] = new["refresh_token"]
-    if new.get("expires_at_ms"):
-        inner["expiresAt"] = new["expires_at_ms"]
-    fresh_incoming = dict(incoming)
-    fresh_incoming["claudeAiOauth"] = inner
-    return fresh_incoming
 
 
 def _merge_checkpoint(outgoing_email: str, fresh_standard: dict) -> dict:
@@ -568,18 +468,15 @@ async def build_ws_snapshot(db) -> list[dict]:
 # ── Shared per-email refresh lock ─────────────────────────────────────────
 #
 # Unified refresh lock, covers revalidate + poll-loop reactive refresh +
-# swap-refresh.  Single-use refresh_tokens race across these code paths;
-# one lock per email is the right granularity (different emails don't
-# contend; same email serialises).
+# swap credential move.  Single-use refresh_tokens race across these
+# code paths; one lock per email is the right granularity (different
+# emails don't contend; same email serialises).
 #
-# Uses ``threading.Lock`` (NOT ``asyncio.Lock``) because swap step 0.5
-# runs on a worker thread (``asyncio.to_thread``) inside a throwaway
-# event loop spun up by ``asyncio.run``.  ``asyncio.Lock`` instances are
-# bound to a specific event loop and do NOT serialise across threads or
-# across different event loops — a primitive sufficient for the two
-# async paths (reactive-refresh and Revalidate) but unable to block the
-# swap thread when the two paths race.  Threading locks block uniformly
-# across threads and loops.
+# Uses ``threading.Lock`` (NOT ``asyncio.Lock``) because the swap path
+# runs on a worker thread (``asyncio.to_thread``) with blocking
+# subprocess calls.  ``asyncio.Lock`` instances are bound to a specific
+# event loop and do NOT serialise across threads — threading locks
+# block uniformly across threads and loops.
 #
 # Critical: refresh_tokens are single-use; two concurrent calls with the
 # same token would have the losing call get 400 invalid_grant and
@@ -757,7 +654,7 @@ async def revalidate_account(account_id: int, db) -> dict | None:
             }
 
         try:
-            await bg._refresh_vault_token(email, refresh_token, already_locked=False)
+            await bg._refresh_vault_token(email, refresh_token)
         except bg._RefreshTerminal as terminal_err:
             account.stale_reason = terminal_err.reason
             await db.commit()
