@@ -155,6 +155,27 @@ class SwapError(RuntimeError):
     """Raised when swap_to_account cannot complete atomically."""
 
 
+class SwapRefreshTerminalError(SwapError):
+    """Raised by step 0.5 when the incoming account's refresh_token is
+    terminally rejected by Anthropic's OAuth endpoint.
+
+    Distinct from ``SwapError`` so the switch orchestrator can mark the
+    account's ``stale_reason`` in the DB and broadcast an ``account_updated``
+    event — the stale state is stable and the user must Re-login before any
+    future swap to this account can succeed.
+
+    Carries ``target_email`` + ``reason`` (the exact stale_reason string).
+    """
+
+    def __init__(self, target_email: str, reason: str):
+        super().__init__(
+            f"Cannot activate {target_email}: {reason}.  "
+            f"Click Re-login first to restore this account."
+        )
+        self.target_email = target_email
+        self.reason = reason
+
+
 def swap_to_account(target_email: str) -> dict:
     """Activate ``target_email`` by moving credentials into the standard
     Keychain entry and rewriting the identity file.
@@ -324,10 +345,7 @@ def _refresh_incoming_on_promotion(email: str, incoming: dict) -> dict:
         new = asyncio.run(_do_refresh())
     except bg._RefreshTerminal as term_err:
         reason = term_err.reason or "refresh_token invalid"
-        raise SwapError(
-            f"Cannot activate {email}: {reason}.  "
-            f"Click Re-login first to restore this account."
-        )
+        raise SwapRefreshTerminalError(target_email=email, reason=reason)
     except (httpx.HTTPStatusError, httpx.RequestError, RuntimeError) as e:
         logger.warning(
             "Swap-time refresh for %s failed transiently (%s: %s); "

@@ -86,7 +86,14 @@ async def switch_if_active_disabled(
         return
     next_acc = await get_next_account(account.email, db)
     if next_acc:
-        await perform_switch(next_acc, "manual", db, ws)
+        try:
+            await perform_switch(next_acc, "manual", db, ws)
+        except ac.SwapError as e:
+            # The disable action is best-effort: if the only candidate's
+            # refresh_token is dead, leave the previous active account in
+            # place and rely on the account_updated broadcast (already
+            # fired by perform_switch) to surface the stale state to the UI.
+            logger.warning("Disable-cascade swap skipped: %s", e)
 
 
 async def perform_switch(
@@ -95,11 +102,35 @@ async def perform_switch(
     db: AsyncSession,
     ws: WebSocketManager,
 ) -> None:
+    """Swap active account to ``target`` and record the event.
+
+    Raises ``ac.SwapError`` on any failure so callers can decide how to
+    surface it (manual_switch → 409 to user; auto-switch → log + skip).
+    Terminal-refresh failures (``SwapRefreshTerminalError``) are caught
+    here, persisted to ``target.stale_reason`` in the DB so the UI
+    reflects the dead state, then re-raised.
+    """
     async with _switch_lock:
         current_email = await ac.get_active_email_async()
 
         try:
             summary = await asyncio.to_thread(ac.swap_to_account, target.email)
+        except ac.SwapRefreshTerminalError as e:
+            logger.error(
+                "Swap to %s aborted — refresh_token terminal: %s",
+                target.email, e.reason,
+            )
+            target.stale_reason = e.reason
+            await db.commit()
+            try:
+                await ws.broadcast({
+                    "type": "account_updated",
+                    "id": target.id,
+                    "email": target.email,
+                })
+            except Exception as _bc_err:
+                logger.warning("WS broadcast failed: %s", _bc_err)
+            raise
         except ac.SwapError as e:
             logger.error("Swap to %s failed: %s", target.email, e)
             try:
@@ -109,7 +140,7 @@ async def perform_switch(
                 })
             except Exception as _bc_err:
                 logger.warning("WS broadcast failed: %s", _bc_err)
-            return
+            raise
 
         from_acc = None
         if current_email:
@@ -177,7 +208,10 @@ async def maybe_auto_switch(db, ws: WebSocketManager) -> None:
                 current_email, next_account.email,
                 next_account.stale_reason or current_account.stale_reason,
             )
-            await perform_switch(next_account, "stale", db, ws)
+            try:
+                await perform_switch(next_account, "stale", db, ws)
+            except ac.SwapError as e:
+                logger.warning("Auto-switch to %s failed: %s", next_account.email, e)
         else:
             logger.warning("Current account stale but no eligible replacement")
             try:
@@ -209,7 +243,10 @@ async def maybe_auto_switch(db, ws: WebSocketManager) -> None:
                     "Auto-switching %s → %s (usage %.1f%% ≥ threshold %.1f%%)",
                     current_email, next_account.email, five_hour_pct, threshold,
                 )
-            await perform_switch(next_account, reason_log, db, ws)
+            try:
+                await perform_switch(next_account, reason_log, db, ws)
+            except ac.SwapError as e:
+                logger.warning("Auto-switch to %s failed: %s", next_account.email, e)
         else:
             logger.warning("No eligible account to switch to")
             try:
