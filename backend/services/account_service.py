@@ -519,7 +519,6 @@ async def build_ws_snapshot(db) -> list[dict]:
     entries so the client can render full state without waiting for the
     next poll cycle.
     """
-    from . import account_queries as aq
     from ..cache import cache as _cache
     from ..models import Account as _Account
     from sqlalchemy import select as _select
