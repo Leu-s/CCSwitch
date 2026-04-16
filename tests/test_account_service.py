@@ -427,10 +427,10 @@ async def test_revalidate_account_success_clears_stale(monkeypatch):
     monkeypatch.setattr(ac.anthropic_api, "refresh_access_token", fake_refresh)
 
     saved = {}
-    def fake_save(email, new_token, new_expires_at_ms, new_refresh):
+    def fake_save(email, new_token, expires_at=None, refresh_token=None, **kwargs):
         saved["email"] = email
         saved["access"] = new_token
-        saved["refresh"] = new_refresh
+        saved["refresh"] = refresh_token
     monkeypatch.setattr(ac.cp, "save_refreshed_vault_token", fake_save)
 
     monkeypatch.setattr(
@@ -551,7 +551,7 @@ async def test_revalidate_account_concurrent_calls_serialize(monkeypatch):
         }
     monkeypatch.setattr(ac.anthropic_api, "refresh_access_token", fake_refresh)
 
-    def fake_save(email, t, exp, r):
+    def fake_save(email, t, *a, **kw):
         pass
     monkeypatch.setattr(ac.cp, "save_refreshed_vault_token", fake_save)
 
