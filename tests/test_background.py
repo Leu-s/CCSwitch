@@ -1096,6 +1096,122 @@ async def test_reactive_refresh_cooldown_prevents_herd(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_reactive_refresh_cooldown_returns_cached_without_stale(monkeypatch):
+    """Vault probe 401 within the 60 s reactive-refresh cooldown window
+    skips the refresh, returns the cached usage, and DOES NOT set
+    stale_reason.  The previous refresh attempt might still be propagating
+    on Anthropic's side — marking stale now would cause UI flicker on a
+    recoverable degraded state."""
+    bg._last_reactive_refresh_at.clear()
+    bg._refresh_backoff_until.clear()
+
+    email = "vault@example.com"
+    account = _make_account(email=email)
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda e, active_email=None: _fresh_creds(),
+    )
+
+    # Pre-set a reactive-refresh timestamp inside the cooldown window so
+    # the next probe 401 hits the cooldown branch.
+    bg._last_reactive_refresh_at[email] = time.monotonic()
+
+    # Seed a non-empty cached usage entry to assert shape preservation.
+    cached_usage = {"five_hour": {"utilization": 33.0, "resets_at": 1}}
+    await _cache.set_usage(email, cached_usage)
+
+    async def fake_probe(token):
+        raise _http_error(401)
+    monkeypatch.setattr(anthropic_api, "probe_usage", fake_probe)
+
+    refresh_calls = []
+    async def fake_refresh(rt):
+        refresh_calls.append(rt)
+        return {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    entry, stale = await bg._process_single_account(account, "other@example.com")
+
+    # Refresh was NOT attempted — cooldown branch short-circuited.
+    assert len(refresh_calls) == 0
+    # stale_reason stays None — cooldown skip is not a staleness signal.
+    assert stale is None
+    # Returned usage has the cached shape (build_usage flattens five_hour →
+    # five_hour_pct); the cache entry itself is untouched.
+    stored = await _cache.get_usage_async(email)
+    assert stored == cached_usage
+    # Flattened entry should reflect the cached utilization.
+    assert entry.get("usage", {}).get("five_hour_pct") == 33
+
+
+@pytest.mark.asyncio
+async def test_different_emails_do_not_serialize_refresh(monkeypatch):
+    """Per-email refresh locks must NOT serialise across different emails.
+    Two concurrent _refresh_vault_token calls on distinct emails should
+    overlap — otherwise get_refresh_lock has regressed into a single
+    global lock and N accounts would block on one another's refreshes."""
+    ac._refresh_locks.clear()
+
+    enter_times: list[float] = []
+
+    async def timed_refresh(rt):
+        enter_times.append(asyncio.get_event_loop().time())
+        await asyncio.sleep(0.1)  # sizable hold so serialisation would be visible
+        return {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
+
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", timed_refresh)
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", lambda *a, **kw: None)
+
+    async def task_a():
+        lock = ac.get_refresh_lock("a@example.com")
+        async with lock:
+            await bg._refresh_vault_token("a@example.com", "rt-a")
+
+    async def task_b():
+        lock = ac.get_refresh_lock("b@example.com")
+        async with lock:
+            await bg._refresh_vault_token("b@example.com", "rt-b")
+
+    await asyncio.gather(task_a(), task_b())
+
+    assert len(enter_times) == 2
+    # STRICT: both entered within ~50 ms of each other, i.e. concurrently.
+    # A broken implementation (single global lock) would put them
+    # ~100 ms apart due to the awaited sleep inside the critical section.
+    assert abs(enter_times[1] - enter_times[0]) < 0.05, (
+        f"Refreshes on different emails serialised: "
+        f"enter[0]={enter_times[0]} enter[1]={enter_times[1]}"
+    )
+
+
+def test_forget_account_state_clears_all_tracking_dicts():
+    """forget_account_state must clear EVERY module-level per-account
+    bookkeeping dict.  A future refactor that drops one of these from the
+    helper body would leak state across account churn (delete → re-add
+    under the same email would resurrect stale backoff counters)."""
+    email = "forget-me@example.com"
+
+    # Seed every dict the helper claims to clear.
+    bg._backoff_until[email] = 1.0
+    bg._backoff_count[email] = 2
+    bg._last_nudge_at[email] = 3.0
+    bg._refresh_backoff_until[email] = 4.0
+    bg._refresh_backoff_count[email] = 5
+    bg._refresh_backoff_first_failure_at[email] = 6.0
+    bg._last_reactive_refresh_at[email] = 7.0
+
+    bg.forget_account_state(email)
+
+    assert email not in bg._backoff_until
+    assert email not in bg._backoff_count
+    assert email not in bg._last_nudge_at
+    assert email not in bg._refresh_backoff_until
+    assert email not in bg._refresh_backoff_count
+    assert email not in bg._refresh_backoff_first_failure_at
+    assert email not in bg._last_reactive_refresh_at
+
+
+@pytest.mark.asyncio
 async def test_poll_reactive_refresh_and_revalidate_serialize(monkeypatch):
     """Concurrent Revalidate (user click) and poll-loop reactive refresh
     on the same email must NOT both POST the same single-use refresh_token.
