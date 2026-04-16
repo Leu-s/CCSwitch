@@ -799,6 +799,73 @@ async def test_swap_proceeds_when_incoming_refresh_transient(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_swap_treats_anthropic_invalid_request_error_as_transient(monkeypatch):
+    """End-to-end regression guard (April 2026 phantom-stale cascade).
+
+    Anthropic's nested ``invalid_request_error`` means OUR POST was
+    malformed (e.g. missing ``client_id``) — NOT that the refresh_token
+    is dead.  The classifier MUST route this as TRANSIENT so swap step
+    0.5 proceeds with stored tokens instead of aborting with
+    ``SwapRefreshTerminalError``.
+
+    If a future change re-classifies ``invalid_request_error`` as
+    terminal, this test will fail because the swap will raise
+    ``SwapError`` instead of returning a success summary.  The
+    downstream consequence of misclassification is that
+    ``perform_switch`` would persist ``stale_reason`` on a fully
+    healthy account — the exact cascade the April 2026 fix unwinds.
+    """
+    import httpx
+    from backend.services import credential_provider as cp
+    from backend.services import anthropic_api
+
+    healthy_vault = {
+        "claudeAiOauth": {
+            "accessToken": "at-STORED", "refreshToken": "rt-HEALTHY", "expiresAt": 0,
+        },
+        "oauthAccount": {"emailAddress": "vault@example.com"},
+        "userID": "u",
+    }
+    monkeypatch.setattr(cp, "read_vault", lambda email: healthy_vault)
+    monkeypatch.setattr(cp, "refresh_token_of",
+                        lambda creds: creds.get("claudeAiOauth", {}).get("refreshToken"))
+
+    # Anthropic's real-world response when our POST is malformed.
+    req = httpx.Request("POST", "https://platform.claude.com/v1/oauth/token")
+    resp = MagicMock()
+    resp.status_code = 400
+    resp.json = MagicMock(return_value={
+        "type": "error",
+        "error": {"type": "invalid_request_error", "message": "Invalid request format"},
+        "request_id": "req_regression",
+    })
+
+    async def malformed_post(rt):
+        raise httpx.HTTPStatusError("bad request", request=req, response=resp)
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", malformed_post)
+
+    monkeypatch.setattr(cp, "read_standard", lambda: {})
+    written_standard = {}
+    monkeypatch.setattr(cp, "write_standard",
+                        lambda b: (written_standard.update(b), True)[1])
+    monkeypatch.setattr(cp, "write_vault", lambda email, blob: True)
+    monkeypatch.setattr(ac, "_rewrite_claude_json_identity", lambda b: None)
+    monkeypatch.setattr(ac, "_atomic_write_json", lambda p, b: None)
+
+    # Transient path MUST NOT persist; if this assertion trips, the
+    # classifier has been broken.
+    monkeypatch.setattr(cp, "save_refreshed_vault_token",
+                        lambda *a, **kw: pytest.fail("invalid_request_error must not persist"))
+
+    # No SwapError — swap proceeds with stored tokens.  If the classifier
+    # mis-labels invalid_request_error as terminal, asyncio.to_thread will
+    # raise SwapError here and the test fails.
+    result = await asyncio.to_thread(ac.swap_to_account, "vault@example.com")
+    assert result["target_email"] == "vault@example.com"
+    assert written_standard.get("claudeAiOauth", {}).get("accessToken") == "at-STORED"
+
+
+@pytest.mark.asyncio
 async def test_swap_aborts_when_incoming_refresh_terminal(monkeypatch):
     """Swap-time refresh returns terminal (invalid_grant or 401).  SwapError
     raised, standard Keychain entry NOT overwritten."""
