@@ -24,6 +24,23 @@ logger = logging.getLogger(__name__)
 # so clients see a clean "A → B" event instead of a partial overlap.
 _switch_lock = asyncio.Lock()
 
+# Hard deadline on the blocking portion of a swap (swap_to_account runs on a
+# worker thread via ``asyncio.to_thread``).  A healthy swap completes in
+# <1.5 s; anything taking >25 s is a hang — stuck security subprocess, stuck
+# asyncio.run() executor shutdown inside the nested event loop, or Anthropic
+# refresh hang exceeding its own 10 s httpx timeout.  Without this ceiling,
+# the ``async with _switch_lock`` block never exits and every subsequent
+# switch request (manual or auto) queues forever on the asyncio lock.
+#
+# The worker thread is NOT terminated on timeout (Python has no thread-kill),
+# but ``asyncio.wait_for`` cancels the Future so control returns to us, the
+# lock releases, and the user sees a 409 instead of a 30 s hang.  Any
+# per-email ``refresh_lock`` the stuck thread still holds remains held
+# (best-effort — see ``swap_to_account``'s lock discussion); subsequent
+# swaps to the SAME email may block on that per-email lock until the thread
+# eventually unsticks, but swaps to OTHER emails are unaffected.
+_SWAP_DEADLINE = 25.0
+
 
 async def get_next_account(current_email: str, db: AsyncSession) -> Account | None:
     """Pick the next enabled, non-stale account that also has available
@@ -126,7 +143,31 @@ async def perform_switch(
         current_email = await ac.get_active_email_async()
 
         try:
-            summary = await asyncio.to_thread(ac.swap_to_account, target.email)
+            summary = await asyncio.wait_for(
+                asyncio.to_thread(ac.swap_to_account, target.email),
+                timeout=_SWAP_DEADLINE,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Swap to %s exceeded %.0fs deadline — worker thread stuck "
+                "(likely stale refresh_lock or Keychain subprocess hang); "
+                "releasing _switch_lock so other accounts remain swappable.",
+                target.email, _SWAP_DEADLINE,
+            )
+            try:
+                await ws.broadcast({
+                    "type": "error",
+                    "message": (
+                        f"Swap to {target.email} timed out — the refresh or "
+                        "Keychain write is stuck.  Try again in a minute; "
+                        "if it persists, restart the server."
+                    ),
+                })
+            except Exception as _bc_err:
+                logger.warning("WS broadcast failed: %s", _bc_err)
+            raise ac.SwapError(
+                f"Swap to {target.email} timed out after {_SWAP_DEADLINE:.0f}s"
+            ) from None
         except ac.SwapRefreshTerminalError as e:
             logger.error(
                 "Swap to %s aborted — refresh_token terminal: %s",
