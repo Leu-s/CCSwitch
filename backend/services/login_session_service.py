@@ -189,19 +189,31 @@ def start_relogin_session(expected_email: str) -> dict:
     gone stale.  The scratch dir is a brand-new temporary directory — same
     mechanism as an add-flow — with ``expected_email`` stored on the
     session so ``verify_login_session`` can refuse wrong-identity logins.
+
+    If a prior re-login session for the same email is still in the
+    registry (user closed the tab before verify, browser crashed, etc.),
+    tear it down FIRST — that kills the orphan tmux window and rmtree's
+    the scratch dir — then start fresh.  Clicking Re-login again is a
+    clear signal the user wants to retry, so rejecting them (as the
+    pre-fix code did) until the 30-minute session timeout expires is
+    user-hostile.
     """
     _cleanup_expired_sessions()
 
-    # Duplicate guard — reject a second re-login for the same email.
     with _sessions_lock:
-        for data in _active_login_sessions.values():
+        orphan_sids = [
+            sid for sid, data in _active_login_sessions.items()
             if (
                 data.get("kind") == "relogin"
                 and data.get("expected_email") == expected_email
-            ):
-                raise ValueError(
-                    "A re-login session is already active for this account"
-                )
+            )
+        ]
+    for sid in orphan_sids:
+        logger.info(
+            "Re-login retry for %s — tearing down orphan session %s first",
+            expected_email, sid,
+        )
+        cleanup_login_session(sid)
 
     session_id = str(uuid.uuid4())[:8]
     scratch_dir = _make_scratch_dir(session_id)
