@@ -287,7 +287,8 @@ def test_delete_account_invokes_state_cleanup_calls(client_and_factory, monkeypa
     # Seed dicts in both modules for alice — both cleanup calls must fire.
     bg._refresh_backoff_count["alice@example.com"] = 1
     bg._last_reactive_refresh_at["alice@example.com"] = 99.0
-    ac._refresh_locks["alice@example.com"] = asyncio.Lock()
+    import threading as _threading
+    ac._refresh_locks["alice@example.com"] = _threading.Lock()
 
     try:
         resp = client.delete(f"/api/accounts/{acc_id}")
