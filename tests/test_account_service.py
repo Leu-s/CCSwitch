@@ -950,6 +950,99 @@ async def test_swap_skips_refresh_when_no_refresh_token(monkeypatch):
     assert result is no_rt_blob
 
 
+@pytest.mark.asyncio
+async def test_swap_refresh_on_promotion_works_across_multiple_swaps(
+    monkeypatch, fake_keychain, fake_claude_home,
+):
+    """Regression: swap step 0.5 must not trip a cross-event-loop crash on
+    repeated swaps within the same process.
+
+    Each ``swap_to_account`` call invokes ``asyncio.run(_do_refresh())``,
+    which creates and tears down a fresh event loop.  An earlier
+    implementation wrapped the inner ``_refresh_vault_token`` call in
+    ``async with get_refresh_lock(email):``; ``get_refresh_lock`` returns
+    a module-cached ``asyncio.Lock`` shared across all callers.  In
+    Python 3.10+ that lock is technically re-usable across loops while
+    uncontended, but reusing a lock that was acquired on a now-closed
+    loop is a latent ``got Future attached to a different loop`` hazard.
+
+    Removing the redundant wrap (``cp._credential_lock`` already
+    serialises step 0.5 against any concurrent refresher) eliminates
+    the hazard.  This test exercises three sequential swaps — A, B, A
+    — to ensure both first-time and second-time visits to a per-email
+    cached lock survive across throwaway event loops.
+    """
+    import time as _time
+    from backend.services import credential_provider as cp
+    from backend.services import anthropic_api
+
+    store = fake_keychain
+    # Two vault entries with expired access_tokens — both will trigger
+    # the swap-time refresh path (step 0.5).
+    def _expired_blob(email: str) -> dict:
+        return {
+            "claudeAiOauth": {
+                "accessToken": f"at-OLD-{email}",
+                "refreshToken": f"rt-live-{email}",
+                "expiresAt": int(_time.time() * 1000) - 60_000,
+            },
+            "oauthAccount": {"emailAddress": email},
+            "userID": f"uid-{email.split('@')[0]}",
+        }
+
+    store[("vault", "a@example.com")] = _expired_blob("a@example.com")
+    store[("vault", "b@example.com")] = _expired_blob("b@example.com")
+
+    # Override the fake_keychain default (transient ConnectError) with
+    # a successful refresh — every swap step 0.5 returns fresh creds.
+    refresh_count = {"n": 0}
+
+    async def fake_refresh(rt):
+        refresh_count["n"] += 1
+        return {
+            "access_token": f"at-FRESH-{rt}-{refresh_count['n']}",
+            "refresh_token": f"rt-FRESH-{rt}-{refresh_count['n']}",
+            "expires_in": 3600,
+        }
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+
+    # save_refreshed_vault_token is the persistence side of the refresh —
+    # mutate the in-memory store so subsequent swaps see the rotated token.
+    def fake_save_refresh(
+        email, at, expires_at=None, refresh_token=None, already_locked=False,
+    ):
+        existing = store.get(("vault", email)) or {}
+        inner = dict(existing.get("claudeAiOauth") or {})
+        inner["accessToken"] = at
+        if refresh_token:
+            inner["refreshToken"] = refresh_token
+        if expires_at:
+            inner["expiresAt"] = expires_at
+        new_blob = dict(existing)
+        new_blob["claudeAiOauth"] = inner
+        store[("vault", email)] = new_blob
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", fake_save_refresh)
+
+    # Three sequential swaps in the same process — each spins up its own
+    # ``asyncio.run`` loop.  Lock is module-cached across all three.
+    r1 = await asyncio.to_thread(ac.swap_to_account, "a@example.com")
+    assert r1["target_email"] == "a@example.com"
+
+    r2 = await asyncio.to_thread(ac.swap_to_account, "b@example.com")
+    assert r2["target_email"] == "b@example.com"
+    # Cross-loop crash would surface on this second swap if the cached
+    # asyncio.Lock retained loop-A waiter state.
+    assert r2["previous_email"] == "a@example.com"
+
+    r3 = await asyncio.to_thread(ac.swap_to_account, "a@example.com")
+    assert r3["target_email"] == "a@example.com"
+    # Re-visiting the same email's cached lock from a third throwaway loop.
+    assert r3["previous_email"] == "b@example.com"
+
+    # Sanity: every swap actually exercised step 0.5's refresh path.
+    assert refresh_count["n"] == 3
+
+
 def test_merge_checkpoint_strips_expires_at_from_nested_shape(monkeypatch):
     """Swap step 2 checkpoint: strip expiresAt from the CLI's claudeAiOauth
     nested shape.  Next successful refresh (via _refresh_vault_token) will

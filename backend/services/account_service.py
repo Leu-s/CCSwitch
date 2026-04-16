@@ -201,11 +201,13 @@ def _swap_to_account_locked(target_email: str) -> dict:
     # ── Step 0.5: refresh incoming tokens on promotion ────────────────────
     # Ensures the CLI starts the newly-activated account with fresh
     # tokens (avoids a 401 on the user's first post-swap keypress).
-    # Shares get_refresh_lock via _refresh_vault_token so a concurrent
-    # Revalidate or poll-reactive-refresh on the same email cannot race
-    # on the single-use refresh_token.  On terminal failure this raises
-    # SwapError BEFORE the standard-entry overwrite — user stays on
-    # the previous active account and is told to Re-login.
+    # Serialisation against a concurrent Revalidate or poll-reactive-
+    # refresh on the same email is provided by ``cp._credential_lock``
+    # (held across this whole function) — see the lock-ordering note
+    # in ``_refresh_incoming_on_promotion`` for why we do NOT wrap the
+    # inner refresh in ``get_refresh_lock`` here.  On terminal failure
+    # this raises SwapError BEFORE the standard-entry overwrite — user
+    # stays on the previous active account and is told to Re-login.
     incoming = _refresh_incoming_on_promotion(target_email, incoming)
 
     # ── Step 2: checkpoint outgoing ───────────────────────────────────────
@@ -289,16 +291,20 @@ def _refresh_incoming_on_promotion(email: str, incoming: dict) -> dict:
     ``_credential_lock`` (RLock re-entrance is per-thread, so a
     different thread's acquire is blocked like any non-reentrant lock).
 
-    Concurrency: also acquires ``get_refresh_lock(email)`` (the shared
-    per-email ``asyncio.Lock``) so a concurrent
-    ``revalidate_account`` or poll-loop reactive refresh cannot race on
-    the single-use ``refresh_token``.  That lock lives on the event
-    loop spun up inside ``asyncio.run`` here; since the swap thread
-    holds ``cp._credential_lock`` across the whole step 0.5, the only
-    concurrent refresher would run on a different thread with its own
-    loop and thus a different ``asyncio.Lock`` instance — the real
-    protection is ``cp._credential_lock`` around the vault write.  The
-    ``get_refresh_lock`` wrap is belt-and-braces.
+    Concurrency: serialisation against a concurrent ``revalidate_account``
+    or poll-loop reactive refresh on the same email is provided by
+    ``cp._credential_lock`` (held across this entire step), NOT by the
+    per-email ``asyncio.Lock`` from ``get_refresh_lock``.  Any concurrent
+    refresher runs on a different thread with its own event loop and
+    therefore would see a *different* ``asyncio.Lock`` instance anyway —
+    so wrapping ``_refresh_vault_token`` in ``get_refresh_lock(email)``
+    here would be both redundant and a latent cross-loop hazard (the
+    cached ``asyncio.Lock`` was bound to whichever loop first acquired
+    it, and re-using it from the per-swap throwaway loop spun up by
+    ``asyncio.run`` is only safe while the lock is uncontended — which
+    we cannot statically guarantee).  We therefore call
+    ``_refresh_vault_token`` directly; the credential lock is the
+    correctness boundary.
     """
     from .. import background as bg  # late import to avoid circular
     import httpx
@@ -308,9 +314,9 @@ def _refresh_incoming_on_promotion(email: str, incoming: dict) -> dict:
         return incoming
 
     async def _do_refresh():
-        lock = get_refresh_lock(email)
-        async with lock:
-            return await bg._refresh_vault_token(email, rt, already_locked=True)
+        # NOTE: deliberately NOT wrapped in ``async with get_refresh_lock(email)``.
+        # See the lock-ordering note in this function's docstring.
+        return await bg._refresh_vault_token(email, rt, already_locked=True)
 
     try:
         new = asyncio.run(_do_refresh())
