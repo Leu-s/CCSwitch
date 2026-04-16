@@ -17,6 +17,9 @@ from .services import credential_provider as cp
 from .services import switcher as sw
 from .services import tmux_service
 from .services.account_service import build_usage
+# Shared per-email refresh lock — serialises the reactive-refresh path
+# with revalidate_account + swap-refresh.
+from .services.account_service import get_refresh_lock
 from .ws import WebSocketManager
 
 
@@ -72,6 +75,14 @@ _REFRESH_SKEW_MS = 20 * 60 * 1000
 # a chatty 401 loop from firing tmux-send-keys every 15 seconds.
 _NUDGE_COOLDOWN_SECONDS = 30
 _last_nudge_at: dict[str, float] = {}
+
+
+# ── Reactive-refresh cooldown (thundering-herd guard) ────────────────────────
+# Per-account cooldown between reactive refresh attempts.  Prevents N
+# concurrent poll cycles from firing N refresh POSTs when Anthropic
+# is briefly returning 401 to all requests (degraded state).
+_REACTIVE_REFRESH_COOLDOWN_SECONDS = 60
+_last_reactive_refresh_at: dict[str, float] = {}
 
 
 # ── Post-sleep stagger ───────────────────────────────────────────────────────
@@ -332,6 +343,7 @@ def forget_account_state(email: str) -> None:
     _refresh_backoff_until.pop(email, None)
     _refresh_backoff_count.pop(email, None)
     _refresh_backoff_first_failure_at.pop(email, None)
+    _last_reactive_refresh_at.pop(email, None)
 
 
 async def _process_single_account(
@@ -426,8 +438,100 @@ async def _process_single_account(
                         "usage": flat_dict,
                         "error": cached_dict.get("error"),
                     }, account.stale_reason
-                new_stale_reason = "Anthropic API returned 401 — re-login required"
-                raise
+
+                # Vault 401: try a reactive refresh + retry probe ONCE before
+                # writing stale_reason.  The access_token may be dead server-
+                # side (rotation, idle-invalidation) but the refresh_token
+                # may still be live.  Self-heal instead of giving up.
+                if account.stale_reason:
+                    # Already stale — don't try again this cycle.
+                    new_stale_reason = account.stale_reason
+                    raise
+                refresh_token = cp.refresh_token_of(credentials)
+                if not refresh_token:
+                    new_stale_reason = "Anthropic API returned 401 — re-login required"
+                    raise
+                if _refresh_backoff_until.get(account.email, 0.0) > time.monotonic():
+                    # Already in a refresh-backoff window — don't hammer.
+                    logger.debug(
+                        "Vault 401 for %s but refresh-backoff active; returning cached",
+                        account.email,
+                    )
+                    cached = await cache.get_usage_async(account.email) or {}
+                    return {
+                        "id": account.id,
+                        "email": account.email,
+                        "usage": (build_usage(cached, token_info).model_dump()
+                                  if build_usage(cached, token_info) else {}),
+                        "error": cached.get("error"),
+                    }, None
+
+                # Thundering-herd guard: if we recently attempted a reactive
+                # refresh for this email, don't hammer Anthropic (degraded-
+                # state 401s to all callers will otherwise fan out into N
+                # refresh POSTs per poll cycle).
+                last_reactive = _last_reactive_refresh_at.get(account.email, 0.0)
+                if time.monotonic() - last_reactive < _REACTIVE_REFRESH_COOLDOWN_SECONDS:
+                    logger.debug(
+                        "Vault 401 for %s but reactive-refresh cooldown active",
+                        account.email,
+                    )
+                    cached = await cache.get_usage_async(account.email) or {}
+                    return {
+                        "id": account.id,
+                        "email": account.email,
+                        "usage": (build_usage(cached, token_info).model_dump()
+                                  if build_usage(cached, token_info) else {}),
+                        "error": cached.get("error"),
+                    }, None
+                _last_reactive_refresh_at[account.email] = time.monotonic()
+
+                # Vault 401 reactive refresh — under the shared lock so
+                # we don't race a concurrent Revalidate on the same email.
+                lock = get_refresh_lock(account.email)
+                async with lock:
+                    try:
+                        new_tokens = await _refresh_vault_token(account.email, refresh_token)
+                    except _RefreshTerminal as term_err:
+                        # Helper carries stale_reason on .reason.
+                        new_stale_reason = term_err.reason or "Refresh token invalid — re-login required"
+                        raise
+                    except (httpx.HTTPStatusError, httpx.RequestError):
+                        # Transient below threshold — DO NOT stale.  Return cached.
+                        cached = await cache.get_usage_async(account.email) or {}
+                        return {
+                            "id": account.id,
+                            "email": account.email,
+                            "usage": (build_usage(cached, token_info).model_dump()
+                                      if build_usage(cached, token_info) else {}),
+                            "error": cached.get("error"),
+                        }, None
+
+                # Retry probe with the fresh access_token.
+                try:
+                    usage = await anthropic_api.probe_usage(new_tokens["access_token"])
+                except httpx.HTTPStatusError as retry_err:
+                    if retry_err.response.status_code == 401:
+                        # Fresh token still 401 — genuinely dead upstream.
+                        new_stale_reason = "Anthropic API returned 401 — re-login required"
+                        raise
+                    raise  # Other status (e.g. 500) bubbles to outer handler.
+                # Fresh token succeeded — fall through to the success path.
+                await cache.set_usage(account.email, usage)
+                _backoff_until.pop(account.email, None)
+                _backoff_count.pop(account.email, None)
+                # Recovery succeeded — clear the cooldown so a GENUINELY
+                # NEW 401 on the next poll cycle is treated as a fresh
+                # event, not falsely 60s-skipped as if we already tried.
+                _last_reactive_refresh_at.pop(account.email, None)
+                flat = build_usage(usage, token_info) if usage else None
+                flat_dict = flat.model_dump() if flat else {}
+                return {
+                    "id": account.id,
+                    "email": account.email,
+                    "usage": flat_dict,
+                    "error": None,
+                }, None
             elif status == 429:
                 count = _backoff_count.get(account.email, 0) + 1
                 _backoff_count[account.email] = count
@@ -461,8 +565,10 @@ async def _process_single_account(
             "usage": flat_dict,
             "error": None,
         }
-    except _RefreshTerminal:
-        err_str = new_stale_reason or "Refresh token invalid"
+    except _RefreshTerminal as term_err:
+        # new_stale_reason was set at the raise site (from term_err.reason);
+        # fall back to term_err.reason if not set for some edge path.
+        err_str = new_stale_reason or term_err.reason or "Refresh token invalid"
         new_entry, err_str = await cache.set_usage_error(account.email, err_str, False)
         token_info = await cache.get_token_info_async(account.email) or {}
         try:

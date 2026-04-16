@@ -440,26 +440,32 @@ async def build_ws_snapshot(db) -> list[dict]:
     return snapshot
 
 
-# ── revalidate_account (on-demand stale recovery) ─────────────────────────
+# ── Shared per-email refresh lock ─────────────────────────────────────────
 #
-# Per-email async locks serialise concurrent revalidate calls on the same
-# account.  Critical: refresh_tokens are single-use; two concurrent calls
-# with the same token would have the losing call get 400 invalid_grant
-# and overwrite the winner's success with a terminal stale_reason.
-_revalidate_locks: dict[str, asyncio.Lock] = {}
+# Unified refresh lock, covers revalidate + poll-loop reactive refresh +
+# swap-refresh.  Single-use refresh_tokens race across these code paths;
+# one lock per email is the right granularity (different emails don't
+# contend; same email serialises).
+#
+# Critical: refresh_tokens are single-use; two concurrent calls with the
+# same token would have the losing call get 400 invalid_grant and
+# overwrite the winner's success with a terminal stale_reason.
+_refresh_locks: dict[str, asyncio.Lock] = {}
 
 
-def _get_revalidate_lock(email: str) -> asyncio.Lock:
+def get_refresh_lock(email: str) -> asyncio.Lock:
+    """Return the single asyncio.Lock instance for ``email``, creating
+    it atomically via dict.setdefault if absent."""
     # dict.setdefault is a single atomic insert-or-return in CPython so
     # two callers racing on the same email cannot end up with two
     # distinct Lock objects (which would defeat the serialisation goal).
-    return _revalidate_locks.setdefault(email, asyncio.Lock())
+    return _refresh_locks.setdefault(email, asyncio.Lock())
 
 
-def forget_revalidate_lock(email: str) -> None:
-    """Drop the per-email revalidate lock.  Call on account delete so the
+def forget_refresh_lock(email: str) -> None:
+    """Drop the per-email refresh lock.  Called on account delete so the
     dict doesn't grow unbounded across the app lifetime."""
-    _revalidate_locks.pop(email, None)
+    _refresh_locks.pop(email, None)
 
 
 async def revalidate_account(account_id: int, db) -> dict | None:
@@ -523,7 +529,7 @@ async def revalidate_account(account_id: int, db) -> dict | None:
         }
 
     # ── Serialise concurrent calls on the same email ─────────────────────
-    lock = _get_revalidate_lock(email)
+    lock = get_refresh_lock(email)
     async with lock:
         credentials = read_credentials_for_email(email, active_email)
         if not credentials:

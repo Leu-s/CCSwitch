@@ -25,7 +25,7 @@ from backend.services import credential_provider as cp
 def _clear_revalidate_module_state():
     """Module-level dicts in account_service survive across tests without
     this.  Clear before AND after each test for test-order independence."""
-    ac._revalidate_locks.clear()
+    ac._refresh_locks.clear()
     # Also clear the background dicts — revalidate mutates them on success.
     try:
         from backend import background as bg
@@ -35,7 +35,7 @@ def _clear_revalidate_module_state():
     except Exception:
         pass
     yield
-    ac._revalidate_locks.clear()
+    ac._refresh_locks.clear()
     try:
         from backend import background as bg
         bg._refresh_backoff_until.clear()
@@ -554,7 +554,7 @@ async def test_revalidate_account_concurrent_calls_are_strictly_serialised(monke
     """Stronger assertion than ..._serialize: verifies the SECOND concurrent
     revalidate call does not begin its refresh block until the FIRST one has
     fully released the lock.  Catches the failure mode where two coroutines
-    each acquire a different Lock object (broken _get_revalidate_lock)."""
+    each acquire a different Lock object (broken get_refresh_lock)."""
     from backend.models import Account
 
     account = Account(
