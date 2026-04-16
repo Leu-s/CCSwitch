@@ -141,6 +141,58 @@ _PROBE_BODY = {
 }
 
 
+def parse_rate_limit_headers(headers) -> dict:
+    """Extract unified rate-limit fields from Anthropic response headers.
+
+    Returns ``{"five_hour": {...}, "seven_day": {...}}`` with the usual
+    ``utilization`` / ``resets_at`` / ``status`` keys.  Each window is
+    only included if AT LEAST ONE of its three headers was present — so
+    a 429 that ships only ``*-reset`` still produces usable data for the
+    UI ("resets in 2d 14h") even without a utilization value.
+
+    Safe to call with httpx.Response.headers from either a 200 probe or
+    a 429 rate-limited response — Anthropic ships the unified headers
+    on both.
+    """
+    def _f(k):
+        v = headers.get(k)
+        try:
+            return float(v) if v is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    def _i(k):
+        v = headers.get(k)
+        try:
+            return int(v) if v is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    result: dict = {}
+
+    five_util = _f("anthropic-ratelimit-unified-5h-utilization")
+    five_reset = _i("anthropic-ratelimit-unified-5h-reset")
+    five_status = headers.get("anthropic-ratelimit-unified-5h-status")
+    if five_util is not None or five_reset is not None or five_status is not None:
+        result["five_hour"] = {
+            "utilization": round(five_util * 100, 2) if five_util is not None else None,
+            "resets_at": five_reset,
+            "status": five_status,
+        }
+
+    seven_util = _f("anthropic-ratelimit-unified-7d-utilization")
+    seven_reset = _i("anthropic-ratelimit-unified-7d-reset")
+    seven_status = headers.get("anthropic-ratelimit-unified-7d-status")
+    if seven_util is not None or seven_reset is not None or seven_status is not None:
+        result["seven_day"] = {
+            "utilization": round(seven_util * 100, 2) if seven_util is not None else None,
+            "resets_at": seven_reset,
+            "status": seven_status,
+        }
+
+    return result
+
+
 async def probe_usage(access_token: str) -> dict:
     """
     POST a minimal message to /v1/messages and extract rate-limit utilization
@@ -160,40 +212,7 @@ async def probe_usage(access_token: str) -> dict:
         resp = await client.post(MESSAGES_URL, headers=headers, json=_PROBE_BODY)
         resp.raise_for_status()
 
-    h = resp.headers
-
-    def _f(key: str) -> float | None:
-        v = h.get(key)
-        try:
-            return float(v) if v is not None else None
-        except (ValueError, TypeError):
-            return None
-
-    def _i(key: str) -> int | None:
-        v = h.get(key)
-        try:
-            return int(v) if v is not None else None
-        except (ValueError, TypeError):
-            return None
-
-    result: dict = {}
-
-    five_util = _f("anthropic-ratelimit-unified-5h-utilization")
-    if five_util is not None:
-        result["five_hour"] = {
-            "utilization": round(five_util * 100, 2),
-            "resets_at": _i("anthropic-ratelimit-unified-5h-reset"),
-            "status": h.get("anthropic-ratelimit-unified-5h-status"),
-        }
-
-    seven_util = _f("anthropic-ratelimit-unified-7d-utilization")
-    if seven_util is not None:
-        result["seven_day"] = {
-            "utilization": round(seven_util * 100, 2),
-            "resets_at": _i("anthropic-ratelimit-unified-7d-reset"),
-        }
-
-    return result
+    return parse_rate_limit_headers(resp.headers)
 
 
 async def refresh_access_token(refresh_token: str) -> dict:

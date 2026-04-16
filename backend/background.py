@@ -550,6 +550,15 @@ async def _process_single_account(
                     "429 for %s (offense #%d) — backing off %ds",
                     account.email, count, backoff_seconds,
                 )
+                # Anthropic ships the unified rate-limit headers on 429s too
+                # (resets_at, utilization, status per window).  Cache them
+                # BEFORE raising so the downstream set_usage_error preserves
+                # them alongside ``rate_limited: True`` — and the UI can
+                # show "Weekly limit — resets in 2d 14h" instead of a
+                # generic "retry later" fallback.
+                rl_data = anthropic_api.parse_rate_limit_headers(probe_err.response.headers)
+                if rl_data:
+                    await cache.set_usage(account.email, rl_data)
                 raise
             else:
                 raise
