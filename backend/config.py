@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     # Rate-limit backoff — initial delay and cap (seconds) after Anthropic 429.
     rate_limit_backoff_initial: int = 120
     rate_limit_backoff_max: int = 3600
+    # Vault account polling via GET /api/oauth/usage (read-only, no window trigger)
+    poll_interval_vault: int = 600
+    poll_interval_vault_min: int = 180
+    anthropic_usage_url: str = "https://api.anthropic.com/api/oauth/usage"
 
 
 settings = Settings()

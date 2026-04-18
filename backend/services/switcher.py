@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -54,6 +55,23 @@ async def get_next_account(current_email: str, db: AsyncSession) -> Account | No
     )
     candidates = result.scalars().all()
 
+    # Tier-0: any candidate whose 5-hour window has already expired is
+    # guaranteed to have 0% utilization — pick it immediately without
+    # waiting for a fresh probe.  This avoids a full poll cycle delay
+    # when the optimal candidate is obvious from persisted timestamps.
+    now_epoch = int(time.time())
+    for candidate in candidates:
+        if (
+            candidate.last_five_hour_resets_at is not None
+            and candidate.last_five_hour_resets_at < now_epoch
+        ):
+            logger.info(
+                "Tier-0 fast pick: %s (5h window expired %ds ago)",
+                candidate.email,
+                now_epoch - candidate.last_five_hour_resets_at,
+            )
+            return candidate
+
     for candidate in candidates:
         usage = await cache.get_usage_async(candidate.email)
         if not usage:
@@ -74,6 +92,40 @@ async def get_next_account(current_email: str, db: AsyncSession) -> Account | No
         return candidate
 
     return None
+
+
+async def _on_demand_vault_check(account: Account) -> bool:
+    """Quick sanity check that the candidate's vault entry still exists
+    and has a refresh_token.  Returns True if the account looks viable,
+    False if it should be skipped (e.g. vault entry was deleted out-of-band).
+    """
+    from . import credential_provider as _cp
+    try:
+        blob = await asyncio.to_thread(_cp.read_vault, account.email)
+        if not blob or not _cp.refresh_token_of(blob):
+            logger.warning(
+                "On-demand vault check: %s has no refresh_token — skipping",
+                account.email,
+            )
+            return False
+    except Exception as exc:
+        logger.warning(
+            "On-demand vault check failed for %s: %s — skipping",
+            account.email, exc,
+        )
+        return False
+    return True
+
+
+async def _verify_vault_candidate(
+    next_account: Account, active_email: str
+) -> bool:
+    """Verify that the chosen switch candidate is viable before committing
+    to a full swap.  Returns True if the candidate passes, False to skip.
+    """
+    if next_account.email == active_email:
+        return False
+    return await _on_demand_vault_check(next_account)
 
 
 async def switch_if_active_disabled(
@@ -221,6 +273,9 @@ async def maybe_auto_switch(db, ws: WebSocketManager) -> None:
     # regardless of usage.
     if current_account.stale_reason:
         next_account = await get_next_account(current_email, db)
+        if next_account and not await _verify_vault_candidate(next_account, current_email):
+            logger.warning("Vault verify failed for %s — skipping auto-switch", next_account.email)
+            next_account = None
         if next_account:
             logger.info(
                 "Auto-switching %s → %s (current account stale: %s)",
@@ -249,6 +304,9 @@ async def maybe_auto_switch(db, ws: WebSocketManager) -> None:
 
     if is_rate_limited or five_hour_pct >= threshold:
         next_account = await get_next_account(current_email, db)
+        if next_account and not await _verify_vault_candidate(next_account, current_email):
+            logger.warning("Vault verify failed for %s — skipping auto-switch", next_account.email)
+            next_account = None
         if next_account:
             if is_rate_limited:
                 reason_log = "rate_limited"

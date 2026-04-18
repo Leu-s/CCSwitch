@@ -62,6 +62,16 @@ class _UsageCache:
         async with self._lock:
             self._token_info.pop(email, None)
 
+    async def seed_usage(self, email: str, data: dict) -> None:
+        """Seed cache from DB on startup.
+
+        Only writes if no fresher data exists — avoids overwriting
+        a value that a poll cycle set between DB read and seed call.
+        """
+        async with self._lock:
+            if email not in self._usage:
+                self._usage[email] = data
+
     async def set_usage_error(
         self, email: str, err_str: str, is_rate_limited: bool,
         rl_data: dict | None = None,

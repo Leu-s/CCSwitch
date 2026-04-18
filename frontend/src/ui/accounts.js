@@ -95,6 +95,23 @@ function inferRateLimitNotice(usage) {
   return { label: "Rate limited", resetsAt: null };
 }
 
+function windowExpired(resetsAt) {
+  if (resetsAt == null) return false;
+  return tsToMs(resetsAt) < Date.now();
+}
+
+function usageWindowIdle(label) {
+  return `
+    <div class="usage-window usage-window-idle">
+      <div class="usage-header">
+        <span class="usage-label">${label}</span>
+        <span class="usage-reset">Window expired — idle</span>
+      </div>
+      <div class="usage-bar"><div class="usage-fill ok" style="width:0%"></div></div>
+      <div class="usage-pct-row"><span class="usage-pct ok">0%</span></div>
+    </div>`;
+}
+
 function usageBlockHtml(acc) {
   const usage = acc.usage || {};
   const threshold = acc.threshold_pct ?? 95;
@@ -118,8 +135,21 @@ function usageBlockHtml(acc) {
       </div>`;
   }
 
-  const fiveBlock  = fiveH  != null ? usageWindow("5 h window", fiveH,  usage.five_hour_resets_at) : "";
-  const sevenBlock = sevenD != null ? usageWindow("7 d window", sevenD, usage.seven_day_resets_at)  : "";
+  const isActive = !!acc.is_active;
+  let fiveBlock  = fiveH  != null ? usageWindow("5 h window", fiveH,  usage.five_hour_resets_at) : "";
+  let sevenBlock = sevenD != null ? usageWindow("7 d window", sevenD, usage.seven_day_resets_at)  : "";
+
+  // For non-active accounts whose window has expired, show a clean idle
+  // state instead of stale percentages — the backend resets utilization
+  // to 0 on the next probe, but until then the cached value is misleading.
+  if (!isActive) {
+    if (fiveH != null && windowExpired(usage.five_hour_resets_at)) {
+      fiveBlock = usageWindowIdle("5 h window");
+    }
+    if (sevenD != null && windowExpired(usage.seven_day_resets_at)) {
+      sevenBlock = usageWindowIdle("7 d window");
+    }
+  }
   const hasBars    = fiveBlock || sevenBlock;
   const divider    = hasBars ? `<div class="usage-divider"></div>` : "";
 

@@ -66,6 +66,16 @@ _TRANSIENT_REFRESH_ESCALATE_AFTER_SECONDS = 24 * 3600
 _NUDGE_COOLDOWN_SECONDS = 30
 _last_nudge_at: dict[str, float] = {}
 
+# ── Per-account vault usage poll throttle ────────────────────────────────
+# Maps email → wall-clock timestamp (time.time()) of the last successful
+# fetch_usage call.  Wall clock is used instead of monotonic because macOS
+# suspends monotonic during sleep — after wake the throttle would consider
+# hours-old data "fresh".
+# Vault accounts are polled at poll_interval_vault (default 600 s) intervals
+# via the read-only GET /api/oauth/usage endpoint instead of the inference-
+# triggering POST /v1/messages probe.
+_last_vault_poll_at: dict[str, float] = {}
+
 
 # ── Post-sleep stagger ───────────────────────────────────────────────────────
 # When the event loop wall-clock jumps by more than this much between
@@ -311,17 +321,288 @@ def forget_account_state(email: str) -> None:
     _refresh_backoff_until.pop(email, None)
     _refresh_backoff_count.pop(email, None)
     _refresh_backoff_first_failure_at.pop(email, None)
+    _last_vault_poll_at.pop(email, None)
 
 
-async def _process_single_account(
+async def _process_vault_account(
+    account: "Account",
+    active_email: str,
+    ws: "WebSocketManager",
+    db: "AsyncSession",
+) -> tuple[dict, str | None, dict | None]:
+    """Fetch usage for a vault (non-active) account via the read-only
+    GET /api/oauth/usage endpoint.
+
+    Unlike the active-account probe (POST /v1/messages), this endpoint
+    does not trigger or maintain 5-hour inference windows — safe for
+    periodic vault monitoring at 180 s+ intervals.
+
+    Returns ``(usage_entry, new_stale_reason, db_updates)`` where
+    ``db_updates`` is a dict of Account column mutations to apply
+    sequentially after ``asyncio.gather`` completes (avoids sharing
+    an AsyncSession across concurrent coroutines).
+    """
+    new_stale_reason: str | None = None
+    email = account.email
+
+    try:
+        # ── Window-expired shortcut ──────────────────────────────────────
+        # If the stored 5-hour window has already expired, synthesise a
+        # 0 % cache entry without hitting the API.  The next real poll
+        # will refresh the data once the throttle interval elapses.
+        now_wall = time.time()
+        if (
+            account.last_five_hour_resets_at is not None
+            and account.last_five_hour_resets_at < now_wall
+        ):
+            usage: dict = {
+                "five_hour": {"utilization": 0, "resets_at": account.last_five_hour_resets_at},
+            }
+            # Always include seven_day data from stored columns when available,
+            # regardless of whether the five_hour window is the only one expired.
+            if account.last_seven_day_resets_at is not None:
+                if account.last_seven_day_resets_at < now_wall:
+                    usage["seven_day"] = {
+                        "utilization": 0,
+                        "resets_at": account.last_seven_day_resets_at,
+                    }
+                else:
+                    usage["seven_day"] = {
+                        "utilization": account.last_seven_day_utilization or 0,
+                        "resets_at": account.last_seven_day_resets_at,
+                    }
+            await cache.set_usage(email, usage)
+            _last_vault_poll_at[email] = time.time()
+            token_info = await cache.get_token_info_async(email) or {}
+            flat = build_usage(usage, token_info)
+            flat_dict = flat.model_dump() if flat else {}
+            return {
+                "id": account.id,
+                "email": email,
+                "usage": flat_dict,
+                "error": None,
+            }, account.stale_reason, None
+
+        # ── Throttle check ───────────────────────────────────────────────
+        now_wall_throttle = time.time()
+        last = _last_vault_poll_at.get(email, 0.0)
+        vault_interval = max(settings.poll_interval_vault, settings.poll_interval_vault_min)
+        if now_wall_throttle - last < vault_interval:
+            # Cached data is fresh enough — return last-known values.
+            cached = await cache.get_usage_async(email)
+            token_info = await cache.get_token_info_async(email) or {}
+            try:
+                flat = build_usage(cached, token_info)
+                flat_dict = flat.model_dump() if flat else {}
+            except Exception as _bu_err:
+                logger.warning("build_usage failed for %s: %s", email, _bu_err)
+                flat_dict = {}
+            return {
+                "id": account.id,
+                "email": email,
+                "usage": flat_dict,
+                "error": cached.get("error"),
+            }, account.stale_reason, None
+
+        # ── Read vault credentials ───────────────────────────────────────
+        credentials = ac.read_credentials_for_email(email, active_email)
+        if not credentials:
+            new_stale_reason = "No access token in vault — re-login required"
+            raise ValueError(new_stale_reason)
+
+        token = cp.access_token_of(credentials)
+        if not token:
+            new_stale_reason = "No access token in vault — re-login required"
+            raise ValueError(new_stale_reason)
+
+        # Hydrate token-info cache for GET /api/accounts metadata.
+        token_info = cp.token_info_of(credentials)
+        await cache.set_token_info(email, token_info)
+
+        # ── Call fetch_usage ─────────────────────────────────────────────
+        try:
+            usage = await anthropic_api.fetch_usage(token)
+        except httpx.HTTPStatusError as fetch_err:
+            status = fetch_err.response.status_code
+
+            if status == 401:
+                # Access token expired/dead — attempt reactive refresh,
+                # same pattern as the probe-401 vault path.
+                if account.stale_reason:
+                    new_stale_reason = account.stale_reason
+                    raise
+
+                refresh_token = cp.refresh_token_of(credentials)
+                if not refresh_token:
+                    new_stale_reason = "Anthropic API returned 401 — re-login required"
+                    raise
+
+                if _refresh_backoff_until.get(email, 0.0) > time.monotonic():
+                    logger.debug(
+                        "Vault fetch_usage 401 for %s but refresh-backoff active; "
+                        "returning cached",
+                        email,
+                    )
+                    cached = await cache.get_usage_async(email) or {}
+                    flat = build_usage(cached, token_info)
+                    return {
+                        "id": account.id,
+                        "email": email,
+                        "usage": (flat.model_dump() if flat else {}),
+                        "error": cached.get("error"),
+                    }, None, None
+
+                # Reactive refresh under the shared per-email lock.
+                refresh_result = None
+                async with ac.with_refresh_lock_async(email):
+                    try:
+                        refresh_result = await _refresh_vault_token(email, refresh_token)
+                    except (httpx.HTTPStatusError, httpx.RequestError):
+                        # Transient below threshold — return cached, no stale.
+                        cached = await cache.get_usage_async(email) or {}
+                        flat = build_usage(cached, token_info)
+                        return {
+                            "id": account.id,
+                            "email": email,
+                            "usage": (flat.model_dump() if flat else {}),
+                            "error": cached.get("error"),
+                        }, None, None
+
+                if refresh_result is None or not refresh_result.success:
+                    new_stale_reason = (
+                        refresh_result.stale_reason
+                        or "Refresh token invalid — re-login required"
+                    )
+                    err_str = new_stale_reason
+                    new_entry, err_str = await cache.set_usage_error(
+                        email, err_str, False,
+                    )
+                    token_info = await cache.get_token_info_async(email) or {}
+                    try:
+                        flat = build_usage(new_entry, token_info)
+                        flat_dict = flat.model_dump() if flat else {"error": err_str}
+                    except Exception as _bu_err:
+                        logger.warning(
+                            "build_usage failed for %s: %s", email, _bu_err,
+                        )
+                        flat_dict = {"error": err_str}
+                    return {
+                        "id": account.id,
+                        "email": email,
+                        "usage": flat_dict,
+                        "error": err_str,
+                    }, new_stale_reason, None
+
+                # Retry fetch_usage with the fresh access_token.
+                try:
+                    usage = await anthropic_api.fetch_usage(
+                        refresh_result.access_token,
+                    )
+                except httpx.HTTPStatusError as retry_err:
+                    if retry_err.response.status_code == 401:
+                        new_stale_reason = (
+                            "Anthropic API returned 401 — re-login required"
+                        )
+                        raise
+                    raise
+                # Fall through to success path below.
+
+            elif status == 429:
+                logger.warning(
+                    "fetch_usage 429 for vault account %s — skipping this cycle",
+                    email,
+                )
+                raise
+
+            else:
+                raise
+
+        # ── Success path ─────────────────────────────────────────────────
+        await cache.set_usage(email, usage)
+        _last_vault_poll_at[email] = time.time()
+
+        # Build DB column updates — applied sequentially after gather.
+        five = usage.get("five_hour") or {}
+        seven = usage.get("seven_day") or {}
+        db_updates: dict = {
+            "last_five_hour_resets_at": five.get("resets_at"),
+            "last_five_hour_utilization": five.get("utilization"),
+            "last_seven_day_resets_at": seven.get("resets_at"),
+            "last_seven_day_utilization": seven.get("utilization"),
+            "last_usage_probed_at": time.time(),
+        }
+
+        # Clear stale_reason on successful usage fetch.
+        new_stale_reason = None
+
+        _backoff_until.pop(email, None)
+        _backoff_count.pop(email, None)
+
+        token_info = await cache.get_token_info_async(email) or {}
+        try:
+            flat = build_usage(usage, token_info)
+            flat_dict = flat.model_dump() if flat else {}
+        except Exception as _bu_err:
+            logger.warning("build_usage failed for %s: %s", email, _bu_err)
+            flat_dict = {}
+
+        usage_entry: dict = {
+            "id": account.id,
+            "email": email,
+            "usage": flat_dict,
+            "error": None,
+        }
+
+    except Exception as e:
+        db_updates = None
+        err_str = str(e)
+        if isinstance(e, httpx.HTTPStatusError):
+            err_str = f"HTTP {e.response.status_code}"
+            try:
+                body = e.response.json()
+                msg = (body.get("error") or {}).get("message") or body.get("message")
+                if msg:
+                    err_str = msg
+            except Exception:
+                pass
+        logger.warning("Vault usage fetch failed for %s: %s", email, err_str)
+
+        # Vault fetch_usage 429 is an endpoint rate limit, not an inference
+        # rate limit — do NOT set rate_limited flag (no auto-switch trigger).
+        new_entry, err_str = await cache.set_usage_error(
+            email, err_str, False,  # vault 429 is endpoint rate-limit, not inference — no auto-switch
+        )
+
+        token_info = await cache.get_token_info_async(email) or {}
+        try:
+            flat = build_usage(new_entry, token_info)
+            flat_dict = flat.model_dump() if flat else {"error": err_str}
+        except Exception as _bu_err:
+            logger.warning("build_usage failed for %s: %s", email, _bu_err)
+            flat_dict = {"error": err_str}
+        usage_entry = {
+            "id": account.id,
+            "email": email,
+            "usage": flat_dict,
+            "error": err_str if "error" in new_entry else None,
+        }
+
+    return usage_entry, new_stale_reason, db_updates
+
+
+async def _process_active_account(
     account: Account,
     active_email: str | None,
 ) -> tuple[dict, str | None]:
-    """Fetch token, optionally refresh, probe usage, and update caches for
-    one account.
+    """Fetch token, probe usage, and update caches for the active account.
 
     Returns ``(usage_entry, new_stale_reason)`` — ``new_stale_reason`` is
     the updated DB column value, or ``None`` if unchanged.
+
+    NOTE: ``poll_usage_and_switch`` dispatches vault accounts to
+    ``_process_vault_account`` instead of this function.  The vault branch
+    below is retained only for backward compatibility with tests that call
+    this function directly with a non-active email.
     """
     new_stale_reason: str | None = None
     is_active = active_email is not None and account.email == active_email
@@ -410,6 +691,7 @@ async def _process_single_account(
                         "error": cached_dict.get("error"),
                     }, account.stale_reason
 
+                # Legacy: only reachable from tests, not from production dispatch.
                 # Vault 401: try a reactive refresh + retry probe ONCE before
                 # writing stale_reason.  The access_token may be dead server-
                 # side (rotation, idle-invalidation) but the refresh_token
@@ -429,11 +711,11 @@ async def _process_single_account(
                         account.email,
                     )
                     cached = await cache.get_usage_async(account.email) or {}
+                    flat = build_usage(cached, token_info)
                     return {
                         "id": account.id,
                         "email": account.email,
-                        "usage": (build_usage(cached, token_info).model_dump()
-                                  if build_usage(cached, token_info) else {}),
+                        "usage": (flat.model_dump() if flat else {}),
                         "error": cached.get("error"),
                     }, None
 
@@ -442,21 +724,22 @@ async def _process_single_account(
                 # email (threading.Lock blocks cross-thread callers;
                 # ``with_refresh_lock_async`` acquires without blocking
                 # the event loop).
+                refresh_result = None
                 async with ac.with_refresh_lock_async(account.email):
                     try:
                         refresh_result = await _refresh_vault_token(account.email, refresh_token)
                     except (httpx.HTTPStatusError, httpx.RequestError):
                         # Transient below threshold — DO NOT stale.  Return cached.
                         cached = await cache.get_usage_async(account.email) or {}
+                        flat = build_usage(cached, token_info)
                         return {
                             "id": account.id,
                             "email": account.email,
-                            "usage": (build_usage(cached, token_info).model_dump()
-                                      if build_usage(cached, token_info) else {}),
+                            "usage": (flat.model_dump() if flat else {}),
                             "error": cached.get("error"),
                         }, None
 
-                if not refresh_result.success:
+                if refresh_result is None or not refresh_result.success:
                     new_stale_reason = refresh_result.stale_reason or "Refresh token invalid — re-login required"
                     err_str = new_stale_reason
                     new_entry, err_str = await cache.set_usage_error(account.email, err_str, False)
@@ -573,6 +856,10 @@ async def _process_single_account(
     return usage_entry, new_stale_reason
 
 
+# Backward-compatible alias — tests import this name directly.
+_process_single_account = _process_active_account
+
+
 async def poll_usage_and_switch(ws: WebSocketManager) -> None:
     global _last_poll_monotonic
 
@@ -601,13 +888,19 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
         accounts_result = await db.execute(select(Account))
         accounts = accounts_result.scalars().all()
 
-        results = await asyncio.gather(
-            *[_process_single_account(account, active_email) for account in accounts],
-            return_exceptions=True,
-        )
+        # Dispatch: active account → POST /v1/messages probe (fast cadence);
+        # vault accounts → GET /api/oauth/usage (10-min cadence, no window trigger).
+        tasks = []
+        for account in accounts:
+            if account.email == active_email:
+                tasks.append(_process_active_account(account, active_email))
+            else:
+                tasks.append(_process_vault_account(account, active_email or "", ws, db))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         updated = []
         stale_changed = False
+        has_vault_writes = False
         for account, result in zip(accounts, results):
             # ``asyncio.gather(return_exceptions=True)`` captures both
             # Exception and BaseException subclasses (notably
@@ -618,12 +911,12 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                 # one stack-less traceback per account.
                 if isinstance(result, asyncio.CancelledError):
                     logger.debug(
-                        "_process_single_account cancelled for %s",
+                        "_process_active_account cancelled for %s",
                         account.email,
                     )
                 else:
                     logger.exception(
-                        "_process_single_account raised for %s: %s",
+                        "_process_active_account raised for %s: %s",
                         account.email, result,
                     )
                 usage_entry = {
@@ -634,10 +927,23 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                 }
                 new_stale_reason = account.stale_reason
             else:
-                usage_entry, new_stale_reason = result
+                # _process_vault_account returns a 3-tuple (with db_updates);
+                # _process_active_account returns a 2-tuple.
+                if len(result) == 3:
+                    usage_entry, new_stale_reason, vault_db_updates = result
+                else:
+                    usage_entry, new_stale_reason = result
+                    vault_db_updates = None
 
             usage_entry["stale_reason"] = new_stale_reason
             updated.append(usage_entry)
+
+            # Apply vault DB column updates sequentially (safe for the
+            # single AsyncSession — no concurrent mutation).
+            if vault_db_updates:
+                for col, val in vault_db_updates.items():
+                    setattr(account, col, val)
+                has_vault_writes = True
 
             if new_stale_reason != account.stale_reason:
                 account.stale_reason = new_stale_reason
@@ -650,7 +956,7 @@ async def poll_usage_and_switch(ws: WebSocketManager) -> None:
                 else:
                     logger.info("Cleared stale flag for %s", account.email)
 
-        if stale_changed:
+        if stale_changed or has_vault_writes:
             await db.commit()
 
         try:

@@ -435,6 +435,13 @@
   .usage-fill { height: 100%; border-radius: 999px; transition: width 0.6s ease, background 0.3s ease; background: var(--success); }
   .usage-fill.warn { background: var(--warning); }
   .usage-fill.crit { background: var(--danger); }
+  .usage-window-idle .usage-fill {
+    background: var(--success);
+    opacity: 0.3;
+  }
+  .usage-window-idle .usage-pct {
+    opacity: 0.6;
+  }
   .usage-divider { height: 1px; background: var(--border); margin: 1px 0; }
   .usage-footer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
   .usage-error { color: var(--danger-text); font-size: 11px; padding: 4px 8px; background: var(--danger-soft); border: 1px solid var(--danger-border); border-radius: var(--radius-sm); }

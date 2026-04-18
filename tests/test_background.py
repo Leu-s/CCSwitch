@@ -38,6 +38,7 @@ async def _wipe_cache_between_tests():
     bg._refresh_backoff_count.clear()
     bg._refresh_backoff_first_failure_at.clear()
     bg._last_nudge_at.clear()
+    bg._last_vault_poll_at.clear()
     bg._last_poll_monotonic = None
     yield
     _cache._usage.clear()
@@ -48,6 +49,7 @@ async def _wipe_cache_between_tests():
     bg._refresh_backoff_count.clear()
     bg._refresh_backoff_first_failure_at.clear()
     bg._last_nudge_at.clear()
+    bg._last_vault_poll_at.clear()
     bg._last_poll_monotonic = None
 
 
@@ -1181,3 +1183,158 @@ async def test_poll_reactive_refresh_and_revalidate_serialize(monkeypatch):
     assert len(enter_times) == 2
     # STRICT: second call entered strictly after first exited.
     assert enter_times[1] >= exit_times[0]
+
+
+# ── _process_vault_account tests ──────────────────────────────────────────
+
+
+class _StubWS:
+    async def broadcast(self, payload):
+        return 0
+
+
+class _StubDB:
+    pass
+
+
+@pytest.mark.asyncio
+async def test_process_vault_window_expired_includes_seven_day(monkeypatch):
+    """When five_hour expired but seven_day NOT expired, seven_day data is preserved."""
+    now = int(time.time())
+    account = _make_account(
+        email="vault@example.com",
+        last_five_hour_resets_at=now - 100,  # expired
+        last_five_hour_utilization=50.0,
+        last_seven_day_resets_at=now + 3600,  # NOT expired
+        last_seven_day_utilization=30.0,
+    )
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(),
+    )
+
+    entry, stale, db_updates = await bg._process_vault_account(
+        account, "other@example.com", _StubWS(), _StubDB(),
+    )
+    assert stale is None or stale == account.stale_reason
+    # Window-expired shortcut should still include seven_day data.
+    cached = await _cache.get_usage_async("vault@example.com")
+    assert cached is not None
+    assert "seven_day" in cached
+    assert cached["seven_day"]["utilization"] == 30.0
+    assert cached["seven_day"]["resets_at"] == now + 3600
+    # five_hour should be synthesised as 0%.
+    assert cached["five_hour"]["utilization"] == 0
+    # No db_updates on the window-expired shortcut path.
+    assert db_updates is None
+
+
+@pytest.mark.asyncio
+async def test_process_vault_fetch_success_returns_db_updates(monkeypatch):
+    """Successful fetch_usage returns db_updates dict with usage columns."""
+    account = _make_account(email="vault@example.com")
+    # Ensure throttle does not skip the fetch.
+    bg._last_vault_poll_at.pop("vault@example.com", None)
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(),
+    )
+
+    async def fake_fetch(token):
+        return {
+            "five_hour": {"utilization": 25.0, "resets_at": 1234567890},
+            "seven_day": {"utilization": 10.0, "resets_at": 9876543210},
+        }
+
+    monkeypatch.setattr(anthropic_api, "fetch_usage", fake_fetch)
+
+    entry, stale, db_updates = await bg._process_vault_account(
+        account, "other@example.com", _StubWS(), _StubDB(),
+    )
+    assert stale is None
+    assert entry["error"] is None
+    # db_updates must carry the usage snapshot columns.
+    assert db_updates is not None
+    assert db_updates["last_five_hour_resets_at"] == 1234567890
+    assert db_updates["last_five_hour_utilization"] == 25.0
+    assert db_updates["last_seven_day_resets_at"] == 9876543210
+    assert db_updates["last_seven_day_utilization"] == 10.0
+    assert db_updates["last_usage_probed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_process_vault_401_triggers_refresh(monkeypatch):
+    """Vault fetch_usage 401 triggers reactive refresh via _refresh_vault_token."""
+    account = _make_account(email="vault@example.com")
+    bg._last_vault_poll_at.pop("vault@example.com", None)
+    bg._refresh_backoff_until.pop("vault@example.com", None)
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(),
+    )
+
+    fetch_calls: list[str] = []
+
+    async def fake_fetch(token):
+        fetch_calls.append(token)
+        if len(fetch_calls) == 1:
+            raise _http_error(401)
+        return {"five_hour": {"utilization": 5.0, "resets_at": 1}}
+
+    monkeypatch.setattr(anthropic_api, "fetch_usage", fake_fetch)
+
+    refresh_called = []
+
+    async def fake_refresh(refresh_token):
+        refresh_called.append(refresh_token)
+        return {
+            "access_token": "new-at",
+            "expires_in": 3600,
+            "refresh_token": "new-rt",
+        }
+
+    monkeypatch.setattr(anthropic_api, "refresh_access_token", fake_refresh)
+    monkeypatch.setattr(cp, "save_refreshed_vault_token", lambda *a, **kw: None)
+
+    entry, stale, db_updates = await bg._process_vault_account(
+        account, "other@example.com", _StubWS(), _StubDB(),
+    )
+    assert stale is None
+    # Refresh was called.
+    assert len(refresh_called) == 1
+    # fetch_usage was called twice (original 401 + retry after refresh).
+    assert len(fetch_calls) == 2
+    # db_updates populated from the retry success.
+    assert db_updates is not None
+    assert db_updates["last_five_hour_resets_at"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_vault_429_no_rate_limited_flag(monkeypatch):
+    """Vault 429 does NOT set rate_limited flag (it's endpoint limit, not inference)."""
+    account = _make_account(email="vault@example.com")
+    bg._last_vault_poll_at.pop("vault@example.com", None)
+
+    monkeypatch.setattr(
+        ac, "read_credentials_for_email",
+        lambda email, active_email=None: _fresh_creds(),
+    )
+
+    async def fake_fetch(token):
+        raise _http_error(429)
+
+    monkeypatch.setattr(anthropic_api, "fetch_usage", fake_fetch)
+
+    entry, stale, db_updates = await bg._process_vault_account(
+        account, "other@example.com", _StubWS(), _StubDB(),
+    )
+    # 429 on vault does NOT mark stale.
+    assert stale is None
+    # No db_updates on error path.
+    assert db_updates is None
+    # Cache should NOT have rate_limited flag for vault accounts.
+    cached = await _cache.get_usage_async("vault@example.com")
+    assert not cached.get("rate_limited")

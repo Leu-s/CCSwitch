@@ -21,6 +21,7 @@ from backend.cache import cache as _cache
 from backend.database import Base
 from backend.models import Account, Setting, SwitchLog
 from backend.services import account_service as ac
+from backend.services import credential_provider as cp
 from backend.services import switcher as sw
 from backend.services import tmux_service
 
@@ -403,6 +404,8 @@ async def test_maybe_auto_switch_rate_limited_triggers_switch(db_session, monkey
     swap_calls: list[str] = []
     monkeypatch.setattr(ac, "swap_to_account",
                         lambda email: swap_calls.append(email) or {})
+    monkeypatch.setattr(cp, "read_vault",
+                        lambda email: {"claudeAiOauth": {"refreshToken": "rt_mock"}})
 
     ws = _FakeWS()
     await sw.maybe_auto_switch(db_session, ws)
@@ -431,6 +434,8 @@ async def test_maybe_auto_switch_stale_fast_path_switches(db_session, monkeypatc
     swap_calls: list[str] = []
     monkeypatch.setattr(ac, "swap_to_account",
                         lambda email: swap_calls.append(email) or {})
+    monkeypatch.setattr(cp, "read_vault",
+                        lambda email: {"claudeAiOauth": {"refreshToken": "rt_mock"}})
 
     ws = _FakeWS()
     await sw.maybe_auto_switch(db_session, ws)
