@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -27,6 +28,8 @@ from .ws import ws_manager
 
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -95,8 +98,26 @@ async def _poll_loop(idle_interval: int) -> None:
             logger.exception("poll_usage_and_switch raised unexpectedly: %s", exc)
 
 
+_ALLOWED_API_HOSTS = frozenset({
+    "api.anthropic.com",
+    "platform.claude.com",
+    "console.anthropic.com",
+})
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    for url_name in ("anthropic_messages_url", "anthropic_refresh_url", "anthropic_usage_url"):
+        url = getattr(cfg, url_name)
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_API_HOSTS:
+            logger.critical(
+                "BLOCKED: %s=%s points to non-Anthropic host %s. "
+                "This would send OAuth tokens to an untrusted server. Exiting.",
+                url_name, url, parsed.hostname,
+            )
+            sys.exit(1)
+
     lock_path = os.path.join(os.path.expanduser("~"), ".ccswitch.lock")
     lock_file = open(lock_path, "w")
     try:

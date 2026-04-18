@@ -13,6 +13,8 @@ When api_token is empty (the default), all requests are allowed — suitable for
 localhost-only deployments where network exposure is not a concern.
 """
 
+import hmac
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -53,7 +55,7 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
             else:
                 provided = ""
 
-        if provided != self._token:
+        if not hmac.compare_digest(provided.encode(), self._token.encode()):
             return JSONResponse(
                 {"detail": "Unauthorized"},
                 status_code=401,
