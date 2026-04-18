@@ -8,13 +8,14 @@ full architectural rationale.
 ## What this app does
 
 A local FastAPI dashboard that manages several Claude.ai subscription
-accounts under a single `~/.claude/` home directory.  It polls
-Anthropic's `/v1/messages` endpoint with a near-empty probe to read the
-unified rate-limit headers, and when the active account approaches its
-5-hour window limit (or gets rate-limited) it atomically swaps
-credentials between CCSwitch's private vault and Claude Code's standard
-Keychain entry, then nudges every running `claude` tmux pane so they
-wake up on the new account.
+accounts under a single `~/.claude/` home directory.  It polls the
+active account via a near-empty POST to `/v1/messages` (to read the
+unified rate-limit headers) and vault accounts via the read-only
+GET `/api/oauth/usage` endpoint (no inference window trigger), and
+when the active account approaches its 5-hour window limit (or gets
+rate-limited) it atomically swaps credentials between CCSwitch's
+private vault and Claude Code's standard Keychain entry, then nudges
+every running `claude` tmux pane so they wake up on the new account.
 
 The user runs N tmux panes, **all on the same active account at any
 given time**.  When a swap happens, every pane wakes up on the

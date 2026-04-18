@@ -18,6 +18,13 @@ class Account(Base):
     # (network, DNS, 5xx, timeouts, active-account 401) never populate this
     # column — they are cached in-memory only.
     stale_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Persisted vault usage snapshot — seeded into cache on startup.
+    # Columns store wall-clock epoch (time.time()) for cross-restart persistence.
+    last_five_hour_resets_at: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_five_hour_utilization: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    last_seven_day_resets_at: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_seven_day_utilization: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    last_usage_probed_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

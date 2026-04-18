@@ -2,15 +2,22 @@
 Anthropic API helpers.
 
 probe_usage()  — POST a minimal Haiku message and read rate-limit
-                 utilization from the response headers.  This is the
-                 correct approach: /api/oauth/usage is rate-limited to
-                 ~5 requests per access token and must not be used for
-                 periodic polling.
+                 utilization from the response headers.  Used for the
+                 active account on a 15 s cadence.
+
+fetch_usage()  — GET the read-only /api/oauth/usage endpoint.  Does NOT
+                 trigger inference windows.  Used for vault accounts on
+                 a 10+ min cadence.  Safe at 180 s+ intervals per token
+                 with the correct User-Agent header.
 """
 
+import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from ..config import settings
 
@@ -102,6 +109,7 @@ def is_terminal_oauth_error(err: httpx.HTTPStatusError) -> bool:
 
 MESSAGES_URL = settings.anthropic_messages_url
 REFRESH_URL = settings.anthropic_refresh_url
+USAGE_URL = settings.anthropic_usage_url
 
 # Canonical Claude Code OAuth client_id.  Public identifier (not a secret),
 # used by every open-source Claude-multi-account tool (ccflare, ccNexus,
@@ -115,10 +123,14 @@ REFRESH_URL = settings.anthropic_refresh_url
 _CLAUDE_CODE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 # Headers that activate the unified rate-limit response headers
-_HEADERS = {
+_BASE_HEADERS = {
     "User-Agent": "claude-code/2.1.104",
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
+}
+
+_POST_HEADERS = {
+    **_BASE_HEADERS,
     "Content-Type": "application/json",
 }
 
@@ -195,13 +207,79 @@ async def probe_usage(access_token: str) -> dict:
 
     Raises httpx.HTTPStatusError on 4xx/5xx so the caller can handle it.
     """
-    headers = {**_HEADERS, "Authorization": f"Bearer {access_token}"}
+    headers = {**_POST_HEADERS, "Authorization": f"Bearer {access_token}"}
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(MESSAGES_URL, headers=headers, json=_PROBE_BODY)
         resp.raise_for_status()
 
     return parse_rate_limit_headers(resp.headers)
+
+
+def _normalize_usage_body(body: dict) -> dict:
+    """Normalize /api/oauth/usage JSON body to the internal cache shape.
+
+    The endpoint returns ISO 8601 timestamps for resets_at; we convert
+    to Unix epoch integers for consistency with the header-based path.
+    Utilization is already 0-100 (no multiplication needed).
+    """
+    result: dict = {}
+
+    for key in ("five_hour", "seven_day"):
+        window = body.get(key)
+        if not isinstance(window, dict):
+            continue
+        util = window.get("utilization")
+        resets_raw = window.get("resets_at")
+        resets_epoch = None
+        if isinstance(resets_raw, str):
+            try:
+                parsed = datetime.fromisoformat(resets_raw.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                resets_epoch = int(parsed.timestamp())
+            except (ValueError, TypeError):
+                pass
+        elif isinstance(resets_raw, (int, float)):
+            resets_epoch = int(resets_raw)
+        entry: dict = {}
+        if util is not None:
+            entry["utilization"] = round(float(util), 2)
+        if resets_epoch is not None:
+            entry["resets_at"] = resets_epoch
+        if entry:
+            result[key] = entry
+
+    if not result and body:
+        logger.warning(
+            "fetch_usage response had keys %s but no recognized windows; "
+            "Anthropic may have changed the response schema",
+            list(body.keys()),
+        )
+
+    return result
+
+
+async def fetch_usage(access_token: str) -> dict:
+    """GET /api/oauth/usage — read-only usage data for vault accounts.
+
+    Unlike probe_usage (POST /v1/messages), this endpoint does NOT
+    trigger or maintain 5-hour inference windows.  Safe for periodic
+    vault monitoring at 180 s+ intervals with the correct User-Agent.
+
+    Returns the same nested structure as probe_usage:
+        {"five_hour": {"utilization": 0-100, "resets_at": <unix epoch>}, ...}
+
+    Raises httpx.HTTPStatusError on 4xx/5xx.
+    """
+    headers = {**_BASE_HEADERS, "Authorization": f"Bearer {access_token}"}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(USAGE_URL, headers=headers)
+        resp.raise_for_status()
+        body = resp.json()
+
+    return _normalize_usage_body(body)
 
 
 async def refresh_access_token(refresh_token: str) -> dict:

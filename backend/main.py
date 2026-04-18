@@ -1,8 +1,12 @@
 import asyncio
+import fcntl
 import json
 import logging
 import os
+import sys
+import time
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -14,6 +18,8 @@ from .config import settings as cfg
 from .database import init_db, AsyncSessionLocal
 from .routers import accounts, service, settings
 from .services import account_service as ac
+from .cache import cache
+from .models import Account
 from .services import credential_provider as cp
 from .services import login_session_service as ls
 from .services import settings_service as ss
@@ -22,6 +28,8 @@ from .ws import ws_manager
 
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -90,8 +98,39 @@ async def _poll_loop(idle_interval: int) -> None:
             logger.exception("poll_usage_and_switch raised unexpectedly: %s", exc)
 
 
+_ALLOWED_API_HOSTS = frozenset({
+    "api.anthropic.com",
+    "platform.claude.com",
+    "console.anthropic.com",
+})
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    for url_name in ("anthropic_messages_url", "anthropic_refresh_url", "anthropic_usage_url"):
+        url = getattr(cfg, url_name)
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_API_HOSTS:
+            logger.critical(
+                "BLOCKED: %s=%s points to non-Anthropic host %s. "
+                "This would send OAuth tokens to an untrusted server. Exiting.",
+                url_name, url, parsed.hostname,
+            )
+            sys.exit(1)
+
+    lock_path = os.path.join(os.path.expanduser("~"), ".ccswitch.lock")
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        logger.critical(
+            "Another CCSwitch instance is already running (lock: %s). Exiting.",
+            lock_path,
+        )
+        lock_file.close()
+        sys.exit(1)
+    app.state._instance_lock_file = lock_file
+
     await init_db()
 
     async with AsyncSessionLocal() as db:
@@ -110,6 +149,30 @@ async def lifespan(app: FastAPI):
     # session registry is gone so anything on disk is by definition
     # abandoned.
     await asyncio.to_thread(ls.cleanup_orphan_login_artifacts)
+
+    # Seed in-memory usage cache from DB so the dashboard shows last-known
+    # rate-limit bars immediately (before the first poll cycle completes).
+    async with AsyncSessionLocal() as seed_db:
+        from sqlalchemy import select as _select
+        result = await seed_db.execute(_select(Account))
+        now_epoch = int(time.time())
+        seeded = 0
+        for acct in result.scalars().all():
+            if acct.last_five_hour_resets_at is None:
+                continue
+            five_hour: dict = {"utilization": 0, "resets_at": acct.last_five_hour_resets_at}
+            if acct.last_five_hour_resets_at >= now_epoch:
+                five_hour["utilization"] = acct.last_five_hour_utilization or 0
+            usage: dict = {"five_hour": five_hour}
+            if acct.last_seven_day_resets_at is not None:
+                if acct.last_seven_day_resets_at < now_epoch:
+                    usage["seven_day"] = {"utilization": 0, "resets_at": acct.last_seven_day_resets_at}
+                else:
+                    usage["seven_day"] = {"utilization": acct.last_seven_day_utilization or 0, "resets_at": acct.last_seven_day_resets_at}
+            await cache.seed_usage(acct.email, usage)
+            seeded += 1
+        if seeded:
+            logger.info("Seeded usage cache from DB for %d account(s)", seeded)
 
     idle_interval = await _get_idle_interval()
     logger.info(
@@ -135,6 +198,7 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
+    lock_file.close()
     logger.info("Background tasks stopped")
 
 

@@ -138,7 +138,7 @@ class LoginSessionCaptureOut(BaseModel):
 
 
 class LoginSessionSendRequest(BaseModel):
-    text: str
+    text: str = Field(max_length=256)
 
 
 # ── Service toggle ─────────────────────────────────────────────────────────────
