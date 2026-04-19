@@ -1214,6 +1214,9 @@ async def test_process_vault_window_expired_includes_seven_day(monkeypatch):
         lambda email, active_email=None: _fresh_creds(),
     )
 
+    # Put us inside the throttle window so the synthesised-from-DB path fires.
+    bg._last_vault_poll_at["vault@example.com"] = time.time()
+
     entry, stale, db_updates = await bg._process_vault_account(
         account, "other@example.com", _StubWS(), _StubDB(),
     )

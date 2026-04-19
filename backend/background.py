@@ -324,6 +324,24 @@ def forget_account_state(email: str) -> None:
     _last_vault_poll_at.pop(email, None)
 
 
+def _synthesise_vault_usage(account: "Account", now_wall: float) -> dict:
+    """Build a usage dict from stored DB columns for throttled cycles."""
+    fh = account.last_five_hour_resets_at
+    usage: dict = {}
+    if fh is not None:
+        usage["five_hour"] = {
+            "utilization": 0 if fh < now_wall else (account.last_five_hour_utilization or 0),
+            "resets_at": fh,
+        }
+    sd = account.last_seven_day_resets_at
+    if sd is not None:
+        usage["seven_day"] = {
+            "utilization": 0 if sd < now_wall else (account.last_seven_day_utilization or 0),
+            "resets_at": sd,
+        }
+    return usage
+
+
 async def _process_vault_account(
     account: "Account",
     active_email: str,
@@ -346,53 +364,25 @@ async def _process_vault_account(
     email = account.email
 
     try:
-        # ── Window-expired shortcut ──────────────────────────────────────
-        # If the stored 5-hour window has already expired, synthesise a
-        # 0 % cache entry without hitting the API.  The next real poll
-        # will refresh the data once the throttle interval elapses.
+        # ── Throttle check (FIRST) ───────────────────────────────────────
+        # Must run BEFORE the window-expired shortcut.  When the throttle
+        # is still fresh, return cached data (which may be synthesised 0%
+        # from a previous cycle).  When it expires, ALWAYS call the API —
+        # even for accounts whose window was previously expired — so we
+        # discover new windows opened by external usage.
         now_wall = time.time()
-        if (
-            account.last_five_hour_resets_at is not None
-            and account.last_five_hour_resets_at < now_wall
-        ):
-            usage: dict = {
-                "five_hour": {"utilization": 0, "resets_at": account.last_five_hour_resets_at},
-            }
-            # Always include seven_day data from stored columns when available,
-            # regardless of whether the five_hour window is the only one expired.
-            if account.last_seven_day_resets_at is not None:
-                if account.last_seven_day_resets_at < now_wall:
-                    usage["seven_day"] = {
-                        "utilization": 0,
-                        "resets_at": account.last_seven_day_resets_at,
-                    }
-                else:
-                    usage["seven_day"] = {
-                        "utilization": account.last_seven_day_utilization or 0,
-                        "resets_at": account.last_seven_day_resets_at,
-                    }
-            await cache.set_usage(email, usage)
-            _last_vault_poll_at[email] = time.time()
-            token_info = await cache.get_token_info_async(email) or {}
-            flat = build_usage(usage, token_info)
-            flat_dict = flat.model_dump() if flat else {}
-            return {
-                "id": account.id,
-                "email": email,
-                "usage": flat_dict,
-                "error": None,
-            }, account.stale_reason, None
-
-        # ── Throttle check ───────────────────────────────────────────────
-        now_wall_throttle = time.time()
         last = _last_vault_poll_at.get(email, 0.0)
         vault_interval = max(settings.poll_interval_vault, settings.poll_interval_vault_min)
-        if now_wall_throttle - last < vault_interval:
-            # Cached data is fresh enough — return last-known values.
+        if now_wall - last < vault_interval:
+            # Still within throttle — return cached or synthesised data.
             cached = await cache.get_usage_async(email)
+            if not cached and account.last_five_hour_resets_at is not None:
+                # No cache yet (cold start mid-cycle) — synthesise from DB.
+                cached = _synthesise_vault_usage(account, now_wall)
+                await cache.set_usage(email, cached)
             token_info = await cache.get_token_info_async(email) or {}
             try:
-                flat = build_usage(cached, token_info)
+                flat = build_usage(cached or {}, token_info)
                 flat_dict = flat.model_dump() if flat else {}
             except Exception as _bu_err:
                 logger.warning("build_usage failed for %s: %s", email, _bu_err)
@@ -401,7 +391,7 @@ async def _process_vault_account(
                 "id": account.id,
                 "email": email,
                 "usage": flat_dict,
-                "error": cached.get("error"),
+                "error": (cached or {}).get("error"),
             }, account.stale_reason, None
 
         # ── Read vault credentials ───────────────────────────────────────
