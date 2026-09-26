@@ -17,7 +17,7 @@ dependencies = [
 dev = [
     "pytest==8.3.3",
     "pytest-asyncio==0.24.0",
-    "anyio==4.6.2",
+    "anyio==4.14.2",
 ]
 
 [tool.pytest.ini_options]
